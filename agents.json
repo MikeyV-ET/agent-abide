@@ -1,7 +1,7 @@
 {
   "_comment": "Agent configuration for asdaaas utilities. Edit this file to add/remove agents. short_id is auto-derived from last 4 chars of session UUID if omitted.",
   "settings": {
-    "asdaaas_dir": "/home/eric/projects/mikeyv-infra/live/comms",
+    "asdaaas_dir": "/home/eric/projects/agent-abide-dev",
     "agents_dir": "/home/eric/agents",
     "log_dir": "/tmp",
     "running_agents_file": "/home/eric/asdaaas/running_agents.json",

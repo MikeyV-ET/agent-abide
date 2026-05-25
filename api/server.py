@@ -108,13 +108,16 @@ async def websocket_tail(ws: WebSocket, name: str):
 
     # Default: start from end of file (only see new messages)
     start_id = -1
+    raw_mode = False
 
-    # Check if client sends a starting point
+    # Check if client sends a starting point and/or raw mode
     try:
         init = await asyncio.wait_for(ws.receive_text(), timeout=1.0)
         data = json.loads(init)
         if "after_id" in data:
             start_id = data["after_id"]
+        if data.get("raw"):
+            raw_mode = True
     except (asyncio.TimeoutError, json.JSONDecodeError, WebSocketDisconnect):
         pass
 
@@ -122,7 +125,7 @@ async def websocket_tail(ws: WebSocket, name: str):
 
     try:
         while True:
-            new_msgs = tailer.poll()
+            new_msgs = tailer.poll(raw=raw_mode)
             if new_msgs:
                 await ws.send_text(json.dumps(new_msgs))
             await asyncio.sleep(0.5)

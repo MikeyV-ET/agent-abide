@@ -244,8 +244,13 @@ class FileTailer:
             self.byte_offset = f.tell()
             self.next_id = msg_count
 
-    def poll(self) -> list[dict]:
-        """Read new messages since last poll. Returns list of normalized dicts."""
+    def poll(self, raw: bool = False) -> list[dict]:
+        """Read new messages since last poll.
+
+        Args:
+            raw: If True, return parsed JSON objects as-is (no normalization,
+                 no filtering). If False, return normalized dicts.
+        """
         try:
             file_size = self.path.stat().st_size
         except FileNotFoundError:
@@ -265,10 +270,20 @@ class FileTailer:
                 line = line.strip()
                 if not line:
                     continue
-                msg = self.parser(line)
-                if msg is not None:
-                    msg["id"] = self.next_id
-                    new_msgs.append(msg)
-                    self.next_id += 1
+
+                if raw:
+                    try:
+                        obj = json.loads(line)
+                        obj["_tail_id"] = self.next_id
+                        new_msgs.append(obj)
+                        self.next_id += 1
+                    except json.JSONDecodeError:
+                        continue
+                else:
+                    msg = self.parser(line)
+                    if msg is not None:
+                        msg["id"] = self.next_id
+                        new_msgs.append(msg)
+                        self.next_id += 1
 
         return new_msgs

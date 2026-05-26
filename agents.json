@@ -48,7 +48,7 @@
       "permission_mode": "auto"
     },
     "Astro": {
-      "session": "",
+      "session": "2287f73e-06fc-4c59-b163-c24575564b0b",
       "home": "/home/eric/agents/Astro",
       "backend": "claude",
       "yolo": true

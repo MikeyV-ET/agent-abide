@@ -108,6 +108,7 @@ class ClaudeBackend(AgentBackend):
         on_meta: Optional[Callable[[int], None]] = None,
         keepalive_timeout: float = 30.0,
         max_wall_clock: float = 600.0,
+        cancel_event=None,
     ) -> ResponseResult:
         speech_chunks = []
         thought_chunks = []

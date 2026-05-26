@@ -12,7 +12,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TUI="$SCRIPT_DIR/asdaaas_tui.py"
+TUI="$SCRIPT_DIR/../tui/asdaaas_tui.py"
 
 if [ $# -eq 0 ] || [[ ! " $* " =~ " --agent " ]] && [[ ! " $* " =~ " -a " ]]; then
     echo "Usage: bash launch_tui.sh --agent <name> [options]"

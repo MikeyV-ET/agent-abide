@@ -29,6 +29,7 @@ import time
 import statistics
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 import adapter_api
 
 ADAPTER_NAME = "stress_test"

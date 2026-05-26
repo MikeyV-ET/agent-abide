@@ -55,11 +55,11 @@
     }
   },
   "adapters": {
-    "context": {"script": "context_adapter.py", "log": "context_adapter.log"},
-    "session": {"script": "session_adapter.py", "log": "session_adapter.log"},
-    "heartbeat": {"script": "heartbeat_adapter.py", "log": "heartbeat_adapter.log"},
-    "irc": {"script": "launch_irc_adapter.sh", "log": "irc_adapter.log"},
-    "localmail": {"script": "localmail_adapter.py", "log": "localmail_adapter.log"},
-    "remind": {"script": "launch_remind.sh", "log": "remind_adapter.log"}
+    "context": {"script": "adapters/context_adapter.py", "log": "context_adapter.log"},
+    "session": {"script": "adapters/session_adapter.py", "log": "session_adapter.log"},
+    "heartbeat": {"script": "adapters/heartbeat_adapter.py", "log": "heartbeat_adapter.log"},
+    "irc": {"script": "scripts/launch_irc_adapter.sh", "log": "irc_adapter.log"},
+    "localmail": {"script": "adapters/localmail_adapter.py", "log": "localmail_adapter.log"},
+    "remind": {"script": "scripts/launch_remind.sh", "log": "remind_adapter.log"}
   }
 }

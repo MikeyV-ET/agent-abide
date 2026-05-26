@@ -23,7 +23,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG="$SCRIPT_DIR/agents.json"
+CONFIG="$SCRIPT_DIR/../agents.json"
 
 if [ ! -f "$CONFIG" ]; then
     echo "FAIL: Config file not found: $CONFIG"
@@ -35,7 +35,7 @@ ASDAAAS_DIR=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['se
 LOG_DIR=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings']['log_dir'])")
 RUNNING_AGENTS_FILE=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings']['running_agents_file'])")
 DEBUG=$(python3 -c "import json; c=json.load(open('$CONFIG')); print('1' if c['settings'].get('debug', False) else '')")
-ASDAAAS="$ASDAAAS_DIR/asdaaas.py"
+ASDAAAS="$ASDAAAS_DIR/core/asdaaas.py"
 GROK_BINARY=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings'].get('grok_binary', ''))" 2>/dev/null || true)
 
 TIMEOUT_GRACEFUL=30

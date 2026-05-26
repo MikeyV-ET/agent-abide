@@ -13,7 +13,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG="$SCRIPT_DIR/agents.json"
+CONFIG="$SCRIPT_DIR/../agents.json"
 
 if [ ! -f "$CONFIG" ]; then
     echo "ERROR: Config file not found: $CONFIG"
@@ -27,7 +27,7 @@ LOG_DIR=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settin
 RUNNING_AGENTS_FILE=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings']['running_agents_file'])")
 DEBUG=$(python3 -c "import json; c=json.load(open('$CONFIG')); print('1' if c['settings'].get('debug', False) else '')")
 GROK_BINARY=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings'].get('grok_binary', ''))")
-ASDAAAS="$ASDAAAS_DIR/asdaaas.py"
+ASDAAAS="$ASDAAAS_DIR/core/asdaaas.py"
 
 # Determine which agents to launch
 if [ $# -gt 0 ]; then
@@ -112,15 +112,15 @@ if [ "$STOP_ALL" = true ]; then
     echo "=== Starting adapters ==="
 
     # Context adapter -- token threshold doorbells (45/65/80/88%)
-    setsid nohup python3 -u "$ASDAAAS_DIR/context_adapter.py" --agents "$AGENT_NAMES_CSV" > "$LOG_DIR/context_adapter.log" 2>&1 &
+    setsid nohup python3 -u "$ASDAAAS_DIR/adapters/context_adapter.py" --agents "$AGENT_NAMES_CSV" > "$LOG_DIR/context_adapter.log" 2>&1 &
     echo "Context adapter: PID $!"
 
     # Session adapter -- compact/status commands
-    setsid nohup python3 -u "$ASDAAAS_DIR/session_adapter.py" --agents "$AGENT_NAMES_CSV" > "$LOG_DIR/session_adapter.log" 2>&1 &
+    setsid nohup python3 -u "$ASDAAAS_DIR/adapters/session_adapter.py" --agents "$AGENT_NAMES_CSV" > "$LOG_DIR/session_adapter.log" 2>&1 &
     echo "Session adapter: PID $!"
 
     # Heartbeat adapter -- idle nudges
-    setsid nohup python3 -u "$ASDAAAS_DIR/heartbeat_adapter.py" --agents "$AGENT_NAMES_CSV" > "$LOG_DIR/heartbeat_adapter.log" 2>&1 &
+    setsid nohup python3 -u "$ASDAAAS_DIR/adapters/heartbeat_adapter.py" --agents "$AGENT_NAMES_CSV" > "$LOG_DIR/heartbeat_adapter.log" 2>&1 &
     echo "Heartbeat adapter: PID $!"
 fi
 

@@ -163,31 +163,45 @@ stage_config() {
         return 1
     fi
 
-    # Check grok binary
-    local bin="${GROK_BINARY:-$(which grok 2>/dev/null || true)}"
-    if [ -n "$bin" ] && [ ! -x "$bin" ]; then
-        echo "  FAIL: grok binary not executable: $bin"
-        return 1
-    fi
-    if [ -z "$bin" ]; then
-        echo "  FAIL: No grok binary configured and none in PATH"
-        return 1
-    fi
+    # Detect backend type
+    local backend
+    backend=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent'].get('backend', 'grok'))")
+    AGENT_BACKEND="$backend"
 
-    # Check session directory exists (skip if no session = new session)
-    if [ -n "$session" ]; then
-        local encoded_home
-        encoded_home=$(python3 -c "print('$home'.replace('/', '%2F'))")
-        local session_dir="$HOME/.grok/sessions/$encoded_home/$session"
-        if [ ! -d "$session_dir" ]; then
-            echo "  WARN: Session directory does not exist: $session_dir"
-            echo "        (Will be created on first run, but session/load will fail)"
+    if [ "$backend" = "claude" ]; then
+        local bin
+        bin=$(which claude 2>/dev/null || true)
+        if [ -z "$bin" ]; then
+            echo "  FAIL: Claude Code CLI not found in PATH"
+            return 1
         fi
+        if [ -z "$session" ]; then
+            echo "  INFO: No session configured — Claude will create new session"
+        fi
+        echo "  OK   Config valid (home=$home, backend=claude, binary=$bin)"
     else
-        echo "  INFO: No session configured — will create new session"
+        local bin="${GROK_BINARY:-$(which grok 2>/dev/null || true)}"
+        if [ -n "$bin" ] && [ ! -x "$bin" ]; then
+            echo "  FAIL: grok binary not executable: $bin"
+            return 1
+        fi
+        if [ -z "$bin" ]; then
+            echo "  FAIL: No grok binary configured and none in PATH"
+            return 1
+        fi
+        if [ -n "$session" ]; then
+            local encoded_home
+            encoded_home=$(python3 -c "print('$home'.replace('/', '%2F'))")
+            local session_dir="$HOME/.grok/sessions/$encoded_home/$session"
+            if [ ! -d "$session_dir" ]; then
+                echo "  WARN: Session directory does not exist: $session_dir"
+                echo "        (Will be created on first run, but session/load will fail)"
+            fi
+        else
+            echo "  INFO: No session configured — will create new session"
+        fi
+        echo "  OK   Config valid (home=$home, backend=grok, binary=$bin)"
     fi
-
-    echo "  OK   Config valid (home=$home, binary=$bin)"
 }
 
 # ---- Stage 2: Clean stale commands ----
@@ -382,20 +396,27 @@ stage_backend() {
     local agent="$1"
     echo "  [5/8] Backend..."
 
-    if ! wait_for_log "$AGENT_LOG" "Starting backend" 15; then
-        echo "  FAIL: 'Starting backend' not seen in log after 15s"
-        show_log_tail "$AGENT_LOG"
-        return 1
+    if [ "$AGENT_BACKEND" = "claude" ]; then
+        if ! wait_for_log "$AGENT_LOG" "Backend: claude" 15; then
+            echo "  FAIL: 'Backend: claude' not seen in log after 15s"
+            show_log_tail "$AGENT_LOG"
+            return 1
+        fi
+    else
+        if ! wait_for_log "$AGENT_LOG" "Starting backend" 15; then
+            echo "  FAIL: 'Starting backend' not seen in log after 15s"
+            show_log_tail "$AGENT_LOG"
+            return 1
+        fi
     fi
 
-    # Check process still alive
     if ! kill -0 $AGENT_PID 2>/dev/null; then
         echo "  FAIL: Process died during backend startup"
         show_log_tail "$AGENT_LOG"
         return 1
     fi
 
-    echo "  OK   Backend starting"
+    echo "  OK   Backend starting ($AGENT_BACKEND)"
 }
 
 # ---- Stage 6: Session loaded ----
@@ -403,20 +424,29 @@ stage_session() {
     local agent="$1"
     echo "  [6/8] Session..."
 
-    if ! wait_for_log "$AGENT_LOG" "Session:" 30; then
-        echo "  FAIL: 'Session:' not seen in log after 30s"
-        echo "        Possible causes: corrupted session, binary auth failure, network issue"
-        show_log_tail "$AGENT_LOG"
-        return 1
+    if [ "$AGENT_BACKEND" = "claude" ]; then
+        # Claude creates session on first prompt, not at startup
+        sleep 2
+        if ! kill -0 $AGENT_PID 2>/dev/null; then
+            echo "  FAIL: Process died during session setup"
+            show_log_tail "$AGENT_LOG"
+            return 1
+        fi
+        echo "  OK   Claude session (created on first prompt)"
+    else
+        if ! wait_for_log "$AGENT_LOG" "Session:" 30; then
+            echo "  FAIL: 'Session:' not seen in log after 30s"
+            echo "        Possible causes: corrupted session, binary auth failure, network issue"
+            show_log_tail "$AGENT_LOG"
+            return 1
+        fi
+        if ! kill -0 $AGENT_PID 2>/dev/null; then
+            echo "  FAIL: Process died during session load"
+            show_log_tail "$AGENT_LOG"
+            return 1
+        fi
+        echo "  OK   Session loaded"
     fi
-
-    if ! kill -0 $AGENT_PID 2>/dev/null; then
-        echo "  FAIL: Process died during session load"
-        show_log_tail "$AGENT_LOG"
-        return 1
-    fi
-
-    echo "  OK   Session loaded"
 }
 
 # ---- Stage 7: Ready ----

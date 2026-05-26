@@ -1856,8 +1856,12 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             backend = ClaudeBackend()
             print(f"[asdaaas] Backend: claude")
         else:
+            grok_bin = os.environ.get("ASDAAAS_GROK_BINARY")
             try:
-                backend = GrokBackend(grok_sessions_dir=config.grok_sessions_dir)
+                kwargs = {"grok_sessions_dir": config.grok_sessions_dir}
+                if grok_bin:
+                    kwargs["grok_binary"] = grok_bin
+                backend = GrokBackend(**kwargs)
             except Exception:
                 backend = GrokBackend()
             print(f"[asdaaas] Backend: grok")
@@ -2676,13 +2680,15 @@ if __name__ == "__main__":
                         help="Path to grok binary (default: 'grok' from PATH)")
     args = parser.parse_args()
 
-    # Create backend based on CLI argument
+    # Create backend — let main() read from config unless CLI explicitly overrides
     backend_instance = None
     if args.backend == "claude":
         from claude_backend import ClaudeBackend
         backend_instance = ClaudeBackend(api_key=args.api_key)
-    elif args.grok_binary:
-        backend_instance = GrokBackend(grok_binary=args.grok_binary)
+
+    # Pass grok_binary so main() can use it when creating GrokBackend from config
+    if not backend_instance and args.grok_binary:
+        os.environ["ASDAAAS_GROK_BINARY"] = args.grok_binary
 
     try:
         asyncio.run(main(args.agent, args.session, args.cwd, args.model, backend=backend_instance))

@@ -266,6 +266,8 @@ def get_code_version():
 
 
 _current_model_id = "unknown"
+_current_session_id = None
+_current_backend_type = "grok"
 
 def write_health(agent_name, status, detail="", total_tokens=0, context_window=CONTEXT_WINDOW):
     agent_dir(agent_name).mkdir(parents=True, exist_ok=True)
@@ -280,6 +282,8 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
         "last_activity": time.time(),
         "code_version": get_code_version(),
         "model": _current_model_id,
+        "session_id": _current_session_id,
+        "backend": _current_backend_type,
     }
     path = agent_dir(agent_name) / "health.json"
     tmp = str(path) + ".tmp"
@@ -1965,9 +1969,11 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     last_response_ts = None  # epoch timestamp of agent's last response completion
     last_was_foreground = True  # was the most recent agent activity a foreground (in-room) message?
 
-    # Expose model ID to module-level for context_left_tag
-    global _current_model_id
+    # Expose model/session/backend to module-level for health writes
+    global _current_model_id, _current_session_id, _current_backend_type
     _current_model_id = backend.model_id
+    _current_session_id = sid
+    _current_backend_type = config.agent_backend(agent_name) if config else "grok"
     print(f"[asdaaas] Model: {_current_model_id}")
 
     # Throttled callback for real-time health updates during long responses.

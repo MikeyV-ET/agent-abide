@@ -77,8 +77,17 @@ class SessionLocator:
         home = cfg.get("home", "")
 
         if not session_id:
-            # No active session
-            return None
+            # Try health.json — asdaaas writes session_id there at runtime
+            health_path = Path(home) / "asdaaas" / "health.json"
+            if health_path.exists():
+                try:
+                    with open(health_path) as f:
+                        health = json.load(f)
+                    session_id = health.get("session_id", "")
+                except (json.JSONDecodeError, OSError):
+                    pass
+            if not session_id:
+                return None
 
         if backend == "grok":
             return self._grok_session_path(home, session_id)

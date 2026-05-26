@@ -79,6 +79,21 @@ class ClaudeBackend(AgentBackend):
             env=env,
         )
 
+        # Wait for process to be ready (not crash immediately)
+        await asyncio.sleep(1.0)
+        if self._proc.returncode is not None:
+            stderr_out = ""
+            if self._proc.stderr:
+                try:
+                    stderr_out = (await asyncio.wait_for(
+                        self._proc.stderr.read(2000), timeout=1.0
+                    )).decode("utf-8", errors="replace")
+                except (asyncio.TimeoutError, Exception):
+                    pass
+            raise RuntimeError(
+                f"Claude process exited immediately (code {self._proc.returncode}): {stderr_out}"
+            )
+
         # With --input-format stream-json, the init frame arrives after the
         # first user message is sent. We extract session/model lazily in
         # collect_response when we see the system init frame.
@@ -90,6 +105,12 @@ class ClaudeBackend(AgentBackend):
     async def send_prompt(self, text: str) -> Any:
         if not self._proc or not self._proc.stdin:
             raise RuntimeError("Claude backend not started")
+
+        # Check process is still alive before writing
+        if self._proc.returncode is not None:
+            raise RuntimeError(
+                f"Claude process already exited (code {self._proc.returncode})"
+            )
 
         # Claude Code stream-json input format
         msg = json.dumps({

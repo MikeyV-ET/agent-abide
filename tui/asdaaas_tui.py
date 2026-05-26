@@ -3239,13 +3239,14 @@ def main():
     Config.tui_inbox().mkdir(parents=True, exist_ok=True)
     Config.tui_outbox().mkdir(parents=True, exist_ok=True)
 
-    # Check for updates file
-    updates = Config.find_updates_file()
-    if updates:
-        print(f"Found updates at: {updates}")
-    else:
-        print(f"Warning: No updates.jsonl found for agent {Config.AGENT_NAME}")
-        print("The TUI will wait for the file to appear...")
+    # Check for updates file (only needed when not using API)
+    if not Config.API_URL:
+        updates = Config.find_updates_file()
+        if updates:
+            print(f"Found updates at: {updates}")
+        else:
+            print(f"Warning: No updates.jsonl found for agent {Config.AGENT_NAME}")
+            print("The TUI will wait for the file to appear...")
 
     # Discover agents from agents.json (authoritative) or fall back to filesystem
     agents_home = Path(Config.AGENTS_HOME)

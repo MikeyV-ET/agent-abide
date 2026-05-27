@@ -27,6 +27,7 @@ Usage:
 """
 
 import asyncio
+import datetime
 import json
 import os
 import secrets
@@ -290,6 +291,34 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
     with open(tmp, "w") as f:
         json.dump(health, f)
     os.rename(tmp, str(path))
+
+
+# ---------------------------------------------------------------------------
+# Universal conversation log
+# ---------------------------------------------------------------------------
+# Single JSONL file per agent. Backend-agnostic. Frontends read only this.
+# Schema: {"ts": ISO8601, "role": "user"|"assistant"|"thinking"|"system",
+#          "content": str, "seq": int}
+
+_conv_seq = 0
+
+def write_conversation(agent_name, role, content):
+    """Append one line to ~/agents/<Name>/asdaaas/conversation.jsonl."""
+    global _conv_seq
+    if not content or not content.strip():
+        return
+    conv_dir = agent_dir(agent_name)
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    path = conv_dir / "conversation.jsonl"
+    entry = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "role": role,
+        "content": content.strip(),
+        "seq": _conv_seq,
+    }
+    _conv_seq += 1
+    with open(path, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 def write_compaction_state(agent_name, phase, request_id=None, tokens_before=None, tokens_after=None):
@@ -1969,6 +1998,17 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     last_response_ts = None  # epoch timestamp of agent's last response completion
     last_was_foreground = True  # was the most recent agent activity a foreground (in-room) message?
 
+    # Initialize conversation.jsonl seq counter from existing file
+    global _conv_seq
+    conv_path = agent_dir(agent_name) / "conversation.jsonl"
+    if conv_path.exists():
+        with open(conv_path) as f:
+            _conv_seq = sum(1 for _ in f)
+        print(f"[asdaaas] Conversation log: {_conv_seq} existing entries")
+    else:
+        _conv_seq = 0
+        print(f"[asdaaas] Conversation log: new file")
+
     # Expose model/session/backend to module-level for health writes
     global _current_model_id, _current_session_id, _current_backend_type
     _current_model_id = backend.model_id
@@ -2467,6 +2507,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                              f"processing {'coalesced' if has_bells and has_msgs else 'doorbells' if has_bells else 'prompt'}"
                              f" ({len(prompt_parts)} items)", total_tokens, context_window)
                 msg_handle = await backend.send_prompt(prompt_text)
+                write_conversation(agent_name, "user", prompt_text)
 
                 # Stream intermediate speech to thoughts channel
                 gaze = read_gaze(agent_name)
@@ -2489,6 +2530,9 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                 if result.speech.strip():
                     consecutive_empty_doorbell = 0
+                    write_conversation(agent_name, "assistant", result.speech)
+                    if result.thoughts.strip():
+                        write_conversation(agent_name, "thinking", result.thoughts)
                     write_to_outbox(agent_name, result.speech.strip(), gaze.get("speech"), "speech")
                     timer.mark("outbox_done")
                     if result.thoughts.strip() and gaze.get("thoughts") and result.thoughts.strip() != result.speech.strip():

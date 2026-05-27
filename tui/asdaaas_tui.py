@@ -1598,9 +1598,17 @@ class AsdaaasTUI(App):
             self._poll_status, thread=True, name="status_poller"
         )
         # Start updates tailer for each agent
+        # conversation.jsonl (universal, written by asdaaas) preferred for claude agents
         use_api = Config.API_URL is not None
         for agent in self._agents:
-            if use_api:
+            state = self._agent_state.get(agent, {})
+            convo = self._find_conversation_jsonl(agent)
+            if convo or state.get("backend") == "claude":
+                self.run_worker(
+                    lambda a=agent: self._tail_conversation_jsonl(a),
+                    thread=True, name=f"updates_{agent}"
+                )
+            elif use_api:
                 self.run_worker(
                     lambda a=agent: self._tail_via_api(a),
                     thread=True, name=f"updates_{agent}"
@@ -2436,6 +2444,122 @@ Type anything else to send a message to the agent.
                 pass
 
             time.sleep(2)
+
+    def _find_conversation_jsonl(self, agent_name: str) -> Optional[Path]:
+        """Find conversation.jsonl for an agent (written by asdaaas)."""
+        convo = Path(Config.AGENTS_HOME) / agent_name / "asdaaas" / "conversation.jsonl"
+        return convo if convo.exists() else None
+
+    def _convo_to_event(self, entry: dict) -> Optional[dict]:
+        """Convert a conversation.jsonl entry to updates.jsonl event format."""
+        role = entry.get("role", "")
+        content = entry.get("content", "")
+        ts = entry.get("ts", "")
+        if not content:
+            return None
+        if role == "assistant":
+            session_update = "agent_message_chunk"
+        elif role == "user":
+            session_update = "user_message_chunk"
+        elif role == "thinking":
+            session_update = "agent_thought_chunk"
+        else:
+            return None
+        return {"timestamp": ts, "params": {"update": {
+            "sessionUpdate": session_update,
+            "content": {"text": content},
+        }}}
+
+    def _tail_conversation_jsonl(self, agent_name: str) -> None:
+        """Background thread: tail conversation.jsonl for an agent."""
+        worker = get_current_worker()
+        state = self._agent_state[agent_name]
+        convo_path = Path(Config.AGENTS_HOME) / agent_name / "asdaaas" / "conversation.jsonl"
+
+        while not worker.is_cancelled and not convo_path.exists():
+            time.sleep(2)
+        if worker.is_cancelled:
+            return
+
+        is_primary = (agent_name == self._agents[0])
+        tail_count = self._tail_count if is_primary else 30
+        should_replay = (is_primary and self._replay_mode) or (not is_primary)
+
+        offset = 0
+        if should_replay:
+            try:
+                with open(convo_path, "r", errors="replace") as f:
+                    all_data = f.read()
+                    offset = f.tell()
+                lines = [l for l in all_data.strip().split("\n") if l.strip()]
+                if tail_count and len(lines) > tail_count:
+                    lines = lines[-tail_count:]
+                for line in lines:
+                    try:
+                        entry = json.loads(line)
+                        event = self._convo_to_event(entry)
+                        if event:
+                            self.call_from_thread(self._finalize_current_msg_for, agent_name)
+                            self.call_from_thread(self._dispatch_event_for_agent, event, agent_name)
+                    except json.JSONDecodeError:
+                        pass
+                self.call_from_thread(self._finalize_current_msg_for, agent_name)
+                time.sleep(0.5)
+                self.call_from_thread(self._force_scroll_bottom)
+            except Exception:
+                pass
+        else:
+            try:
+                offset = convo_path.stat().st_size
+            except Exception:
+                pass
+
+        state["replay_done"] = True
+        if is_primary:
+            self._replay_done = True
+
+        while not worker.is_cancelled:
+            try:
+                current_size = convo_path.stat().st_size
+                if current_size > offset:
+                    with open(convo_path, "r", errors="replace") as f:
+                        f.seek(offset)
+                        new_data = f.read()
+                    if new_data.endswith("\n"):
+                        offset += len(new_data.encode("utf-8"))
+                        lines = new_data.strip().split("\n")
+                    else:
+                        last_nl = new_data.rfind("\n")
+                        if last_nl == -1:
+                            lines = []
+                        else:
+                            complete = new_data[:last_nl + 1]
+                            offset += len(complete.encode("utf-8"))
+                            lines = complete.strip().split("\n")
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            event = self._convo_to_event(entry)
+                            if event:
+                                self.call_from_thread(self._finalize_current_msg_for, agent_name)
+                                self.call_from_thread(self._dispatch_event_for_agent, event, agent_name)
+                        except json.JSONDecodeError:
+                            pass
+                elif current_size < offset:
+                    offset = 0
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+    def _finalize_current_msg_for(self, agent_name: str) -> None:
+        """Reset message widgets so each conversation.jsonl entry renders fresh."""
+        if agent_name == self._active_agent:
+            self._current_agent_msg = None
+            self._current_thinking = None
 
     def _find_updates_for_agent(self, agent_name: str) -> Optional[Path]:
         """Find updates.jsonl for a specific agent."""

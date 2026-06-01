@@ -1979,13 +1979,19 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     if agent_permission_mode:
         print(f"[asdaaas] Permission mode: {agent_permission_mode}")
 
+    # ---- Reasoning effort ----
+    agent_reasoning_effort = os.environ.get("ASDAAAS_REASONING_EFFORT") or config.agent_reasoning_effort(agent_name)
+    if agent_reasoning_effort:
+        print(f"[asdaaas] Reasoning effort: {agent_reasoning_effort}")
+
     # ---- Start backend (spawn, init, session, model, yolo) ----
     print(f"[asdaaas] Starting backend: {type(backend).__name__}")
     _log_startup_event(agent_name, "backend_start", "ok", type(backend).__name__)
     try:
         sid = await backend.start(agent_cwd, model=model, session_id=session_id, yolo=agent_yolo,
                                   sandbox=agent_sandbox, allow_rules=agent_allow_rules,
-                                  deny_rules=agent_deny_rules, permission_mode=agent_permission_mode)
+                                  deny_rules=agent_deny_rules, permission_mode=agent_permission_mode,
+                                  reasoning_effort=agent_reasoning_effort)
     except Exception as e:
         _log_startup_event(agent_name, "backend_start", "fail", str(e)[:200])
         raise
@@ -2728,6 +2734,9 @@ if __name__ == "__main__":
                         help="API key for claude backend (or set ANTHROPIC_API_KEY)")
     parser.add_argument("--grok-binary", default=None,
                         help="Path to grok binary (default: 'grok' from PATH)")
+    parser.add_argument("--reasoning-effort", default=None,
+                        choices=["xhigh", "high", "medium", "low"],
+                        help="Reasoning effort level (overrides agents.json)")
     args = parser.parse_args()
 
     # Create backend — let main() read from config unless CLI explicitly overrides
@@ -2739,6 +2748,10 @@ if __name__ == "__main__":
     # Pass grok_binary so main() can use it when creating GrokBackend from config
     if not backend_instance and args.grok_binary:
         os.environ["ASDAAAS_GROK_BINARY"] = args.grok_binary
+
+    # CLI reasoning-effort overrides agents.json config
+    if args.reasoning_effort:
+        os.environ["ASDAAAS_REASONING_EFFORT"] = args.reasoning_effort
 
     try:
         asyncio.run(main(args.agent, args.session, args.cwd, args.model, backend=backend_instance))

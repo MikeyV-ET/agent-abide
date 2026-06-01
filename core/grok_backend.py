@@ -241,7 +241,8 @@ class GrokBackend(AgentBackend):
                     sandbox: Optional[str] = None,
                     allow_rules: Optional[list[str]] = None,
                     deny_rules: Optional[list[str]] = None,
-                    permission_mode: Optional[str] = None) -> str:
+                    permission_mode: Optional[str] = None,
+                    reasoning_effort: Optional[str] = None) -> str:
         # Top-level grok flags go before "agent stdio"
         cmd = [self._grok_binary]
         if sandbox:
@@ -255,6 +256,8 @@ class GrokBackend(AgentBackend):
         cmd.append("agent")
         if model:
             cmd.extend(["-m", model])
+        if reasoning_effort:
+            cmd.extend(["--reasoning-effort", reasoning_effort])
         cmd.append("stdio")
 
         self._proc = await asyncio.create_subprocess_exec(

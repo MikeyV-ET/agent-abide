@@ -185,6 +185,10 @@ class AsdaaasConfig:
         """Permission mode (default, acceptEdits, auto, bypassPermissions). None = binary default."""
         return self._agents.get(agent_name, {}).get("permission_mode")
 
+    def agent_reasoning_effort(self, agent_name: str) -> Optional[str]:
+        """Reasoning effort level: xhigh, high, medium, low. None = binary default."""
+        return self._agents.get(agent_name, {}).get("reasoning_effort")
+
     def agent_backend(self, agent_name: str) -> str:
         """Backend type: 'grok' (default) or 'claude'."""
         return self._agents.get(agent_name, {}).get("backend", "grok")

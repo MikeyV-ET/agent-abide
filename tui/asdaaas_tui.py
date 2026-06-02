@@ -110,7 +110,7 @@ class Config:
         """Load and cache agents.json."""
         if not cls._agents_cfg:
             try:
-                p = Path.home() / "projects" / "mikeyv-infra" / "live" / "comms" / "agents.json"
+                p = Path.home() / "projects" / "agent-abide" / "agents.json"
                 with open(p) as f:
                     cls._agents_cfg = json.load(f)
             except Exception:

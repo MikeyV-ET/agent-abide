@@ -81,8 +81,9 @@ class AsdaaasConfig:
             settings = data["settings"]
             data["agents_home"] = settings.get("agents_dir",
                 os.path.expanduser("~/agents"))
-            data["asdaaas_dir"] = settings.get("asdaaas_system_dir",
-                os.path.expanduser("~/asdaaas"))
+            data["asdaaas_dir"] = settings.get("asdaaas_dir",
+                settings.get("asdaaas_system_dir",
+                    os.path.expanduser("~/asdaaas")))
         return data
 
     def _resolve_sessions_dir(self, explicit):

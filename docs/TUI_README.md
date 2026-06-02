@@ -107,7 +107,7 @@ The TUI reads the agent's `updates.jsonl` file directly for output and writes us
 
 ## File Locations
 
-- TUI code: `~/projects/mikeyv-infra/live/comms/asdaaas_tui.py`
-- TUI adapter: `~/projects/mikeyv-infra/live/comms/tui_adapter.py`
+- TUI code: `~/projects/agent-abide/asdaaas_tui.py`
+- TUI adapter: `~/projects/agent-abide/tui_adapter.py`
 - Agent state: `~/agents/<name>/asdaaas/`
 - Session data: `~/.grok/sessions/`

@@ -1,10 +1,10 @@
 #!/bin/bash
 # Launch the IRC adapter, detached from any session.
-# Usage: bash ~/projects/mikeyv-infra/live/comms/launch_irc_adapter.sh
+# Usage: bash ~/projects/agent-abide/launch_irc_adapter.sh
 #
 # Kills existing instance first, then starts fresh.
 
-COMMS=/home/eric/projects/mikeyv-infra/live/comms
+COMMS=/home/eric/projects/agent-abide/core
 
 echo "=== Stopping existing IRC adapter ==="
 pkill -f "irc_adapter.py" 2>/dev/null && echo "Killed IRC adapter" || echo "No IRC adapter running"

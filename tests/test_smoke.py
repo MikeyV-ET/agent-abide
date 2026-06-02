@@ -1,5 +1,5 @@
 """
-Smoke tests for agent-abide-dev project layout and startup.
+Smoke tests for agent-abide project layout and startup.
 
 These verify that entry points resolve, imports work, and servers can
 start. They catch the class of bug where moving a file breaks a

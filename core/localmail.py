@@ -26,14 +26,14 @@ Usage:
 
 Sending mail (from any agent or script):
   python3 -c "
-  import sys; sys.path.insert(0, '/home/eric/projects/mikeyv-infra/live/comms')
+  import sys; sys.path.insert(0, '/home/eric/projects/agent-abide/core')
   from localmail import send_mail
   send_mail(from_agent='Jr', to_agent='Q', text='Status update please')
   "
 
 Reading mail (for TUI agents):
   python3 -c "
-  import sys; sys.path.insert(0, '/home/eric/projects/mikeyv-infra/live/comms')
+  import sys; sys.path.insert(0, '/home/eric/projects/agent-abide/core')
   from localmail import read_mail
   for msg in read_mail('Jr'): print(f'{msg[\"from\"]}: {msg[\"text\"]}')
   "

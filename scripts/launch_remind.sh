@@ -1,10 +1,10 @@
 #!/bin/bash
 # Launch the remind adapter, detached from any session.
-# Usage: bash ~/projects/mikeyv-infra/live/comms/launch_remind.sh
+# Usage: bash ~/projects/agent-abide/launch_remind.sh
 #
 # Kills existing instance first, then starts fresh.
 
-COMMS=/home/eric/projects/mikeyv-infra/live/comms
+COMMS=/home/eric/projects/agent-abide/core
 
 echo "=== Stopping existing remind adapter ==="
 pkill -f "remind_adapter.py" 2>/dev/null && echo "Killed remind adapter" || echo "No remind adapter running"

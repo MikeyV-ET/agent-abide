@@ -1942,7 +1942,7 @@ Type anything else to send a message to the agent.
 
         # Send via localmail
         try:
-            sys.path.insert(0, '/home/eric/projects/mikeyv-infra/live/comms')
+            sys.path.insert(0, '/home/eric/projects/agent-abide/core')
             from localmail import send_mail
             sent = []
             for agent in targets:
@@ -3376,7 +3376,7 @@ def main():
     agents_home = Path(Config.AGENTS_HOME)
     all_agents = []
     agents_json_path = Path(os.path.expanduser(
-        "~/projects/mikeyv-infra/live/comms/agents.json"
+        "~/projects/agent-abide/agents.json"
     ))
     try:
         with open(agents_json_path) as f:

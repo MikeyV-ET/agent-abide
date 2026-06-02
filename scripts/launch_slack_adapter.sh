@@ -1,10 +1,10 @@
 #!/bin/bash
 # Launch the Slack adapter, detached from any session.
-# Usage: bash ~/projects/mikeyv-infra/live/comms/launch_slack_adapter.sh
+# Usage: bash ~/projects/agent-abide/launch_slack_adapter.sh
 #
 # Kills existing instance first, then starts fresh.
 
-COMMS=/home/eric/projects/mikeyv-infra/live/comms
+COMMS=/home/eric/projects/agent-abide/core
 
 echo "=== Stopping existing Slack adapter ==="
 pkill -f "slack_adapter.py" 2>/dev/null && echo "Killed Slack adapter" || echo "No Slack adapter running"

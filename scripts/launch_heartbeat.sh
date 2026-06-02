@@ -1,10 +1,10 @@
 #!/bin/bash
 # Launch the heartbeat adapter, detached from any session.
-# Usage: bash ~/projects/mikeyv-infra/live/comms/launch_heartbeat.sh
+# Usage: bash ~/projects/agent-abide/launch_heartbeat.sh
 #
 # Kills existing instance first, then starts fresh.
 
-COMMS=/home/eric/projects/mikeyv-infra/live/comms
+COMMS=/home/eric/projects/agent-abide/core
 
 echo "=== Stopping existing heartbeat adapter ==="
 pkill -f "heartbeat_adapter.py" 2>/dev/null && echo "Killed heartbeat adapter" || echo "No heartbeat adapter running"

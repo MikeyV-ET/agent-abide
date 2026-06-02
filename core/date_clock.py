@@ -10,7 +10,7 @@ Usage:
   python3 date_clock.py --agents Sr,Jr  # notify specific agents
 
 Cron entry (midnight PDT):
-  0 0 * * * /usr/bin/python3 /home/eric/projects/mikeyv-infra/live/comms/date_clock.py
+  0 0 * * * /usr/bin/python3 /home/eric/projects/agent-abide/core/date_clock.py
 """
 
 import json

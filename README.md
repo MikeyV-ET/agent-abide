@@ -1,4 +1,4 @@
-# agent-abide-dev
+# agent-abide
 
 Development branch of the asdaaas infrastructure. Once stable, replaces live/comms as production.
 

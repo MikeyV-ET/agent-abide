@@ -8,13 +8,13 @@
 #
 # All arguments are passed through to asdaaas_tui.py.
 # --agent is required.
-# --api-url defaults to http://localhost:8420 (override with ASDAAAS_API_URL env var).
+# --api-url injected only if ASDAAAS_API_URL env var is set. Without it, TUI uses file-based tailing.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TUI="$SCRIPT_DIR/../tui/asdaaas_tui.py"
-API_URL="${ASDAAAS_API_URL:-http://localhost:8420}"
+API_URL="${ASDAAAS_API_URL:-}"
 
 if [ $# -eq 0 ] || [[ ! " $* " =~ " --agent " ]] && [[ ! " $* " =~ " -a " ]]; then
     echo "Usage: bash launch_tui.sh --agent <name> [options]"
@@ -25,7 +25,7 @@ if [ $# -eq 0 ] || [[ ! " $* " =~ " --agent " ]] && [[ ! " $* " =~ " -a " ]]; th
     echo "  --tail, -t N        Replay last N events only"
     echo "  --operator, -o NAME Operator name (skip prompt)"
     echo "  --sessions-dir DIR  Override sessions directory"
-    echo "  --api-url URL       API server URL (default: \$ASDAAAS_API_URL or http://localhost:8420)"
+    echo "  --api-url URL       API server URL (default: \$ASDAAAS_API_URL, omitted if unset)"
     echo "  --debug-log PATH    Write dispatch debug log"
     echo "  --light             Use Gruvbox light color scheme"
     echo ""
@@ -40,8 +40,8 @@ if [ ! -f "$TUI" ]; then
     exit 1
 fi
 
-# Inject --api-url unless the user already passed it
-if [[ ! " $* " =~ " --api-url " ]]; then
+# Inject --api-url only if ASDAAAS_API_URL env var is set
+if [[ -n "$API_URL" ]] && [[ ! " $* " =~ " --api-url " ]]; then
     exec python3 "$TUI" --api-url "$API_URL" "$@"
 else
     exec python3 "$TUI" "$@"

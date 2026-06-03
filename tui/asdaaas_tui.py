@@ -907,6 +907,65 @@ class PlanPanel(Static):
                      border_style=Gruvbox.BR_PURPLE, padding=(0, 1))
 
 
+class RoomMessage(Static):
+    """A single IRC channel message displayed in the room tab."""
+
+    DEFAULT_CSS = """
+    RoomMessage {
+        padding: 0 1;
+        margin: 0;
+    }
+    """
+
+    NICK_COLORS = [
+        Gruvbox.BR_YELLOW, Gruvbox.BR_GREEN, Gruvbox.BR_BLUE,
+        Gruvbox.BR_PURPLE, Gruvbox.BR_AQUA, Gruvbox.BR_ORANGE, Gruvbox.BR_RED,
+    ]
+
+    def __init__(self, timestamp: str, nick: str, message: str, is_action: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self._timestamp = timestamp
+        self._nick = nick
+        self._message = message
+        self._is_action = is_action
+
+    def render(self) -> Text:
+        color = self.NICK_COLORS[hash(self._nick.lower()) % len(self.NICK_COLORS)]
+        ts_style = Gruvbox.DARK4
+
+        text = Text()
+        text.append(f"{self._timestamp} ", style=ts_style)
+        if self._is_action:
+            text.append(f"* {self._nick} ", style=f"italic {color}")
+            text.append(self._message, style=f"italic {Gruvbox.FG}")
+        else:
+            text.append(f"<{self._nick}> ", style=f"bold {color}")
+            text.append(self._message, style=Gruvbox.FG)
+        return text
+
+
+class RoomSystemMessage(Static):
+    """Join/part/quit messages in the room tab."""
+
+    DEFAULT_CSS = """
+    RoomSystemMessage {
+        padding: 0 1;
+        margin: 0;
+    }
+    """
+
+    def __init__(self, timestamp: str, message: str, **kwargs):
+        super().__init__(**kwargs)
+        self._timestamp = timestamp
+        self._message = message
+
+    def render(self) -> Text:
+        text = Text()
+        text.append(f"{self._timestamp} ", style=Gruvbox.DARK4)
+        text.append(self._message, style=f"italic {Gruvbox.DARK3}")
+        return text
+
+
 class AgentTabBar(Static):
     """Tab bar showing all available agents. Click to switch."""
 
@@ -920,31 +979,37 @@ class AgentTabBar(Static):
 
     active_agent = reactive("Trip")
 
+    ROOM_TAB = "#room"
+
     def __init__(self, agents: list[str], **kwargs):
         super().__init__(**kwargs)
         self._agents = agents
+        self._tabs = agents + [self.ROOM_TAB]
 
     def render(self) -> Text:
         text = Text()
-        for agent in self._agents:
-            if agent == self.active_agent:
-                text.append(f" [{agent}] ", style=f"bold {Gruvbox.FG} on {Gruvbox.DARK2}")
+        for tab in self._tabs:
+            label = "Room" if tab == self.ROOM_TAB else tab
+            if tab == self.active_agent:
+                text.append(f" [{label}] ", style=f"bold {Gruvbox.FG} on {Gruvbox.DARK2}")
             else:
-                text.append(f"  {agent}  ", style=Gruvbox.DARK4)
+                text.append(f"  {label}  ", style=Gruvbox.DARK4)
         return text
 
     def on_click(self, event) -> None:
-        """Switch agent on click by calculating which tab was clicked."""
-        # Calculate which agent was clicked based on x position
+        """Switch agent/room on click by calculating which tab was clicked."""
         x = event.x
         pos = 0
-        for agent in self._agents:
-            # Each tab is: " [Agent] " (len+4) or "  Agent  " (len+4)
-            tab_width = len(agent) + 4
+        for tab in self._tabs:
+            label = "Room" if tab == self.ROOM_TAB else tab
+            tab_width = len(label) + 4
             if x < pos + tab_width:
-                if agent != self.active_agent:
-                    self.active_agent = agent
-                    self.app.action_switch_agent(agent)
+                if tab != self.active_agent:
+                    self.active_agent = tab
+                    if tab == self.ROOM_TAB:
+                        self.app.action_switch_to_room()
+                    else:
+                        self.app.action_switch_agent(tab)
                 return
             pos += tab_width
 
@@ -1568,6 +1633,10 @@ class AsdaaasTUI(App):
             if agent != self._active_agent:
                 vs.display = False
             yield vs
+        # Room content scroll (IRC channel view)
+        room_vs = ContentScroll(id="content-room")
+        room_vs.display = False
+        yield room_vs
         with Vertical(id="bottom-bar"):
             yield MessageInput(placeholder=f"Message {Config.AGENT_NAME}...", id="input-bar")
             yield DynamicFooter(id="dynamic-footer")
@@ -1618,6 +1687,11 @@ class AsdaaasTUI(App):
                     lambda a=agent: self._tail_updates_for_agent(a),
                     thread=True, name=f"updates_{agent}"
                 )
+        # Start IRC room log tailer
+        self._room_channel = "#meetingroom1"
+        self._room_active = False
+        self._room_irc_sock = None
+        self.run_worker(self._tail_room_log, thread=True, name="room_tailer")
         # Focus the input bar
         self.query_one("#input-bar", MessageInput).focus()
 
@@ -1661,6 +1735,21 @@ class AsdaaasTUI(App):
         # Handle slash commands locally
         if text.startswith("/"):
             self._handle_slash_command(text)
+            return
+
+        # Room mode: send to IRC channel instead of agent
+        if self._room_active:
+            nick = Config.OPERATOR_NAME or "eric"
+            try:
+                room_scroll = self.query_one("#content-room", ContentScroll)
+                room_scroll._follow_tail = True
+                ts = time.strftime("%H:%M")
+                room_scroll.mount(RoomMessage(ts, nick, text))
+                room_scroll.scroll_end(animate=False)
+            except NoMatches:
+                pass
+            import threading
+            threading.Thread(target=self._send_to_room, args=(text,), daemon=True).start()
             return
 
         # Display the user message — re-enable tail following
@@ -2137,8 +2226,19 @@ Type anything else to send a message to the agent.
 
     def action_switch_agent(self, agent_name: str) -> None:
         """Switch to a different agent tab."""
-        if agent_name not in self._agents or agent_name == self._active_agent:
+        if agent_name not in self._agents:
             return
+        if agent_name == self._active_agent and not self._room_active:
+            return
+
+        # Hide room content if switching from room
+        if self._room_active:
+            self._room_active = False
+            try:
+                room_scroll = self.query_one("#content-room", ContentScroll)
+                room_scroll.display = False
+            except NoMatches:
+                pass
 
         # Hide current content
         try:
@@ -2201,10 +2301,213 @@ Type anything else to send a message to the agent.
         # No toast — tab bar already shows the active agent
 
     def action_next_agent(self) -> None:
-        """Cycle to next agent tab."""
-        idx = self._agents.index(self._active_agent)
-        next_idx = (idx + 1) % len(self._agents)
-        self.action_switch_agent(self._agents[next_idx])
+        """Cycle to next agent tab (includes Room)."""
+        tabs = self._agents + [AgentTabBar.ROOM_TAB]
+        cur = AgentTabBar.ROOM_TAB if self._room_active else self._active_agent
+        idx = tabs.index(cur) if cur in tabs else 0
+        next_tab = tabs[(idx + 1) % len(tabs)]
+        if next_tab == AgentTabBar.ROOM_TAB:
+            self.action_switch_to_room()
+        else:
+            self.action_switch_agent(next_tab)
+
+    def action_switch_to_room(self) -> None:
+        """Switch to the IRC room tab."""
+        # Hide current agent content
+        if not self._room_active:
+            try:
+                current_scroll = self._content_scroll()
+                current_scroll.display = False
+            except NoMatches:
+                pass
+
+            try:
+                input_bar = self.query_one("#input-bar", MessageInput)
+                old_state = self._agent_state.get(self._active_agent)
+                if old_state is not None:
+                    old_state["input_draft"] = input_bar.text
+                input_bar.clear()
+                input_bar._placeholder = f"Message {self._room_channel}..."
+            except NoMatches:
+                pass
+
+        # Show room content
+        self._room_active = True
+        try:
+            room_scroll = self.query_one("#content-room", ContentScroll)
+            room_scroll.display = True
+            room_scroll._follow_tail = True
+            room_scroll.scroll_end(animate=False)
+        except NoMatches:
+            pass
+
+        # Update header
+        try:
+            header = self.query_one("#agent-header", AgentHeader)
+            header.agent_name = self._room_channel
+        except NoMatches:
+            pass
+
+        # Update tab bar
+        try:
+            tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
+            tab_bar.active_agent = AgentTabBar.ROOM_TAB
+        except NoMatches:
+            pass
+
+    def _connect_room_irc(self):
+        """Establish and maintain the IRC connection for the Room tab."""
+        import socket as _socket
+        nick = Config.OPERATOR_NAME or "eric"
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", 6667))
+        sock.sendall(f"NICK {nick}\r\n".encode())
+        sock.sendall(f"USER {nick} 0 * :{nick}\r\n".encode())
+        sock.sendall(f"JOIN {self._room_channel}\r\n".encode())
+        # Drain registration replies
+        sock.settimeout(1.0)
+        try:
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                for line in data.decode(errors="replace").split("\r\n"):
+                    if line.startswith("PING"):
+                        pong = line.replace("PING", "PONG", 1)
+                        sock.sendall(f"{pong}\r\n".encode())
+        except _socket.timeout:
+            pass
+        sock.settimeout(5.0)
+        self._room_irc_sock = sock
+        self.run_worker(self._room_irc_keepalive, thread=True, name="room_keepalive")
+
+    def _room_irc_keepalive(self):
+        """Background thread: respond to IRC PINGs to keep connection alive."""
+        import socket as _socket
+        while self._room_irc_sock is not None:
+            try:
+                self._room_irc_sock.settimeout(30.0)
+                data = self._room_irc_sock.recv(4096)
+                if not data:
+                    break
+                for line in data.decode(errors="replace").split("\r\n"):
+                    if line.startswith("PING"):
+                        pong = line.replace("PING", "PONG", 1)
+                        self._room_irc_sock.sendall(f"{pong}\r\n".encode())
+            except _socket.timeout:
+                continue
+            except Exception:
+                break
+
+    def _send_to_room(self, text: str):
+        """Send a message to the IRC room via persistent socket connection."""
+        try:
+            if self._room_irc_sock is None:
+                self._connect_room_irc()
+            self._room_irc_sock.sendall(
+                f"PRIVMSG {self._room_channel} :{text}\r\n".encode()
+            )
+        except Exception as e:
+            self._room_irc_sock = None
+            self.call_from_thread(
+                self._mount_room_system_msg, "", f"Send error: {e}"
+            )
+
+    def _tail_room_log(self) -> None:
+        """Background thread: tail the IRC channel log file."""
+        import re
+        log_path = Path.home() / ".grok" / "irc_logs" / f"{self._room_channel}.log"
+
+        msg_re = re.compile(r"^\[([^\]]+)\] <([^>]+)> (.*)$")
+        action_re = re.compile(r"^\[([^\]]+)\] \* (\S+) (.*)$")
+
+        # Wait for log file to exist
+        while not log_path.exists():
+            time.sleep(2)
+
+        # Seek to tail (last 50 lines for scrollback)
+        with open(log_path, "r") as f:
+            lines = f.readlines()
+            tail_lines = lines[-50:] if len(lines) > 50 else lines
+            for line in tail_lines:
+                line = line.rstrip()
+                if not line:
+                    continue
+                m = msg_re.match(line)
+                if m:
+                    ts, nick, msg = m.groups()
+                    short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
+                    self.call_from_thread(
+                        self._mount_room_msg, short_ts, nick, msg
+                    )
+                    continue
+                m = action_re.match(line)
+                if m:
+                    ts, nick, action = m.groups()
+                    short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
+                    if any(w in action for w in ["joined", "quit", "left", "part"]):
+                        self.call_from_thread(
+                            self._mount_room_system_msg, short_ts, f"{nick} {action}"
+                        )
+                    else:
+                        self.call_from_thread(
+                            self._mount_room_msg, short_ts, nick, action, True
+                        )
+                    continue
+
+            # Now tail for new lines
+            f.seek(0, 2)  # seek to end
+            while True:
+                line = f.readline()
+                if not line:
+                    time.sleep(0.3)
+                    continue
+                line = line.rstrip()
+                if not line:
+                    continue
+                m = msg_re.match(line)
+                if m:
+                    ts, nick, msg = m.groups()
+                    own_nick = (Config.OPERATOR_NAME or "eric").lower()
+                    if nick.lower() == own_nick:
+                        continue
+                    short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
+                    self.call_from_thread(
+                        self._mount_room_msg, short_ts, nick, msg
+                    )
+                    continue
+                m = action_re.match(line)
+                if m:
+                    ts, nick, action = m.groups()
+                    short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
+                    if any(w in action for w in ["joined", "quit", "left", "part"]):
+                        self.call_from_thread(
+                            self._mount_room_system_msg, short_ts, f"{nick} {action}"
+                        )
+                    else:
+                        self.call_from_thread(
+                            self._mount_room_msg, short_ts, nick, action, True
+                        )
+
+    def _mount_room_msg(self, ts: str, nick: str, msg: str, is_action: bool = False) -> None:
+        """Mount a room message widget (called from main thread via call_from_thread)."""
+        try:
+            room_scroll = self.query_one("#content-room", ContentScroll)
+            room_scroll.mount(RoomMessage(ts, nick, msg, is_action))
+            if room_scroll._follow_tail:
+                room_scroll.scroll_end(animate=False)
+        except NoMatches:
+            pass
+
+    def _mount_room_system_msg(self, ts: str, msg: str) -> None:
+        """Mount a room system message widget."""
+        try:
+            room_scroll = self.query_one("#content-room", ContentScroll)
+            room_scroll.mount(RoomSystemMessage(ts, msg))
+            if room_scroll._follow_tail:
+                room_scroll.scroll_end(animate=False)
+        except NoMatches:
+            pass
 
     def action_clear_screen(self) -> None:
         """Clear the input bar (like Ctrl+L in grok binary)."""

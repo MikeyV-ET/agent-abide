@@ -9,7 +9,7 @@ Run: pytest test_gaze_matching.py -v
 
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
 
 from asdaaas import matches_gaze, get_msg_room, get_room, get_background_mode
 

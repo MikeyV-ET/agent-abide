@@ -1667,17 +1667,11 @@ class AsdaaasTUI(App):
             self._poll_status, thread=True, name="status_poller"
         )
         # Start updates tailer for each agent
-        # conversation.jsonl (universal, written by asdaaas) preferred for claude agents
+        # TODO: conversation.jsonl disabled pending schema redesign (Phase 2)
         use_api = Config.API_URL is not None
         for agent in self._agents:
             state = self._agent_state.get(agent, {})
-            convo = self._find_conversation_jsonl(agent)
-            if convo or state.get("backend") == "claude":
-                self.run_worker(
-                    lambda a=agent: self._tail_conversation_jsonl(a),
-                    thread=True, name=f"updates_{agent}"
-                )
-            elif use_api:
+            if use_api:
                 self.run_worker(
                     lambda a=agent: self._tail_via_api(a),
                     thread=True, name=f"updates_{agent}"
@@ -2757,7 +2751,7 @@ Type anything else to send a message to the agent.
         """Convert a conversation.jsonl entry to updates.jsonl event format."""
         role = entry.get("role", "")
         content = entry.get("content", "")
-        ts = entry.get("ts", "")
+        ts_raw = entry.get("ts", "")
         if not content:
             return None
         if role == "assistant":
@@ -2768,6 +2762,15 @@ Type anything else to send a message to the agent.
             session_update = "agent_thought_chunk"
         else:
             return None
+        # Convert ISO timestamp to epoch (int) for _dispatch_event compatibility
+        ts = 0
+        if isinstance(ts_raw, (int, float)):
+            ts = int(ts_raw)
+        elif isinstance(ts_raw, str) and ts_raw:
+            try:
+                ts = int(datetime.datetime.fromisoformat(ts_raw).timestamp())
+            except (ValueError, OSError):
+                ts = 0
         return {"timestamp": ts, "params": {"update": {
             "sessionUpdate": session_update,
             "content": {"text": content},
@@ -2807,9 +2810,11 @@ Type anything else to send a message to the agent.
                     except json.JSONDecodeError:
                         pass
                 self.call_from_thread(self._finalize_current_msg_for, agent_name)
+                self._debug(f"CONVO_REPLAY agent={agent_name} total_lines={len(lines)} tail={tail_count}")
                 time.sleep(0.5)
                 self.call_from_thread(self._force_scroll_bottom)
-            except Exception:
+            except Exception as e:
+                self._debug(f"CONVO_REPLAY_ERROR agent={agent_name}: {e}")
                 pass
         else:
             try:

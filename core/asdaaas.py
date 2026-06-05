@@ -2192,35 +2192,57 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                 compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
                             total_tokens = backend.total_tokens
 
-                            probe_text = "[Compaction complete. You are resuming from a compacted context.]"
-                            await backend.drain_stale()
-                            probe_handle = await backend.send_prompt(probe_text)
-                            probe_result = await backend.collect_response(
-                                probe_handle, on_meta=_on_streaming_meta,
-                                keepalive_timeout=60.0, max_wall_clock=300.0)
-                            total_tokens = backend.total_tokens
-                            print(f"[asdaaas] Compact probe: real totalTokens={total_tokens}")
-                            if probe_result.speech.strip():
-                                gaze = read_gaze(agent_name)
-                                write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
-
-                            _prev_tokens = total_tokens
-                            turns_since_compaction = 0
-                            result_file = agent_dir(agent_name) / "command_result.json"
-                            tmp = str(result_file) + ".tmp"
-                            with open(tmp, "w") as f:
-                                json.dump({
-                                    "request_id": request_id,
-                                    "action": "compact",
-                                    "before": tokens_before,
-                                    "after": total_tokens,
+                            # Verify compaction actually reduced tokens
+                            if total_tokens >= tokens_before:
+                                # /compact didn't work — tokens didn't decrease.
+                                # Don't send "compaction complete" probe or reset cooldown.
+                                print(f"[asdaaas] Compact ineffective: {tokens_before} -> {total_tokens} (no reduction)")
+                                write_compaction_state(agent_name, "failed", request_id=request_id)
+                                write_health(agent_name, "active", f"compact ineffective {tokens_before}->{total_tokens}", total_tokens, context_window)
+                                _prev_tokens = total_tokens
+                                # Notify agent that compaction didn't work
+                                bell_dir = agent_dir(agent_name) / "doorbells"
+                                bell_dir.mkdir(parents=True, exist_ok=True)
+                                bell_id = f"cpt_ineff_{secrets.token_hex(4)}"
+                                bell = {
+                                    "adapter": "session",
+                                    "command": "compact_ineffective",
+                                    "text": f"[session:compact_ineffective] Compaction did not reduce context ({tokens_before} -> {total_tokens} tokens). The binary may have an internal cooldown or the model may not support /compact. Auto-compaction at 85% will still work.",
+                                    "id": bell_id,
                                     "ts": time.time(),
-                                }, f)
-                            os.rename(tmp, str(result_file))
-                            print(f"[asdaaas] Compact: {tokens_before} -> {total_tokens}")
-                            write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
-                            write_health(agent_name, "ready", f"compacted {tokens_before}->{total_tokens}", total_tokens, context_window)
-                            _cleanup_compact_doorbells(agent_name)
+                                }
+                                with open(str(bell_dir / f"{bell_id}.json"), "w") as bf:
+                                    json.dump(bell, bf)
+                            else:
+                                probe_text = "[Compaction complete. You are resuming from a compacted context.]"
+                                await backend.drain_stale()
+                                probe_handle = await backend.send_prompt(probe_text)
+                                probe_result = await backend.collect_response(
+                                    probe_handle, on_meta=_on_streaming_meta,
+                                    keepalive_timeout=60.0, max_wall_clock=300.0)
+                                total_tokens = backend.total_tokens
+                                print(f"[asdaaas] Compact probe: real totalTokens={total_tokens}")
+                                if probe_result.speech.strip():
+                                    gaze = read_gaze(agent_name)
+                                    write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
+
+                                _prev_tokens = total_tokens
+                                turns_since_compaction = 0
+                                result_file = agent_dir(agent_name) / "command_result.json"
+                                tmp = str(result_file) + ".tmp"
+                                with open(tmp, "w") as f:
+                                    json.dump({
+                                        "request_id": request_id,
+                                        "action": "compact",
+                                        "before": tokens_before,
+                                        "after": total_tokens,
+                                        "ts": time.time(),
+                                    }, f)
+                                os.rename(tmp, str(result_file))
+                                print(f"[asdaaas] Compact: {tokens_before} -> {total_tokens}")
+                                write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
+                                write_health(agent_name, "ready", f"compacted {tokens_before}->{total_tokens}", total_tokens, context_window)
+                                _cleanup_compact_doorbells(agent_name)
                         except Exception as e:
                             write_compaction_state(agent_name, "failed", request_id=request_id)
                             print(f"[asdaaas] Compact failed: {e}")
@@ -2243,24 +2265,31 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                             compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
                         total_tokens = backend.total_tokens
 
-                        probe_text = "[Compaction complete. You are resuming from a compacted context.]"
-                        await backend.drain_stale()
-                        probe_handle = await backend.send_prompt(probe_text)
-                        probe_result = await backend.collect_response(
-                            probe_handle, on_meta=_on_streaming_meta,
-                            keepalive_timeout=60.0, max_wall_clock=300.0)
-                        total_tokens = backend.total_tokens
-                        print(f"[asdaaas] Force compact probe: real totalTokens={total_tokens}")
-                        if probe_result.speech.strip():
-                            gaze = read_gaze(agent_name)
-                            write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
+                        # Verify compaction actually reduced tokens
+                        if total_tokens >= tokens_before:
+                            print(f"[asdaaas] Force compact ineffective: {tokens_before} -> {total_tokens} (no reduction)")
+                            write_compaction_state(agent_name, "failed", tokens_before=tokens_before)
+                            write_health(agent_name, "active", f"force-compact ineffective {tokens_before}->{total_tokens}", total_tokens, context_window)
+                            _prev_tokens = total_tokens
+                        else:
+                            probe_text = "[Compaction complete. You are resuming from a compacted context.]"
+                            await backend.drain_stale()
+                            probe_handle = await backend.send_prompt(probe_text)
+                            probe_result = await backend.collect_response(
+                                probe_handle, on_meta=_on_streaming_meta,
+                                keepalive_timeout=60.0, max_wall_clock=300.0)
+                            total_tokens = backend.total_tokens
+                            print(f"[asdaaas] Force compact probe: real totalTokens={total_tokens}")
+                            if probe_result.speech.strip():
+                                gaze = read_gaze(agent_name)
+                                write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
 
-                        _prev_tokens = total_tokens
-                        turns_since_compaction = 0
-                        _cleanup_compact_doorbells(agent_name)
-                        write_compaction_state(agent_name, "complete", tokens_before=tokens_before, tokens_after=total_tokens)
-                        write_health(agent_name, "ready", f"force-compacted {tokens_before}->{total_tokens}", total_tokens, context_window)
-                        print(f"[asdaaas] Force compact: {tokens_before} -> {total_tokens}")
+                            _prev_tokens = total_tokens
+                            turns_since_compaction = 0
+                            _cleanup_compact_doorbells(agent_name)
+                            write_compaction_state(agent_name, "complete", tokens_before=tokens_before, tokens_after=total_tokens)
+                            write_health(agent_name, "ready", f"force-compacted {tokens_before}->{total_tokens}", total_tokens, context_window)
+                            print(f"[asdaaas] Force compact: {tokens_before} -> {total_tokens}")
                     except Exception as e:
                         write_compaction_state(agent_name, "failed")
                         print(f"[asdaaas] Force compact failed: {e}")

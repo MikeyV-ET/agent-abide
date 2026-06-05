@@ -2154,8 +2154,10 @@ Type anything else to send a message to the agent.
         try:
             with open(Config.awareness_file()) as f:
                 awareness = json.load(f)
+            direct = awareness.get("direct_attach", [])
             channels = awareness.get("background_channels", {})
             lines = ["## Awareness\n"]
+            lines.append(f"**Direct attach:** {', '.join(f'`{a}`' for a in direct) if direct else '*none*'}\n")
             lines.append("| Channel | Mode |")
             lines.append("|---------|------|")
             for ch, mode in sorted(channels.items()):

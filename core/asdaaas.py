@@ -2192,27 +2192,17 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                 compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
                             total_tokens = backend.total_tokens
 
-                            # Verify compaction actually reduced tokens
+                            # Verify compaction actually reduced tokens.
+                            # /compact is async — the binary may compact at the next
+                            # turn boundary, not immediately. If tokens didn't drop,
+                            # skip the probe (saves tokens) and let auto-compaction
+                            # detection at the top of the loop catch the real drop.
                             if total_tokens >= tokens_before:
-                                # /compact didn't work — tokens didn't decrease.
-                                # Don't send "compaction complete" probe or reset cooldown.
-                                print(f"[asdaaas] Compact ineffective: {tokens_before} -> {total_tokens} (no reduction)")
-                                write_compaction_state(agent_name, "failed", request_id=request_id)
-                                write_health(agent_name, "active", f"compact ineffective {tokens_before}->{total_tokens}", total_tokens, context_window)
+                                print(f"[asdaaas] Compact pending: {tokens_before} -> {total_tokens} (no reduction yet, binary may compact async)")
+                                write_compaction_state(agent_name, "pending", request_id=request_id, tokens_before=tokens_before)
                                 _prev_tokens = total_tokens
-                                # Notify agent that compaction didn't work
-                                bell_dir = agent_dir(agent_name) / "doorbells"
-                                bell_dir.mkdir(parents=True, exist_ok=True)
-                                bell_id = f"cpt_ineff_{secrets.token_hex(4)}"
-                                bell = {
-                                    "adapter": "session",
-                                    "command": "compact_ineffective",
-                                    "text": f"[session:compact_ineffective] Compaction did not reduce context ({tokens_before} -> {total_tokens} tokens). The binary may have an internal cooldown or the model may not support /compact. Auto-compaction at 85% will still work.",
-                                    "id": bell_id,
-                                    "ts": time.time(),
-                                }
-                                with open(str(bell_dir / f"{bell_id}.json"), "w") as bf:
-                                    json.dump(bell, bf)
+                                # Don't reset turns_since_compaction — auto-detection will
+                                # Don't send probe — would burn tokens before real compaction
                             else:
                                 probe_text = "[Compaction complete. You are resuming from a compacted context.]"
                                 await backend.drain_stale()
@@ -2265,11 +2255,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                             compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
                         total_tokens = backend.total_tokens
 
-                        # Verify compaction actually reduced tokens
+                        # Verify compaction actually reduced tokens (see compact path comment)
                         if total_tokens >= tokens_before:
-                            print(f"[asdaaas] Force compact ineffective: {tokens_before} -> {total_tokens} (no reduction)")
-                            write_compaction_state(agent_name, "failed", tokens_before=tokens_before)
-                            write_health(agent_name, "active", f"force-compact ineffective {tokens_before}->{total_tokens}", total_tokens, context_window)
+                            print(f"[asdaaas] Force compact pending: {tokens_before} -> {total_tokens} (no reduction yet)")
+                            write_compaction_state(agent_name, "pending", tokens_before=tokens_before)
                             _prev_tokens = total_tokens
                         else:
                             probe_text = "[Compaction complete. You are resuming from a compacted context.]"

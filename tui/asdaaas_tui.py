@@ -468,11 +468,24 @@ class GazeSelector(OptionList):
             }
             gaze_str = f"irc/{room}"
         else:
-            gaze = {
-                "speech": {"target": "irc", "params": {"room": room}},
-                "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
-            }
-            gaze_str = f"irc/{room}"
+            # Check if room matches a known non-IRC adapter
+            adapter_dir = Path(Config.AGENTS_HOME) / Config.AGENT_NAME / "asdaaas" / "adapters" / room
+            if adapter_dir.exists() and room != "irc":
+                try:
+                    self.app._ensure_adapter_attached(room)
+                except Exception:
+                    pass
+                gaze = {
+                    "speech": {"target": room, "params": {}},
+                    "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                }
+                gaze_str = room
+            else:
+                gaze = {
+                    "speech": {"target": "irc", "params": {"room": room}},
+                    "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                }
+                gaze_str = f"irc/{room}"
 
         try:
             with open(Config.gaze_file(), "w") as f:
@@ -2071,11 +2084,21 @@ Type anything else to send a message to the agent.
             }
             gaze_str = f"irc/{room}"
         else:
-            gaze = {
-                "speech": {"target": "irc", "params": {"room": room}},
-                "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
-            }
-            gaze_str = f"irc/{room}"
+            # Check if room matches a known non-IRC adapter
+            adapter_dir = Path(Config.AGENTS_HOME) / self._active_agent / "asdaaas" / "adapters" / room
+            if adapter_dir.exists() and room != "irc":
+                self._ensure_adapter_attached(room)
+                gaze = {
+                    "speech": {"target": room, "params": {}},
+                    "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                }
+                gaze_str = room
+            else:
+                gaze = {
+                    "speech": {"target": "irc", "params": {"room": room}},
+                    "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                }
+                gaze_str = f"irc/{room}"
 
         try:
             with open(Config.gaze_file(), "w") as f:

@@ -432,6 +432,7 @@ def _build_gaze(cmd):
       {"action": "gaze", "adapter": "irc", "room": "#meetingroom1"}
       {"action": "gaze", "adapter": "irc", "pm": "eric"}
       {"action": "gaze", "adapter": "irc", "room": "#standup", "thoughts": "#sr-thoughts"}
+      {"action": "gaze", "adapter": "tui"}  -- non-IRC adapter (no room needed)
       {"action": "gaze", "off": true}  -- clear gaze
     """
     if cmd.get("off"):
@@ -449,7 +450,8 @@ def _build_gaze(cmd):
     elif pm:
         params = {"room": f"pm:{pm}", "pm": pm}
     else:
-        return None
+        # Non-IRC adapters (tui, arena, etc.) don't need a room
+        params = {}
     
     speech = {"target": adapter, "params": params}
     

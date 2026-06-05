@@ -1,0 +1,21 @@
+{
+  "name": "localmail",
+  "pid": 32096,
+  "started": 1780422601.567419,
+  "capabilities": [
+    "send",
+    "receive",
+    "notify"
+  ],
+  "config": {
+    "type": "notify",
+    "agents": [
+      "Sr",
+      "Jr",
+      "Trip",
+      "Q",
+      "Cinco"
+    ]
+  },
+  "heartbeat": 1780678990.3114924
+}

@@ -11,7 +11,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
 
-from asdaaas import matches_gaze, get_msg_room, get_room, get_background_mode
+from asdaaas import matches_gaze, get_msg_room, get_room, get_background_mode, _build_gaze
 
 
 # ============================================================================
@@ -144,3 +144,75 @@ class TestBackgroundMode:
         awareness = make_awareness({"arena": "doorbell"})
         msg = make_msg("arena", room="arena")
         assert get_background_mode(msg, awareness) == "doorbell"
+
+
+# ============================================================================
+# _build_gaze: gaze construction from command queue commands
+# ============================================================================
+
+class TestBuildGaze:
+    """Tests for _build_gaze() which constructs gaze dicts from commands.
+
+    Covers the fix in 7458db3: non-IRC adapters (arena, tui) no longer
+    require a room parameter and get empty params instead of returning None.
+    """
+
+    def test_irc_room(self):
+        """IRC channel gaze: target=irc, params has room."""
+        cmd = {"action": "gaze", "adapter": "irc", "room": "#standup"}
+        gaze = _build_gaze(cmd)
+        assert gaze["speech"] == {"target": "irc", "params": {"room": "#standup"}}
+
+    def test_irc_pm(self):
+        """IRC PM gaze: target=irc, params has pm:nick room."""
+        cmd = {"action": "gaze", "adapter": "irc", "pm": "eric"}
+        gaze = _build_gaze(cmd)
+        assert gaze["speech"]["target"] == "irc"
+        assert gaze["speech"]["params"]["pm"] == "eric"
+        assert gaze["speech"]["params"]["room"] == "pm:eric"
+
+    def test_arena_no_room(self):
+        """Arena adapter gaze: target=arena, empty params (no room needed)."""
+        cmd = {"action": "gaze", "adapter": "arena"}
+        gaze = _build_gaze(cmd)
+        assert gaze is not None, "_build_gaze returned None for arena adapter"
+        assert gaze["speech"] == {"target": "arena", "params": {}}
+
+    def test_tui_no_room(self):
+        """TUI adapter gaze: target=tui, empty params."""
+        cmd = {"action": "gaze", "adapter": "tui"}
+        gaze = _build_gaze(cmd)
+        assert gaze is not None, "_build_gaze returned None for tui adapter"
+        assert gaze["speech"] == {"target": "tui", "params": {}}
+
+    def test_gaze_off(self):
+        """Gaze off clears both speech and thoughts."""
+        cmd = {"action": "gaze", "off": True}
+        gaze = _build_gaze(cmd)
+        assert gaze["speech"] is None
+        assert gaze["thoughts"] is None
+
+    def test_thoughts_channel(self):
+        """Thoughts target set when thoughts key provided."""
+        cmd = {"action": "gaze", "adapter": "irc", "room": "#standup", "thoughts": "#trip-thoughts"}
+        gaze = _build_gaze(cmd)
+        assert gaze["thoughts"]["target"] == "irc"
+        assert gaze["thoughts"]["params"]["room"] == "#trip-thoughts"
+
+    def test_no_thoughts_is_none(self):
+        """Thoughts is None when not specified."""
+        cmd = {"action": "gaze", "adapter": "arena"}
+        gaze = _build_gaze(cmd)
+        assert gaze["thoughts"] is None
+
+    def test_no_adapter_returns_none(self):
+        """Missing adapter key returns None (invalid command)."""
+        cmd = {"action": "gaze"}
+        assert _build_gaze(cmd) is None
+
+    def test_unknown_adapter_no_room(self):
+        """Any unknown adapter without room gets empty params (not None)."""
+        cmd = {"action": "gaze", "adapter": "slack"}
+        gaze = _build_gaze(cmd)
+        assert gaze is not None
+        assert gaze["speech"] == {"target": "slack", "params": {}}

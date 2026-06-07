@@ -1678,6 +1678,22 @@ class AsdaaasTUI(App):
             yield MessageInput(placeholder=f"Message {Config.AGENT_NAME}...", id="input-bar")
             yield DynamicFooter(id="dynamic-footer")
 
+    def _cleanup_and_exit(self) -> None:
+        """Clean up background threads before exiting.
+
+        Closes IRC socket (unblocks keepalive thread), then calls exit().
+        Workers check is_cancelled but some block on I/O or sleep —
+        closing sockets ensures they unblock and see the cancellation.
+        """
+        # Close IRC socket so keepalive + send threads unblock
+        if hasattr(self, "_room_irc_sock") and self._room_irc_sock is not None:
+            try:
+                self._room_irc_sock.close()
+            except Exception:
+                pass
+            self._room_irc_sock = None
+        self.exit()
+
     def on_mount(self) -> None:
         """Start background workers on mount."""
         # Check operator identity
@@ -1838,7 +1854,7 @@ class AsdaaasTUI(App):
         content = self._content_scroll()
 
         if cmd in ("/exit", "/quit", "/q"):
-            self.exit()
+            self._cleanup_and_exit()
             return
         elif cmd == "/clear":
             content.remove_children()
@@ -2500,7 +2516,8 @@ Type anything else to send a message to the agent.
 
             # Now tail for new lines
             f.seek(0, 2)  # seek to end
-            while True:
+            worker = get_current_worker()
+            while not worker.is_cancelled:
                 line = f.readline()
                 if not line:
                     time.sleep(0.3)

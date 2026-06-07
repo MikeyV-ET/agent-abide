@@ -468,7 +468,7 @@ class TestHealthCompactionIntegration:
         assert s["phase"] == "complete"
         assert s["tokens_after"] == 50000
 
-    def test_tui_reads_compaction_state(self, agent_env):
+    def test_tui_reads_compaction_state(self, agent_env):  # noqa: E303
         """Compaction state file has the fields the TUI header expects."""
         name = agent_env["agent_name"]
         write_compaction_state(name, "complete", tokens_before=140000, tokens_after=45000)
@@ -486,3 +486,158 @@ class TestHealthCompactionIntegration:
         saved = s["tokens_before"] - s["tokens_after"]
         detail = f"-{round(saved / 1000)}k"
         assert detail == "-95k"
+
+
+# ============================================================================
+# E2E-7: Restart delivery -- doorbells on disk are delivered after restart
+# ============================================================================
+
+class TestRestartDelivery:
+    """E2E-7: After restart, pre-existing doorbells must be delivered.
+
+    Surface-level contract: restart_agent.sh reports UP, user types a
+    message in TUI, agent receives it. Doorbells written while agent
+    was down must be delivered on the first poll_doorbells call.
+    """
+
+    def _write_bell(self, bell_dir, bell_id, adapter, text, **extra):
+        """Write a doorbell file (simulating a message that arrived while down)."""
+        bell = {
+            "id": bell_id,
+            "adapter": adapter,
+            "text": text,
+            "ts": time.time(),
+            "priority": extra.get("priority", 3),
+        }
+        bell.update(extra)
+        path = bell_dir / f"bell_{bell_id}.json"
+        with open(path, "w") as f:
+            json.dump(bell, f)
+        return path
+
+    def test_pre_existing_doorbells_delivered_on_first_poll(self, agent_env):
+        """Doorbells on disk before agent boots are returned by poll_doorbells."""
+        name = agent_env["agent_name"]
+        bell_dir = agent_env["asdaaas_dir"] / "doorbells"
+
+        # Simulate: messages arrived while agent was down
+        self._write_bell(bell_dir, "msg_while_down_1", "tui",
+                         "Eric typed this while agent was restarting")
+        self._write_bell(bell_dir, "msg_while_down_2", "localmail",
+                         "Sibling sent this via localmail")
+
+        # Agent boots, first turn polls doorbells
+        bells = poll_doorbells(name)
+        assert len(bells) == 2
+
+        texts = [b["text"] for b in bells]
+        assert "Eric typed this while agent was restarting" in texts
+        assert "Sibling sent this via localmail" in texts
+
+    def test_tui_message_delivered_after_restart(self, agent_env):
+        """TUI message written to doorbell dir is delivered on poll."""
+        name = agent_env["agent_name"]
+        bell_dir = agent_env["asdaaas_dir"] / "doorbells"
+
+        # TUI adapter writes a doorbell when user sends a message
+        self._write_bell(bell_dir, "tui_msg_1", "tui",
+                         "hey agent, you there?",
+                         from_user="eric")
+
+        bells = poll_doorbells(name)
+        assert len(bells) == 1
+        assert bells[0]["text"] == "hey agent, you there?"
+        assert bells[0]["adapter"] == "tui"
+
+    def test_localmail_on_disk_survives_restart(self, agent_env):
+        """Localmail doorbell persists across restart and is delivered."""
+        name = agent_env["agent_name"]
+        receiver = agent_env["other_name"]
+
+        # Send localmail and simulate adapter delivery
+        send_mail(from_agent=name, to_agent=receiver, text="Pre-restart message")
+        inbox = agent_env["agents_home"] / receiver / "asdaaas" / "adapters" / "localmail" / "inbox"
+        for entry in sorted(inbox.iterdir()):
+            if entry.name.endswith(".json"):
+                msg = json.loads(entry.read_text())
+                ring_doorbell(receiver, msg)
+                entry.unlink()
+
+        # Verify doorbell exists on disk (agent is "down")
+        other_bells = agent_env["agents_home"] / receiver / "asdaaas" / "doorbells"
+        assert len(list(other_bells.glob("bell_*.json"))) == 1
+
+        # Agent "restarts" — first poll picks up the bell
+        bells = poll_doorbells(receiver)
+        assert len(bells) == 1
+        assert "Pre-restart message" in bells[0]["text"]
+
+    def test_multiple_sources_delivered_together(self, agent_env):
+        """Doorbells from different adapters all delivered on first poll."""
+        name = agent_env["agent_name"]
+        bell_dir = agent_env["asdaaas_dir"] / "doorbells"
+
+        self._write_bell(bell_dir, "from_tui", "tui", "TUI message")
+        self._write_bell(bell_dir, "from_mail", "localmail", "Localmail message")
+        self._write_bell(bell_dir, "from_irc", "irc", "IRC mention")
+        self._write_bell(bell_dir, "from_remind", "remind", "Reminder fired")
+
+        bells = poll_doorbells(name)
+        assert len(bells) == 4
+        adapters = {b["adapter"] for b in bells}
+        assert adapters == {"tui", "localmail", "irc", "remind"}
+
+    def test_doorbells_persist_across_multiple_polls(self, agent_env):
+        """Un-acked doorbells are returned on every poll (delivery count increments)."""
+        name = agent_env["agent_name"]
+        bell_dir = agent_env["asdaaas_dir"] / "doorbells"
+
+        self._write_bell(bell_dir, "persistent_msg", "tui", "Still waiting")
+
+        # First poll
+        bells1 = poll_doorbells(name)
+        assert len(bells1) == 1
+
+        # Second poll -- same bell, still there (not acked)
+        bells2 = poll_doorbells(name)
+        assert len(bells2) == 1
+        assert bells2[0]["id"] == "persistent_msg"
+
+    def test_acked_doorbells_not_redelivered(self, agent_env):
+        """After acking, doorbell does not appear on next poll."""
+        name = agent_env["agent_name"]
+        bell_dir = agent_env["asdaaas_dir"] / "doorbells"
+
+        self._write_bell(bell_dir, "ack_me", "tui", "One-time message")
+
+        # First poll sees it
+        bells = poll_doorbells(name)
+        assert len(bells) == 1
+
+        # Agent acks it
+        ack_doorbells(name, ["ack_me"])
+
+        # Next poll -- gone
+        bells2 = poll_doorbells(name)
+        assert len(bells2) == 0
+
+    def test_clean_stage_preserves_doorbells(self, agent_env):
+        """restart_agent.sh stage_clean removes commands but NOT doorbells."""
+        name = agent_env["agent_name"]
+        bell_dir = agent_env["asdaaas_dir"] / "doorbells"
+        cmd_dir = agent_env["asdaaas_dir"] / "commands"
+
+        # Pre-restart state: doorbells + stale commands
+        self._write_bell(bell_dir, "important_msg", "tui", "Don't lose me")
+        stale_cmd = cmd_dir / "cmd_shutdown_12345.json"
+        with open(stale_cmd, "w") as f:
+            json.dump({"action": "shutdown"}, f)
+
+        # stage_clean removes commands (simulated)
+        for c in cmd_dir.glob("cmd_*shutdown*.json"):
+            c.unlink()
+
+        # Doorbells must still be there
+        bells = poll_doorbells(name)
+        assert len(bells) == 1
+        assert bells[0]["text"] == "Don't lose me"

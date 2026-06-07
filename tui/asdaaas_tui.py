@@ -318,10 +318,22 @@ class AgentHeader(Static):
         elif h == "working":
             text.append("●", style=Gruvbox.BR_GREEN)
             text.append(f" {h}", style=Gruvbox.GRAY)
+        elif h in ("ready", "active"):
+            text.append("●", style=Gruvbox.BR_AQUA)
+            text.append(f" {h}", style=Gruvbox.GRAY)
         elif h == "idle":
             text.append("○", style=Gruvbox.BR_YELLOW)
             text.append(f" {h}", style=Gruvbox.GRAY)
-        elif h == "waiting":
+        elif h == "stalled":
+            text.append("⚠", style=f"bold {Gruvbox.BR_RED}")
+            text.append(f" {h}", style=Gruvbox.BR_RED)
+        elif h == "restarting":
+            text.append("↻", style=Gruvbox.BR_YELLOW)
+            text.append(f" {h}", style=Gruvbox.GRAY)
+        elif h == "error":
+            text.append("✗", style=f"bold {Gruvbox.BR_RED}")
+            text.append(f" {h}", style=Gruvbox.BR_RED)
+        elif h in ("shutdown", "waiting"):
             text.append("◌", style=Gruvbox.GRAY)
             text.append(f" {h}", style=Gruvbox.GRAY)
         else:

@@ -340,13 +340,11 @@ class AgentHeader(Static):
             text.append("?", style=Gruvbox.BR_RED)
             text.append(f" {h}", style=Gruvbox.GRAY)
 
-        # Turn reporting
+        # Turn reporting (physical turns = asdaaas-level prompt deliveries)
         if self.turn_physical > 0:
             text.append("  ")
             text.append("t:", style=Gruvbox.GRAY)
             text.append(f"{self.turn_physical}", style=Gruvbox.BR_AQUA)
-            if self.turn_logical > 0:
-                text.append(f"/{self.turn_logical}", style=Gruvbox.GRAY)
 
         # Delay pattern
         if self.delay_pattern:

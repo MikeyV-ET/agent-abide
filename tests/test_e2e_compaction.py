@@ -293,6 +293,28 @@ def read_agent_output(proc, timeout=30):
     return lines
 
 
+def check_tui_outbox(since_ts=0):
+    """Read TestAgent TUI outbox responses after a given timestamp.
+    Returns list of (timestamp, text) tuples sorted by time."""
+    outbox = TESTAGENT_HOME / "asdaaas" / "adapters" / "tui" / "outbox"
+    if not outbox.exists():
+        return []
+    results = []
+    for f in outbox.glob("resp_*.json"):
+        try:
+            with open(f) as fh:
+                d = json.load(fh)
+            ts = d.get("ts", 0)
+            if isinstance(ts, str):
+                ts = 0  # skip non-numeric timestamps
+            if ts >= since_ts:
+                text = d.get("text", d.get("content", ""))
+                results.append((ts, text))
+        except (json.JSONDecodeError, IOError):
+            continue
+    return sorted(results, key=lambda x: x[0])
+
+
 def stop_agent(proc):
     """Gracefully stop the agent."""
     if proc.poll() is None:
@@ -334,7 +356,14 @@ def test_agent_initiated_compaction():
             log("FAIL: Agent did not reach Ready state")
             return False
 
-        # Give agent substantial work — ask it to read all sibling notebooks
+        # Wait for the initial continue doorbell cycle to complete
+        # (default_doorbell fires immediately after Ready)
+        log("Waiting for initial continue cycle to settle (90s)...")
+        output = read_agent_output(proc, timeout=90)
+        for line in output[-10:]:
+            log(f"  | {line}")
+
+        # Give agent substantial work — ask it to read files
         work_prompt = (
             "Please read the following files and summarize the first 5 lines of each:\n"
             "1. /home/eric/agents/AGENTS.md\n"
@@ -345,14 +374,20 @@ def test_agent_initiated_compaction():
         send_doorbell(work_prompt)
 
         # Wait for agent to process the work
-        log("Waiting for agent to process work (60s)...")
-        output = read_agent_output(proc, timeout=60)
+        log("Waiting for agent to process work (120s)...")
+        output = read_agent_output(proc, timeout=120)
         for line in output[-10:]:
             log(f"  | {line}")
 
-        # Now trigger compaction
+        # Now trigger compaction: send compact command + wake doorbell
+        # The compact command sits in the queue. run_delay_loop only checks
+        # doorbells, so we need to wake the agent with a doorbell first.
+        # The main loop will find the compact command on the next iteration.
         log("Triggering agent-initiated compaction...")
+        compact_sent_ts = time.time()
         send_compact_command()
+        time.sleep(0.5)
+        send_doorbell("Please compact now.", adapter="tui")
 
         # Monitor for compaction events
         updates_path = find_updates_jsonl()
@@ -363,23 +398,37 @@ def test_agent_initiated_compaction():
         else:
             log("WARNING: updates.jsonl not found, monitoring via stdout only")
 
-        # Read post-compaction output
-        log("Reading post-compaction output (120s)...")
-        post_output = read_agent_output(proc, timeout=120)
+        # Read post-compaction output (asdaaas stdout)
+        log("Reading post-compaction output (180s)...")
+        post_output = read_agent_output(proc, timeout=180)
 
-        # Check for boot protocol markers
+        # Check for boot protocol markers in stdout
         all_output = "\n".join(post_output)
-        boot_markers = {
+        boot_markers_stdout = {
             "compaction_complete": "[Compaction complete" in all_output or "compaction" in all_output.lower(),
             "agents_md_read": "BOOT_PROTOCOL_COMPLETE" in all_output,
         }
 
-        log("Post-compaction markers:")
-        for marker, found in boot_markers.items():
-            status = "FOUND" if found else "NOT FOUND"
-            log(f"  {marker}: {status}")
+        # Also check TUI outbox for agent responses
+        # (agent writes to TUI outbox, not just stdout)
+        outbox_responses = check_tui_outbox(since_ts=compact_sent_ts)
+        all_outbox = "\n".join(text for _, text in outbox_responses)
+        boot_markers_outbox = {
+            "agents_md_read": "BOOT_PROTOCOL_COMPLETE" in all_outbox,
+            "compaction_aware": "compaction" in all_outbox.lower() or "compacted" in all_outbox.lower(),
+        }
 
-        # Also check compaction_state.json
+        log("Post-compaction markers (stdout):")
+        for marker, found in boot_markers_stdout.items():
+            log(f"  {marker}: {'FOUND' if found else 'NOT FOUND'}")
+        log("Post-compaction markers (TUI outbox):")
+        for marker, found in boot_markers_outbox.items():
+            log(f"  {marker}: {'FOUND' if found else 'NOT FOUND'}")
+        log(f"TUI outbox responses since compact: {len(outbox_responses)}")
+        for ts, text in outbox_responses:
+            log(f"  [{ts}] {text[:150]}...")
+
+        # Check compaction_state.json
         compaction_state = TESTAGENT_HOME / "asdaaas" / "compaction_state.json"
         if compaction_state.exists():
             with open(compaction_state) as f:
@@ -388,7 +437,14 @@ def test_agent_initiated_compaction():
                 f"tokens_before={state.get('tokens_before')}, "
                 f"tokens_after={state.get('tokens_after')}")
 
-        return True
+        # Overall verdict
+        boot_followed = boot_markers_outbox["agents_md_read"] or boot_markers_stdout["agents_md_read"]
+        if boot_followed:
+            log("PASS: Agent followed boot protocol after compaction")
+        else:
+            log("FAIL: Boot protocol marker not found")
+
+        return boot_followed
 
     finally:
         stop_agent(proc)

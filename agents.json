@@ -52,14 +52,37 @@
       "home": "/home/eric/agents/Astro",
       "backend": "claude",
       "yolo": true
+    },
+    "TestAgent": {
+      "session": "019ea406-4f4c-7c70-abab-a44fa936f50a",
+      "home": "/home/eric/agents/TestAgent",
+      "yolo": true
     }
   },
   "adapters": {
-    "context": {"script": "adapters/context_adapter.py", "log": "context_adapter.log"},
-    "session": {"script": "adapters/session_adapter.py", "log": "session_adapter.log"},
-    "heartbeat": {"script": "adapters/heartbeat_adapter.py", "log": "heartbeat_adapter.log"},
-    "irc": {"script": "scripts/launch_irc_adapter.sh", "log": "irc_adapter.log"},
-    "localmail": {"script": "adapters/localmail_adapter.py", "log": "localmail_adapter.log"},
-    "remind": {"script": "scripts/launch_remind.sh", "log": "remind_adapter.log"}
+    "context": {
+      "script": "adapters/context_adapter.py",
+      "log": "context_adapter.log"
+    },
+    "session": {
+      "script": "adapters/session_adapter.py",
+      "log": "session_adapter.log"
+    },
+    "heartbeat": {
+      "script": "adapters/heartbeat_adapter.py",
+      "log": "heartbeat_adapter.log"
+    },
+    "irc": {
+      "script": "scripts/launch_irc_adapter.sh",
+      "log": "irc_adapter.log"
+    },
+    "localmail": {
+      "script": "adapters/localmail_adapter.py",
+      "log": "localmail_adapter.log"
+    },
+    "remind": {
+      "script": "scripts/launch_remind.sh",
+      "log": "remind_adapter.log"
+    }
   }
 }

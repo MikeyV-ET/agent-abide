@@ -1,7 +1,4 @@
 {
-  "Trip": {
-    "home": "/home/eric/agents/Trip"
-  },
   "Jr": {
     "home": "/home/eric/agents/Jr"
   },
@@ -13,5 +10,8 @@
   },
   "Sr": {
     "home": "/home/eric/agents/Sr"
+  },
+  "Trip": {
+    "home": "/home/eric/agents/Trip"
   }
 }

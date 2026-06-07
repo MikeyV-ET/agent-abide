@@ -136,6 +136,15 @@ class AgentBackend(ABC):
     def model_id(self) -> str:
         """Current model identifier."""
 
+    @abstractmethod
+    def refresh_tokens(self) -> int:
+        """Read current token count from the backend's authoritative source.
+
+        Called between turns to get fresh token data without sending a prompt.
+        Each backend reads from its own source (e.g. updates.jsonl for grok,
+        session API for Claude). Returns the updated total_tokens value.
+        """
+
     @property
     @abstractmethod
     def total_tokens(self) -> int:

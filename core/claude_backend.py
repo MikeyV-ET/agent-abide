@@ -256,6 +256,15 @@ class ClaudeBackend(AgentBackend):
 
         # rate_limit_event, user echo, etc. -- skip silently
 
+    def refresh_tokens(self) -> int:
+        """Return current accumulated token count.
+
+        Claude Code tracks tokens per-turn via result frames. There is no
+        external file to read between turns — the accumulated count from
+        collect_response is the best available.
+        """
+        return self._total_tokens
+
     async def drain_stale(self) -> tuple[int, str]:
         drained = 0
         speech_chunks = []

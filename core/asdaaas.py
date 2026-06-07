@@ -2097,7 +2097,13 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 write_health(agent_name, "shutdown", "graceful shutdown", total_tokens, context_window)
                 break
 
-            # ---- 0. Detect auto-compaction (token count dropped significantly) ----
+            # ---- 0. Refresh token count from backend's authoritative source ----
+            # Between turns the binary may have compacted or updated tokens.
+            # Reading fresh data here ensures auto-compaction detection (below)
+            # and context_left_tag both use accurate numbers.
+            total_tokens = backend.refresh_tokens()
+
+            # ---- 0b. Detect auto-compaction (token count dropped significantly) ----
             if total_tokens < _prev_tokens * 0.6 and _prev_tokens > 0:
                 print(f"[asdaaas] Auto-compaction detected: {_prev_tokens} -> {total_tokens}")
                 turns_since_compaction = 0
@@ -2519,6 +2525,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
             if prompt_parts:
                 did_work_this_iteration = True
+                # Refresh token count from authoritative source before
+                # building the prompt. Ensures context_left_tag is accurate
+                # even after compaction (which happens between turns).
+                total_tokens = backend.refresh_tokens()
                 gaze = read_gaze(agent_name)
                 prompt_text = "\n".join(prompt_parts) + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
 

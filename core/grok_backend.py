@@ -479,6 +479,24 @@ class GrokBackend(AgentBackend):
                 if on_meta:
                     on_meta(self._total_tokens)
 
+    def refresh_tokens(self) -> int:
+        """Read latest _meta from updates.jsonl to get current token count.
+
+        The grok binary writes _meta.totalTokens after every turn, including
+        after compaction. This reads any unprocessed frames to get the
+        authoritative count without sending a prompt.
+        """
+        if not self._file_source:
+            return self._total_tokens
+
+        updates, _ = self._file_source.read_new_lines()
+        for frame in updates:
+            meta = frame.get("params", {}).get("_meta", {})
+            if meta.get("totalTokens"):
+                self._total_tokens = meta["totalTokens"]
+
+        return self._total_tokens
+
     async def drain_stale(self) -> tuple[int, str]:
         if not self._file_source:
             return 0, ""

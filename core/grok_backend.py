@@ -40,8 +40,18 @@ class FileEventSource:
         self._updates_fp: Optional[IO] = None
         self._events_fp: Optional[IO] = None
 
-    def open(self):
-        """Open both files and seek to end. Call BEFORE sending a prompt."""
+    def open(self, timeout: float = 30.0):
+        """Open both files and seek to end. Call BEFORE sending a prompt.
+
+        Waits up to `timeout` seconds for files to appear (new sessions
+        may not have updates.jsonl/events.jsonl created immediately).
+        """
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._updates_path.exists() and self._events_path.exists():
+                break
+            time.sleep(0.5)
         self._updates_fp = open(self._updates_path, "r")
         self._events_fp = open(self._events_path, "r")
         self._updates_fp.seek(0, 2)

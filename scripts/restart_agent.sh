@@ -514,6 +514,29 @@ restart_one_agent() {
     stage_clean "$agent"  # clean never fails fatally
     stage_stop "$agent"   || { echo "  ABORT: Could not stop existing process"; write_startup_record "$agent" "fail" "stop" "could not stop existing process"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=stop ==="; return 1; }
 
+    # Post-stop cleanup: remove shutdown commands that stage_stop wrote.
+    # The old process may have died via SIGTERM (e.g. while in delay loop)
+    # without consuming the shutdown command file from the queue.
+    local post_home
+    post_home=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent']['home'])")
+    local post_cmd_dir="$post_home/asdaaas/commands"
+    if [ -d "$post_cmd_dir" ]; then
+        local post_cleaned=0
+        for f in "$post_cmd_dir"/cmd_*.json; do
+            if [ -f "$f" ]; then
+                local action
+                action=$(python3 -c "import json; print(json.load(open('$f')).get('action',''))" 2>/dev/null || true)
+                if [ "$action" = "shutdown" ] || [ "$action" = "force_compact" ]; then
+                    rm "$f"
+                    post_cleaned=$((post_cleaned + 1))
+                fi
+            fi
+        done
+        if [ $post_cleaned -gt 0 ]; then
+            echo "  OK   Post-stop cleanup: removed $post_cleaned stale command(s)"
+        fi
+    fi
+
     sleep 1
 
     stage_launch "$agent" || { echo "  ABORT: Launch failed"; write_startup_record "$agent" "fail" "launch" "process died within 2s"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=launch ==="; return 1; }

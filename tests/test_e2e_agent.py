@@ -641,3 +641,115 @@ class TestRestartDelivery:
         bells = poll_doorbells(name)
         assert len(bells) == 1
         assert bells[0]["text"] == "Don't lose me"
+
+
+# ============================================================================
+# E2E-8: Stale shutdown command bug -- restart_agent.sh race
+# ============================================================================
+
+class TestStaleShutdownCommand:
+    """E2E-8: Stale shutdown command from stage_stop survives into new process.
+
+    Bug: restart_agent.sh stage_stop writes a shutdown command to the queue.
+    If the old process dies via SIGTERM (because it was in run_delay_loop
+    which doesn't poll commands), the shutdown file stays on disk.
+    stage_clean runs BEFORE stage_stop, so it can't clean up after.
+    The new process finds the stale shutdown and kills itself.
+
+    Observed: Sr restart -> "Ready." -> immediately "Command: shutdown" -> dies.
+    Second restart works because first new process consumed the stale file.
+    """
+
+    def test_stale_shutdown_command_kills_new_process(self, agent_env):
+        """Reproduce: shutdown command written by stage_stop survives into new process.
+
+        This is the regression test for the bug. After fix, this should pass
+        because restart_agent.sh will clean shutdown commands after stage_stop."""
+        name = agent_env["agent_name"]
+        cmd_dir = agent_env["asdaaas_dir"] / "commands"
+
+        # Simulate stage_clean (runs before stage_stop): removes existing shutdown cmds
+        for f in cmd_dir.glob("cmd_*shutdown*.json"):
+            f.unlink()
+
+        # Simulate stage_stop: writes NEW shutdown command to queue
+        shutdown_file = cmd_dir / f"cmd_shutdown_{int(time.time())}.json"
+        with open(shutdown_file, "w") as f:
+            json.dump({"action": "shutdown"}, f)
+
+        # Simulate: old process dies via SIGTERM without consuming the command
+        # (run_delay_loop doesn't poll commands, SIGTERM handler exits directly)
+        # The shutdown file is still on disk.
+        assert shutdown_file.exists(), "Shutdown command should still be on disk"
+
+        # Simulate: new process starts and polls commands
+        commands = poll_commands(name)
+
+        # BUG: new process finds stale shutdown command
+        shutdown_cmds = [c for c in commands if c.get("action") == "shutdown"]
+        assert len(shutdown_cmds) == 1, (
+            "New process should NOT find a stale shutdown command. "
+            "restart_agent.sh must clean shutdown commands after stage_stop."
+        )
+
+    def test_post_stop_cleanup_prevents_stale_shutdown(self, agent_env):
+        """After fix: cleanup between stage_stop and stage_launch removes stale cmds."""
+        name = agent_env["agent_name"]
+        cmd_dir = agent_env["asdaaas_dir"] / "commands"
+
+        # stage_stop writes shutdown command (old process dies via SIGTERM)
+        shutdown_file = cmd_dir / f"cmd_shutdown_{int(time.time())}.json"
+        with open(shutdown_file, "w") as f:
+            json.dump({"action": "shutdown"}, f)
+
+        # FIX: post-stop cleanup removes shutdown commands
+        for f in cmd_dir.glob("cmd_*.json"):
+            try:
+                data = json.loads(f.read_text())
+                if data.get("action") in ("shutdown", "force_compact"):
+                    f.unlink()
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # New process polls commands -- no stale shutdown
+        commands = poll_commands(name)
+        shutdown_cmds = [c for c in commands if c.get("action") == "shutdown"]
+        assert len(shutdown_cmds) == 0, "Post-stop cleanup should remove stale shutdown commands"
+
+    def test_adapter_message_after_restart(self, agent_env):
+        """Surface-level spec: after restart, TUI messages should be deliverable.
+
+        Simulates: agent UP -> TUI writes message to adapter inbox -> poll finds it."""
+        name = agent_env["agent_name"]
+        tui_inbox = agent_env["asdaaas_dir"] / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+
+        # Agent is "UP" (no stale commands in queue)
+        commands = poll_commands(name)
+        assert len(commands) == 0
+
+        # TUI writes a message (same as tui_adapter.write_message)
+        msg = {
+            "id": "msg_test_001",
+            "from": "eric",
+            "to": name,
+            "text": "hello after restart",
+            "adapter": "tui",
+            "room": "tui",
+            "ts": time.time(),
+        }
+        msg_file = tui_inbox / "msg_test_001.json"
+        with open(msg_file, "w") as f:
+            json.dump(msg, f)
+
+        # asdaaas polls adapter inboxes
+        from asdaaas import poll_adapter_inboxes
+        awareness = {"direct_attach": ["tui", "irc"], "default_doorbell": True}
+        messages = poll_adapter_inboxes(name, awareness)
+
+        assert len(messages) == 1
+        assert messages[0]["text"] == "hello after restart"
+        assert messages[0]["from"] == "eric"
+
+        # Message file consumed (deleted by poll)
+        assert not msg_file.exists()

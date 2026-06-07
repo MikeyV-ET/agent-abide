@@ -1222,6 +1222,33 @@ def _cleanup_continue_doorbells(agent_name):
         print(f"[asdaaas] Cleaned up {removed} continue doorbell(s)")
 
 
+def _queue_post_compaction_doorbell(agent_name, tokens_before, tokens_after):
+    """Queue a doorbell telling the agent it just came back from compaction.
+
+    After auto-compaction, the binary injects 'Continue... pick up as if the
+    break never happened' which conflicts with AGENTS.md boot protocol.  This
+    doorbell fires on the next turn to override that and trigger re-orientation.
+    """
+    bell_dir = agent_dir(agent_name) / "doorbells"
+    bell_dir.mkdir(parents=True, exist_ok=True)
+    bell = {
+        "adapter": "system",
+        "priority": 1,
+        "text": (
+            f"[Compaction complete. Context reduced from {tokens_before} to {tokens_after} tokens. "
+            f"You are resuming from a compacted context. Follow your boot protocol.]"
+        ),
+        "source": "compaction",
+        "ts": time.time(),
+    }
+    bell_id = f"compact_{int(time.time() * 1000)}"
+    fd, tmp_path = tempfile.mkstemp(dir=str(bell_dir), suffix=".tmp", prefix=f"{bell_id}_")
+    with os.fdopen(fd, "w") as f:
+        json.dump(bell, f)
+    os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
+    print(f"[asdaaas] Post-compaction doorbell queued for {agent_name}")
+
+
 def format_doorbell(bell):
     """Format a doorbell notification for delivery to agent stdin.
     
@@ -2110,6 +2137,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 compact_pending = None  # cancel any pending manual compact
                 compact_pending_turns = 0
                 write_compaction_state(agent_name, "complete", tokens_before=_prev_tokens, tokens_after=total_tokens)
+                # Queue a doorbell telling the agent to re-orient.
+                # The binary's auto_continue says "pick up as if the break
+                # never happened" — this overrides that with boot protocol.
+                _queue_post_compaction_doorbell(agent_name, _prev_tokens, total_tokens)
             _prev_tokens = total_tokens
 
             # ---- 1. Check for adapter commands (e.g., /compact) ----
@@ -2142,6 +2173,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     else:
                         next_turn_delay = float(delay_val)
                         delay_until_event = False
+                        # Clean up stale continue doorbells — without this,
+                        # a continue bell from the previous iteration races
+                        # past the delay command and wakes the agent immediately.
+                        _cleanup_continue_doorbells(agent_name)
                         msg = f"[asdaaas] Delay: {next_turn_delay}s before next default doorbell"
                         if delay_text:
                             msg += f" (text: {delay_text[:60]})"
@@ -2204,11 +2239,26 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                             # skip the probe (saves tokens) and let auto-compaction
                             # detection at the top of the loop catch the real drop.
                             if total_tokens >= tokens_before:
-                                print(f"[asdaaas] Compact pending: {tokens_before} -> {total_tokens} (no reduction yet, binary may compact async)")
+                                # /compact is async — binary compacts at next turn
+                                # boundary. Poll for the actual token drop.
+                                print(f"[asdaaas] Compact pending: {tokens_before} -> {total_tokens} (polling for async completion)")
                                 write_compaction_state(agent_name, "pending", request_id=request_id, tokens_before=tokens_before)
-                                _prev_tokens = total_tokens
-                                # Don't reset turns_since_compaction — auto-detection will
-                                # Don't send probe — would burn tokens before real compaction
+                                compaction_landed = False
+                                for _poll in range(15):  # 15 x 2s = 30s max
+                                    await asyncio.sleep(2)
+                                    total_tokens = backend.refresh_tokens()
+                                    if total_tokens < tokens_before * 0.6:
+                                        compaction_landed = True
+                                        break
+                                if compaction_landed:
+                                    print(f"[asdaaas] Compact completed (async): {tokens_before} -> {total_tokens}")
+                                    _prev_tokens = total_tokens
+                                    turns_since_compaction = 0
+                                    write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
+                                    _queue_post_compaction_doorbell(agent_name, tokens_before, total_tokens)
+                                else:
+                                    print(f"[asdaaas] Compact still pending after 30s poll — leaving for auto-detection")
+                                    _prev_tokens = total_tokens
                             else:
                                 probe_text = "[Compaction complete. You are resuming from a compacted context.]"
                                 await backend.drain_stale()

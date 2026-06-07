@@ -257,6 +257,8 @@ class AgentHeader(Static):
     gaze_target = reactive("unknown")
     health_status = reactive("unknown")
     compaction_count = reactive(0)
+    compaction_phase = reactive("")
+    compaction_detail = reactive("")
     model_name = reactive("")
     is_generating = reactive(False)
     turn_physical = reactive(0)
@@ -284,6 +286,18 @@ class AgentHeader(Static):
 
         if self.compaction_count > 0:
             text.append(f" (c:{self.compaction_count})", style=Gruvbox.GRAY)
+
+        # Compaction phase indicator
+        cp = self.compaction_phase
+        if cp in ("in_flight", "pending"):
+            text.append(" ⟳ compacting", style=f"bold {Gruvbox.BR_ORANGE}")
+        elif cp == "complete" and self.compaction_detail:
+            text.append(f" ✓ compacted {self.compaction_detail}", style=Gruvbox.BR_GREEN)
+        elif cp == "complete":
+            text.append(" ✓ compacted", style=Gruvbox.BR_GREEN)
+        elif cp == "failed":
+            text.append(" ✗ compact fail", style=f"bold {Gruvbox.BR_RED}")
+
         text.append("  ")
 
         # Gaze (clickable)
@@ -2721,6 +2735,32 @@ Type anything else to send a message to the agent.
                 except Exception:
                     pass
 
+                # Read compaction state
+                try:
+                    compact_path = asdaaas_dir / "compaction_state.json"
+                    if compact_path.exists():
+                        with open(compact_path) as f:
+                            cstate = json.load(f)
+                        phase = cstate.get("phase", "")
+                        # Auto-hide complete phase after 2 minutes
+                        if phase == "complete":
+                            last_done = cstate.get("last_completed") or cstate.get("ts", 0)
+                            if time.time() - last_done > 120:
+                                phase = ""
+                        # Build detail string for token savings
+                        detail = ""
+                        if phase == "complete" and cstate.get("tokens_before") and cstate.get("tokens_after"):
+                            saved = cstate["tokens_before"] - cstate["tokens_after"]
+                            if saved > 0:
+                                detail = f"-{round(saved / 1000)}k"
+                        self.call_from_thread(setattr, header, "compaction_phase", phase)
+                        self.call_from_thread(setattr, header, "compaction_detail", detail)
+                    else:
+                        self.call_from_thread(setattr, header, "compaction_phase", "")
+                        self.call_from_thread(setattr, header, "compaction_detail", "")
+                except Exception:
+                    pass
+
                 # Read turn count from profile
                 try:
                     profile_path = asdaaas_dir / "profile" / f"{active}.jsonl"
@@ -3427,11 +3467,22 @@ Type anything else to send a message to the agent.
         content = self._content_scroll()
         content.mount(HookAnnotation("🔄 Auto-compaction started..."))
         self._scroll_to_bottom()
+        try:
+            header = self.query_one(AgentHeader)
+            header.compaction_phase = "in_flight"
+            header.compaction_detail = ""
+        except Exception:
+            pass
 
     def _on_compact_completed(self, update: dict) -> None:
         content = self._content_scroll()
         content.mount(HookAnnotation("✅ Auto-compaction completed"))
         self._scroll_to_bottom()
+        try:
+            header = self.query_one(AgentHeader)
+            header.compaction_phase = "complete"
+        except Exception:
+            pass
 
     def _on_retry_state(self, update: dict) -> None:
         """Handle API retry notifications."""

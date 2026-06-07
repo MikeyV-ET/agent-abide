@@ -753,3 +753,118 @@ class TestStaleShutdownCommand:
 
         # Message file consumed (deleted by poll)
         assert not msg_file.exists()
+
+
+# ============================================================================
+# E2E-9: Delay / default doorbell race
+# ============================================================================
+
+class TestDelayDefaultDoorbellRace:
+    """Test that delay commands actually prevent continue doorbells.
+
+    BUG: Agent sets delay 600s, but continues fire every 1-2 minutes.
+
+    Root cause: The main loop creates a continue doorbell (line 2496) at the
+    END of the current loop iteration. On the NEXT iteration, poll_commands
+    (step 1, line 2116) finds the delay command and sets next_turn_delay=600.
+    But poll_doorbells (step 2, line 2375) ALSO finds the continue bell from
+    the previous iteration. Since bells is non-empty, the idle handler
+    (line 2444) never runs — the continue bell becomes the prompt, the agent
+    responds, writes another delay, and the cycle repeats.
+
+    The delay command is consumed correctly but never takes effect because
+    the continue doorbell from the prior turn pre-empts it.
+    """
+
+    def test_continue_bell_created_before_delay_consumed(self, agent_env):
+        """Reproduce: continue bell from prior turn pre-empts delay command.
+
+        Sequence:
+        1. Continue doorbell exists on disk (from prior turn's line 2496)
+        2. Agent's delay command also exists (written during response)
+        3. poll_commands consumes delay -> sets next_turn_delay=600
+        4. poll_doorbells finds the continue bell -> bells is non-empty
+        5. Idle handler (line 2444) condition fails (bells is non-empty)
+        6. Delay never enters run_delay_loop
+        7. After processing continue, a NEW continue bell is queued (line 2496)
+        8. Cycle repeats
+        """
+        name = agent_env["agent_name"]
+        bell_dir = agent_env["asdaaas_dir"] / "doorbells"
+        cmd_dir = agent_env["asdaaas_dir"] / "commands"
+
+        # Step 1: Simulate end of prior turn — continue doorbell queued
+        assert queue_continue_doorbell(name), "Should create continue bell"
+        assert has_pending_doorbells(name), "Continue bell should be pending"
+
+        # Step 2: Simulate agent writing delay command during response
+        delay_cmd = cmd_dir / f"cmd_{int(time.time()*1000)}_test.json"
+        with open(delay_cmd, "w") as f:
+            json.dump({"action": "delay", "seconds": 600}, f)
+
+        # Step 3: Next iteration top — poll_commands consumes delay
+        commands = poll_commands(name)
+        delay_cmds = [c for c in commands if c.get("action") == "delay"]
+        assert len(delay_cmds) == 1, "Should find the delay command"
+        assert delay_cmds[0]["seconds"] == 600
+
+        # Step 4: poll_doorbells also finds the continue bell
+        bells = poll_doorbells(name)
+        continue_bells = [b for b in bells if b.get("adapter") == "continue"
+                          or b.get("source") == "continue"]
+        assert len(continue_bells) >= 1, "Continue bell should still be pending"
+
+        # BUG: Both commands AND bells are present in the same iteration.
+        # The main loop processes bells as prompt (step 2b), skipping the
+        # idle handler where run_delay_loop would execute. The delay is
+        # consumed (poll_commands deleted the file) but never acted on.
+        # This is the race: continue bell from turn N pre-empts delay from turn N.
+
+    def test_delay_command_coexists_with_continue(self, agent_env):
+        """Verify that when delay is set AND continue bell exists,
+        the delay should win (continue should be suppressed or deferred).
+
+        This is the spec test — it documents what SHOULD happen.
+        Currently this will demonstrate the race condition."""
+        name = agent_env["agent_name"]
+        bell_dir = agent_env["asdaaas_dir"] / "doorbells"
+        cmd_dir = agent_env["asdaaas_dir"] / "commands"
+
+        # Simulate the race state
+        queue_continue_doorbell(name)
+        delay_cmd = cmd_dir / f"cmd_{int(time.time()*1000)}_test.json"
+        with open(delay_cmd, "w") as f:
+            json.dump({"action": "delay", "seconds": 600}, f)
+
+        # Both exist simultaneously
+        has_bells = has_pending_doorbells(name)
+        commands = poll_commands(name)
+        has_delay = any(c.get("action") == "delay" for c in commands)
+
+        assert has_bells, "Continue bell exists"
+        assert has_delay, "Delay command exists"
+
+        # The correct behavior: if a delay command is pending,
+        # continue doorbells from the same agent should be suppressed.
+        # Currently they are NOT — this is the bug.
+
+    def test_until_event_cleans_continues_but_new_one_arrives(self, agent_env):
+        """until_event calls _cleanup_continue_doorbells (line 2140/2464),
+        but a new continue is queued at line 2496 after the delay handler.
+
+        The cleanup happens at step 1 (command processing), but the continue
+        is created at step 3 (idle handler). The next iteration finds it."""
+        name = agent_env["agent_name"]
+        bell_dir = agent_env["asdaaas_dir"] / "doorbells"
+
+        # Create continue bell, then clean it (simulating until_event)
+        queue_continue_doorbell(name)
+        assert has_pending_doorbells(name)
+
+        from asdaaas import _cleanup_continue_doorbells
+        _cleanup_continue_doorbells(name)
+        assert not has_pending_doorbells(name), "Cleanup should remove continues"
+
+        # But then queue_continue_doorbell fires again (line 2496)
+        queue_continue_doorbell(name)
+        assert has_pending_doorbells(name), "New continue bell re-created after cleanup"

@@ -2480,6 +2480,9 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                 agent_name, next_turn_delay, awareness
                             )
                             next_turn_delay = 0
+                            # Agent was idle during delay — any arriving message
+                            # is a fresh interaction, not midturn.
+                            last_was_foreground = True
                             if interrupted:
                                 print(f"[asdaaas] Delay interrupted by {reason}")
                                 continue
@@ -2489,6 +2492,9 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     delay_text = None
                     continue
 
+                # Agent idle (until_event or no default_doorbell) — reset
+                # midturn state so arriving messages aren't falsely flagged.
+                last_was_foreground = True
                 await asyncio.sleep(IDLE_POLL_INTERVAL)
                 continue
 

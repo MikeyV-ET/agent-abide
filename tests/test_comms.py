@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
 
-from asdaaas import ack_doorbells, has_pending_doorbells
+from asdaaas import ack_doorbells, has_pending_doorbells, _is_midturn_message, MIDTURN_GRACE_SECONDS
 
 
 @pytest.fixture
@@ -153,3 +153,58 @@ class TestRemindAdapter:
             with open(path) as f:
                 loaded = json.load(f)
             assert loaded["delay"] == delay
+
+
+# ============================================================================
+# Midturn detection
+# ============================================================================
+
+class TestMidturnDetection:
+    """Tests for _is_midturn_message logic."""
+
+    def test_none_response_ts_returns_false(self):
+        """No prior response → nothing is midturn."""
+        msg = {"_received_ts": time.time()}
+        assert _is_midturn_message(msg, None) is False
+
+    def test_msg_before_response_is_midturn(self):
+        """Message sent before agent responded → midturn."""
+        now = time.time()
+        msg = {"_received_ts": now - 10}
+        assert _is_midturn_message(msg, now) is True
+
+    def test_msg_after_response_is_not_midturn(self):
+        """Message sent after agent responded → not midturn."""
+        now = time.time()
+        msg = {"_received_ts": now + 5}
+        assert _is_midturn_message(msg, now) is False
+
+    def test_grace_period_on_non_foreground(self):
+        """Non-foreground turn adds grace: msg within grace is midturn."""
+        now = time.time()
+        msg = {"_received_ts": now + 10}  # 10s after response
+        assert _is_midturn_message(msg, now, last_was_foreground=False) is True
+        assert 10 < MIDTURN_GRACE_SECONDS  # confirm test is within grace
+
+    def test_no_grace_on_foreground(self):
+        """Foreground turn: msg after response is not midturn (no grace)."""
+        now = time.time()
+        msg = {"_received_ts": now + 10}
+        assert _is_midturn_message(msg, now, last_was_foreground=True) is False
+
+    def test_after_idle_foreground_reset_prevents_false_flag(self):
+        """Simulates the fix: after idle, last_was_foreground=True prevents
+        false midturn on messages arriving shortly after a non-foreground turn.
+
+        This is the Eric scenario: agent processes doorbell (non-foreground),
+        goes idle, user sends message within 30s. Without the fix,
+        last_was_foreground=False → grace period → false midturn.
+        With the fix, idle resets last_was_foreground=True → no grace."""
+        response_ts = time.time()
+        msg = {"_received_ts": response_ts + 5}  # 5s after response (within grace)
+
+        # Before fix: non-foreground → midturn (false positive)
+        assert _is_midturn_message(msg, response_ts, last_was_foreground=False) is True
+
+        # After fix: idle resets to foreground → not midturn (correct)
+        assert _is_midturn_message(msg, response_ts, last_was_foreground=True) is False

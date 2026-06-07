@@ -105,7 +105,7 @@ cat > "$AGENT_HOME/lab_notebook.md" << EOF
 # Lab Notebook — $AGENT_NAME
 
 ## $(date +"%Y-%m-%d %H:%M:%S %Z") — Agent initialized
-About to do: Boot for the first time with agentabide infrastructure.
+About to do: Boot for the first time with agent-abide infrastructure.
 Why: Setting up continuous existence via asdaaas.
 Expect: Receive first [continue] doorbell and begin operating.
 EOF

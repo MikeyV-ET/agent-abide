@@ -46,6 +46,7 @@ USB_DIR="/mnt/d/MikeyV"
 # Sources to back up
 AGENTS_DIR="${HOME}/agents"
 INFRA_DIR="${HOME}/projects/mikeyv-infra"
+AGENTABIDE_DIR="${HOME}/projects/agent-abide"
 ERICS_NOTES_DIR="${HOME}/projects/erics-notes"
 SOCRATIC_DIR="${HOME}/projects/socratic-arena"
 SESSIONS_DIR="${HOME}/.grok/sessions"
@@ -54,6 +55,7 @@ SESSIONS_DIR="${HOME}/.grok/sessions"
 GIT_REPOS=(
     "${HOME}/agents"
     "${HOME}/projects/mikeyv-infra"
+    "${HOME}/projects/agent-abide"
     "${HOME}/projects/erics-notes"
     "${HOME}/projects/socratic-arena"
 )
@@ -79,9 +81,9 @@ do_backup() {
     today=$(date +"%Y-%m-%d")
     local target="${DAILY_DIR}/${today}"
 
-    mkdir -p "$target/agents" "$target/infra" "$target/sessions" \
-             "$target/erics-notes" "$target/socratic-arena" \
-             "$target/git-bundles" "$SNAPSHOT_DIR"
+    mkdir -p "$target/agents" "$target/infra" "$target/agent-abide" \
+             "$target/sessions" "$target/erics-notes" \
+             "$target/socratic-arena" "$target/git-bundles" "$SNAPSHOT_DIR"
     touch "$LOG_FILE"
 
     log "=== Backup starting ==="
@@ -108,7 +110,19 @@ do_backup() {
         || err_track "rsync infra failed"
     log "  infra: $(du -sh "${target}/infra/" | cut -f1)"
 
-    # 3. Eric's notes repo
+    # 3. Agent-abide code
+    if [[ -d "$AGENTABIDE_DIR" ]]; then
+        log "Backing up agent-abide..."
+        rsync -a --delete \
+            --exclude='__pycache__' \
+            --exclude='.git' \
+            --exclude='*.bak' \
+            "${AGENTABIDE_DIR}/" "${target}/agent-abide/" \
+            || err_track "rsync agent-abide failed"
+        log "  agent-abide: $(du -sh "${target}/agent-abide/" | cut -f1)"
+    fi
+
+    # 4. Eric's notes repo
     if [[ -d "$ERICS_NOTES_DIR" ]]; then
         log "Backing up erics-notes..."
         rsync -a --delete \
@@ -245,7 +259,7 @@ do_verify() {
         "agents/Sr/lab_notebook_sr.md"
         "agents/Sr/AGENTS.md"
         "agents/Jr/lab_notebook_jr.md"
-        "infra/live/comms/asdaaas.py"
+        "agent-abide/core/asdaaas.py"
     )
 
     for f in "${critical_files[@]}"; do

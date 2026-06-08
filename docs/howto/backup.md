@@ -36,8 +36,10 @@ Verify: `ls /mnt/d/` and `touch /mnt/d/test && rm /mnt/d/test`
 
 ### 2. Run backup
 
+**Important:** `--exclude` flags must come BEFORE the directory argument. GNU tar silently ignores excludes placed after the directory.
+
 ```bash
-tar czf - -C / home/eric \
+tar czf - -C / \
   --exclude="home/eric/.cache" \
   --exclude="home/eric/.npm" \
   --exclude="home/eric/.local" \
@@ -55,10 +57,17 @@ tar czf - -C / home/eric \
   --exclude="home/eric/.grok/bundled" \
   --exclude="home/eric/.grok/docs" \
   --exclude="home/eric/.grok/skills" \
+  home/eric \
   | split -b 3G - /mnt/d/home_eric_backup_lean_YYYYMMDD.tar.gz.
 ```
 
 Split into 3GB chunks for NTFS compatibility. Output: `.tar.gz.aa`, `.tar.gz.ab`, etc.
+
+**Before re-running:** delete previous chunks first. `split` overwrites existing files but doesn't remove extras — a smaller backup leaves stale chunks from a larger prior run.
+
+```bash
+rm -f /mnt/d/home_eric_backup_lean_YYYYMMDD.tar.gz.a*
+```
 
 ### 3. Verify
 

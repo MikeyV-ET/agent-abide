@@ -255,7 +255,11 @@ def watch_for_compaction_events(updates_path, timeout=COMPACTION_TIMEOUT):
                     continue
                 try:
                     entry = json.loads(line)
-                    event_type = entry.get("type", "")
+                    # Events use params.update.sessionUpdate as the type key
+                    event_type = (
+                        entry.get("params", {}).get("update", {}).get("sessionUpdate", "")
+                        or entry.get("type", "")
+                    )
                     if event_type in events:
                         events[event_type] = entry
                         log(f"Compaction event: {event_type}")

@@ -113,11 +113,11 @@ print(result['status'])  # "ok" or "error"
 
 ## Research Methodology
 
-When analyzing a Slack channel, go deep before filtering:
+When analyzing a Slack channel, default to seeing more rather than filtering early:
 
 1. **Level 0 -- All messages.** Pull full `history` (limit 200, paginate if `has_more`). This is your index.
-2. **Level 1 -- All threads.** Pull EVERY thread, not a subset. Reply count is a bad proxy for information density. A 1-reply thread can contain the most substantive information in the channel. Pulling 30 threads costs ~30 seconds of adapter time. Don't filter before reading.
+2. **Level 1 -- Threads.** Default posture: pull all threads. Reply count is a bad proxy for information density -- a 1-reply thread where a lead explains architecture is worth more than a 22-reply thread about GDrive permissions. For small channels (<50 threads), just pull them all. For large channels, you'll need to manage scale: summarize as you go, work across compactions, or hand off portions to subagents for parallel reading.
 3. **Level 2 -- Linked documents.** Note all URLs (Google Docs, GDrive, GitHub). Access what you can.
 4. **Level 3 -- User identification.** Map user IDs to names from message context (mentions, signatures, display names in search results).
 
-Don't prioritize threads by reply count. A logistics thread with 22 replies about GDrive permissions is less informative than a 1-reply thread where a lead explains system architecture.
+The risk is filtering too early and missing signal, not reading too much. But for large channels, manage the work -- create summaries between batches, use subagents for parallel thread reading, and plan for multi-compaction deep dives.

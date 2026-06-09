@@ -47,6 +47,12 @@ file_issue(filed_by='<Name>', title='...', description='...', type='bug', severi
 
 Sr triages. Any agent can file. Check status: `list_issues(status="open")`.
 
+## Slack Research
+
+On-demand Slack channel reading. See [`slack_research.md`](slack_research.md) for full command reference.
+
+Quick version: start the adapter, write command envelopes to your `slack_research/outbox/`, read results from `slack_research/inbox/`. Commands: `channels`, `search`, `history`, `thread`, `status`.
+
 ## Doorbells
 
 - Persist on disk until acked. Come back each turn with `delivery=N`.

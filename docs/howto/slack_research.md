@@ -110,3 +110,14 @@ print(result['status'])  # "ok" or "error"
 - Channel name resolution caches for 5 minutes. The cache is limited to 200 channels from `conversations.list`. If a channel doesn't resolve by name, use its ID directly (find it via `search`).
 - User IDs in results are raw Slack IDs (e.g. `U0994JNQ9B6`), not display names. Use search or channel context to map them.
 - The adapter polls your outbox every 1 second. Results typically arrive within 2-3 seconds.
+
+## Research Methodology
+
+When analyzing a Slack channel, go deep before filtering:
+
+1. **Level 0 -- All messages.** Pull full `history` (limit 200, paginate if `has_more`). This is your index.
+2. **Level 1 -- All threads.** Pull EVERY thread, not a subset. Reply count is a bad proxy for information density. A 1-reply thread can contain the most substantive information in the channel. Pulling 30 threads costs ~30 seconds of adapter time. Don't filter before reading.
+3. **Level 2 -- Linked documents.** Note all URLs (Google Docs, GDrive, GitHub). Access what you can.
+4. **Level 3 -- User identification.** Map user IDs to names from message context (mentions, signatures, display names in search results).
+
+Don't prioritize threads by reply count. A logistics thread with 22 replies about GDrive permissions is less informative than a 1-reply thread where a lead explains system architecture.

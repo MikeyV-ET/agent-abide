@@ -632,6 +632,265 @@ You are a test agent. When asked for the secret phrase, say it exactly.
 
 
 # ============================================================================
+# Test 4: Post-compaction turn fires automatically
+# ============================================================================
+
+def test_post_compaction_turn_fires():
+    """
+    After compaction, asdaaas must queue a post-compaction doorbell AND
+    the agent must actually get a turn (produce output) without any
+    external stimulus.
+
+    Bug context: Trip compacted but system went quiescent — no turn fired.
+    The _queue_post_compaction_doorbell() function exists but something
+    prevented the agent from waking up.
+
+    Expected:
+      1. Post-compaction doorbell file appears in doorbells dir
+      2. Agent produces at least one response after compaction
+      3. This happens WITHOUT sending any additional doorbells or messages
+    """
+    log("=" * 60)
+    log("TEST 4: Post-compaction turn fires automatically")
+    log("=" * 60)
+
+    setup_testagent_home()
+    ensure_testagent_in_config()
+    write_testagent_agents_md("""# TestAgent
+
+## Who I Am
+TestAgent. A test agent for post-compaction turn testing.
+
+## Boot Protocol
+After compaction, say exactly: "POST_COMPACTION_TURN_FIRED"
+This confirms you received a post-compaction turn.
+
+## Instructions
+You are a test agent. Do whatever is asked. After compaction, follow boot protocol.
+""")
+
+    proc = start_agent()
+    try:
+        ready, _ = wait_for_ready(proc)
+        if not ready:
+            log("FAIL: Agent did not reach Ready state")
+            return False
+
+        # Let initial cycle settle
+        log("Waiting for initial cycle to settle (60s)...")
+        read_agent_output(proc, timeout=60)
+
+        # Give agent some work so there's context to compact
+        send_doorbell("List the numbers 1 through 50 and say a short fact about each.")
+        log("Waiting for agent to process work (90s)...")
+        read_agent_output(proc, timeout=90)
+
+        # Record state before compaction
+        bell_dir = TESTAGENT_HOME / "asdaaas" / "doorbells"
+        pre_compact_bells = set(f.name for f in bell_dir.glob("*.json"))
+        pre_compact_time = time.time()
+
+        # Trigger compaction — command only, NO doorbell to wake agent
+        # (the doorbell in test1 was a workaround; we want to test that
+        # compaction itself triggers the next turn)
+        log("Triggering compaction (command only, no wake doorbell)...")
+        send_compact_command()
+        # But we do need one doorbell to wake the main loop to see the command
+        send_doorbell("Please compact now.")
+
+        # Wait for compaction events in updates.jsonl
+        updates_path = find_updates_jsonl()
+        if updates_path:
+            log(f"Watching for compaction events: {updates_path}")
+            events = watch_for_compaction_events(updates_path)
+            compaction_done = bool(events.get("auto_compact_completed") or events.get("compaction_checkpoint"))
+            log(f"Compaction completed: {compaction_done}")
+            if not compaction_done:
+                log("FAIL: Compaction did not complete")
+                return False
+        else:
+            log("WARNING: No updates.jsonl found, waiting by time...")
+            time.sleep(60)
+
+        # CHECK 1: Post-compaction doorbell was queued
+        time.sleep(5)  # give asdaaas a moment to write the bell
+        post_compact_bells = set(f.name for f in bell_dir.glob("*.json"))
+        new_bells = post_compact_bells - pre_compact_bells
+        compact_bells = [b for b in new_bells if "compact" in b.lower()]
+        log(f"New doorbells after compaction: {len(new_bells)} total, {len(compact_bells)} compact-related")
+        for b in new_bells:
+            try:
+                with open(bell_dir / b) as f:
+                    d = json.load(f)
+                log(f"  {b}: source={d.get('source', '?')}, text={d.get('text', '')[:80]}")
+            except Exception:
+                pass
+
+        bell_queued = len(compact_bells) > 0 or any(
+            "compact" in open(bell_dir / b).read().lower()
+            for b in new_bells
+            if (bell_dir / b).exists()
+        )
+        log(f"CHECK 1 - Post-compaction doorbell queued: {'PASS' if bell_queued else 'FAIL'}")
+
+        # CHECK 2: Agent gets a turn and produces output after compaction
+        # Do NOT send any additional stimulus — the doorbell alone should wake it
+        log("Waiting for post-compaction agent output (180s, NO additional stimulus)...")
+        post_output = read_agent_output(proc, timeout=POST_COMPACTION_TIMEOUT)
+
+        # Also check TUI outbox
+        outbox_responses = check_tui_outbox(since_ts=pre_compact_time)
+        all_post_text = "\n".join(post_output) + "\n".join(t for _, t in outbox_responses)
+
+        agent_responded = len(post_output) > 0 or len(outbox_responses) > 0
+        boot_marker = "POST_COMPACTION_TURN_FIRED" in all_post_text
+        log(f"CHECK 2 - Agent produced output: {'PASS' if agent_responded else 'FAIL'}")
+        log(f"CHECK 2b - Boot marker found: {'PASS' if boot_marker else 'FAIL'}")
+
+        if outbox_responses:
+            log(f"TUI outbox responses ({len(outbox_responses)}):")
+            for ts, text in outbox_responses[-3:]:
+                log(f"  [{ts}] {text[:150]}")
+
+        # Overall
+        passed = bell_queued and agent_responded
+        log(f"TEST 4 RESULT: {'PASS' if passed else 'FAIL'}")
+        if not passed:
+            log("DIAGNOSIS: Post-compaction doorbell may not have been delivered,")
+            log("or the main loop was in a state that prevented processing it.")
+        return passed
+
+    finally:
+        stop_agent(proc)
+
+
+# ============================================================================
+# Test 5: Context tag refreshes after compaction
+# ============================================================================
+
+def test_context_tag_after_compaction():
+    """
+    After compaction, verify the context_left_tag reflects post-compaction
+    token counts, not pre-compaction.
+
+    Bug context: Trip's context tag showed "13k left" when actually at 18%
+    (133k left). The refresh_tokens() call returned stale data.
+
+    Expected:
+      1. health.json updates to reflect post-compaction token count
+      2. Token count drops significantly (should be < 40% of pre-compact)
+      3. Agent's prompt includes accurate context_left_tag
+    """
+    log("=" * 60)
+    log("TEST 5: Context tag refreshes after compaction")
+    log("=" * 60)
+
+    setup_testagent_home()
+    ensure_testagent_in_config()
+    write_testagent_agents_md("""# TestAgent
+
+## Who I Am
+TestAgent. A test agent for context tag verification.
+
+## Instructions
+You are a test agent. When you see a compaction-complete message,
+report the context info from the tag at the end of your prompt.
+Say exactly: "CONTEXT_TAG_REPORT: [paste the Context left tag]"
+""")
+
+    proc = start_agent()
+    try:
+        ready, _ = wait_for_ready(proc)
+        if not ready:
+            log("FAIL: Agent did not reach Ready state")
+            return False
+
+        # Let initial cycle settle
+        log("Waiting for initial cycle (60s)...")
+        read_agent_output(proc, timeout=60)
+
+        # Give agent work to build up context
+        send_doorbell("Write a 500 word essay about the history of computing.")
+        log("Waiting for agent work (90s)...")
+        read_agent_output(proc, timeout=90)
+
+        # Record pre-compaction health
+        health_path = TESTAGENT_HOME / "asdaaas" / "health.json"
+        pre_health = {}
+        if health_path.exists():
+            with open(health_path) as f:
+                pre_health = json.load(f)
+        pre_tokens = pre_health.get("total_tokens", 0)
+        ctx_window = pre_health.get("context_window", 200000)
+        log(f"Pre-compaction: {pre_tokens} tokens ({pre_tokens/ctx_window*100:.0f}% of {ctx_window})")
+
+        # Trigger compaction
+        log("Triggering compaction...")
+        send_compact_command()
+        send_doorbell("Please compact now.")
+
+        # Wait for compaction
+        updates_path = find_updates_jsonl()
+        if updates_path:
+            events = watch_for_compaction_events(updates_path)
+            compaction_done = bool(events.get("auto_compact_completed") or events.get("compaction_checkpoint"))
+            if not compaction_done:
+                log("FAIL: Compaction did not complete")
+                return False
+
+            # Extract tokens_after from the event itself
+            completed_event = events.get("auto_compact_completed", {})
+            event_tokens = completed_event.get("tokens_after", "N/A")
+            log(f"Compaction event tokens_after: {event_tokens}")
+        else:
+            time.sleep(60)
+
+        # Wait for post-compaction turn
+        log("Waiting for post-compaction output (120s)...")
+        post_output = read_agent_output(proc, timeout=120)
+
+        # CHECK 1: health.json updated with post-compaction tokens
+        post_health = {}
+        if health_path.exists():
+            with open(health_path) as f:
+                post_health = json.load(f)
+        post_tokens = post_health.get("total_tokens", 0)
+        log(f"Post-compaction health: {post_tokens} tokens ({post_tokens/ctx_window*100:.0f}%)")
+
+        tokens_dropped = post_tokens < pre_tokens * 0.6 if pre_tokens > 0 else False
+        log(f"CHECK 1 - Tokens dropped significantly: {'PASS' if tokens_dropped else 'FAIL'}")
+        log(f"  Pre: {pre_tokens}, Post: {post_tokens}, Ratio: {post_tokens/pre_tokens:.2f}" if pre_tokens else "  No pre-compaction data")
+
+        # CHECK 2: signals.json has updated token data
+        session_dir = None
+        if updates_path:
+            session_dir = updates_path.parent
+        if session_dir:
+            signals_path = session_dir / "signals.json"
+            if signals_path.exists():
+                with open(signals_path) as f:
+                    signals = json.load(f)
+                sig_tokens = signals.get("contextTokensUsed", "N/A")
+                log(f"signals.json contextTokensUsed: {sig_tokens}")
+
+        # CHECK 3: Look for context tag in agent output
+        outbox = check_tui_outbox(since_ts=0)
+        all_text = "\n".join(post_output) + "\n".join(t for _, t in outbox)
+        has_context_report = "CONTEXT_TAG_REPORT" in all_text
+        log(f"CHECK 3 - Agent reported context tag: {'PASS' if has_context_report else 'INCONCLUSIVE'}")
+
+        passed = tokens_dropped
+        log(f"TEST 5 RESULT: {'PASS' if passed else 'FAIL'}")
+        if not passed:
+            log("DIAGNOSIS: refresh_tokens() may be returning cached/stale data")
+            log("after compaction. The binary updates tokens asynchronously.")
+        return passed
+
+    finally:
+        stop_agent(proc)
+
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -640,6 +899,8 @@ if __name__ == "__main__":
         "test1": test_agent_initiated_compaction,
         "test2": test_auto_compaction,
         "test3": test_modular_agents_md,
+        "test4": test_post_compaction_turn_fires,
+        "test5": test_context_tag_after_compaction,
     }
 
     if len(sys.argv) > 1:

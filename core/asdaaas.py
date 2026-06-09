@@ -2257,7 +2257,15 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                     write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
                                     _queue_post_compaction_doorbell(agent_name, tokens_before, total_tokens)
                                 else:
-                                    print(f"[asdaaas] Compact still pending after 30s poll — leaving for auto-detection")
+                                    # Compaction likely landed but refresh_tokens()
+                                    # couldn't see the drop (file pointer past the
+                                    # post-compaction _meta frames). Queue doorbell
+                                    # unconditionally — false positive is better than
+                                    # a stuck agent with no turn.
+                                    print(f"[asdaaas] Compact still pending after 30s poll — queueing doorbell anyway")
+                                    write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
+                                    _queue_post_compaction_doorbell(agent_name, tokens_before, total_tokens)
+                                    turns_since_compaction = 0
                                     _prev_tokens = total_tokens
                             else:
                                 probe_text = "[Compaction complete. You are resuming from a compacted context.]"

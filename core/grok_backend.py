@@ -104,6 +104,7 @@ class GrokBackend(AgentBackend):
         self._session_id: Optional[str] = None
         self._model_id: str = "unknown"
         self._total_tokens: int = 0
+        self._compaction_event: Optional[dict] = None  # set by refresh_tokens when auto_compact_completed seen
         self._context_window: int = 200000
         self._rpc_id: int = 0
         self._grok_sessions_dir = grok_sessions_dir or Path.home() / ".grok" / "sessions"
@@ -490,11 +491,11 @@ class GrokBackend(AgentBackend):
                     on_meta(self._total_tokens)
 
     def refresh_tokens(self) -> int:
-        """Read latest _meta from updates.jsonl to get current token count.
+        """Read latest from updates.jsonl to get current token count.
 
-        The grok binary writes _meta.totalTokens after every turn, including
-        after compaction. This reads any unprocessed frames to get the
-        authoritative count without sending a prompt.
+        Processes both _meta.totalTokens frames AND auto_compact_completed
+        events. When a compaction event is found, tokens_after is used as
+        the authoritative count and the event is stored for pop_compaction_event().
         """
         if not self._file_source:
             return self._total_tokens
@@ -505,7 +506,30 @@ class GrokBackend(AgentBackend):
             if meta.get("totalTokens"):
                 self._total_tokens = meta["totalTokens"]
 
+            # Detect compaction completion event
+            su = frame.get("params", {}).get("update", {}).get("sessionUpdate", "")
+            if su == "auto_compact_completed":
+                tokens_after = frame.get("params", {}).get("update", {}).get("tokens_after")
+                if tokens_after:
+                    self._total_tokens = tokens_after
+                self._compaction_event = frame
+
         return self._total_tokens
+
+    def pop_compaction_event(self) -> tuple[bool, Optional[int]]:
+        """Return (True, tokens_after) if compaction detected since last check.
+
+        Clears the flag so subsequent calls return (False, None) until
+        another compaction event appears in updates.jsonl.
+        """
+        if self._compaction_event:
+            tokens_after = (
+                self._compaction_event.get("params", {})
+                .get("update", {}).get("tokens_after")
+            )
+            self._compaction_event = None
+            return True, tokens_after
+        return False, None
 
     async def drain_stale(self) -> tuple[int, str]:
         if not self._file_source:

@@ -145,6 +145,14 @@ class AgentBackend(ABC):
         session API for Claude). Returns the updated total_tokens value.
         """
 
+    def pop_compaction_event(self) -> tuple[bool, 'Optional[int]']:
+        """Return (True, tokens_after) if compaction was detected since last check.
+
+        Default returns (False, None). Backends that can detect compaction
+        events (e.g. GrokBackend via auto_compact_completed) override this.
+        """
+        return False, None
+
     @property
     @abstractmethod
     def total_tokens(self) -> int:

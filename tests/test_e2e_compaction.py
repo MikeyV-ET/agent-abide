@@ -895,6 +895,265 @@ Say exactly: "CONTEXT_TAG_REPORT: [paste the Context left tag]"
 
 
 # ============================================================================
+# Test 6: Compaction report numbers are accurate
+# ============================================================================
+
+def test_compaction_report_numbers():
+    """
+    After compaction, the report delivered to the agent must show accurate
+    before/after token counts: tokens_before > tokens_after, and they must
+    not be identical.
+
+    Bug context: Trip got "Context reduced from 135705 to 135705" — both
+    numbers identical because _prev_tokens was already updated to post-
+    compaction value before the event-based path read it.
+
+    Tests via two methods:
+      1. compaction_state.json — written by asdaaas with tokens_before/after
+      2. Doorbells / orientation text — the "[Compaction complete...]" message
+    """
+    log("=" * 60)
+    log("TEST 6: Compaction report numbers are accurate")
+    log("=" * 60)
+
+    setup_testagent_home()
+    ensure_testagent_in_config()
+    write_testagent_agents_md("""# TestAgent
+
+## Who I Am
+TestAgent. A test agent for compaction report verification.
+
+## Instructions
+You are a test agent. Do whatever is asked. After compaction, report
+what the compaction message said about token counts.
+""")
+
+    proc = start_agent()
+    try:
+        ready, _ = wait_for_ready(proc)
+        if not ready:
+            log("FAIL: Agent did not reach Ready state")
+            return False
+
+        # Let initial cycle settle
+        log("Waiting for initial cycle (60s)...")
+        read_agent_output(proc, timeout=60)
+
+        # Give agent work to build context
+        send_doorbell("List all US presidents and one fact about each.")
+        log("Waiting for agent work (90s)...")
+        read_agent_output(proc, timeout=90)
+
+        # Record pre-compaction tokens from health.json
+        health_path = TESTAGENT_HOME / "asdaaas" / "health.json"
+        pre_tokens = 0
+        if health_path.exists():
+            with open(health_path) as f:
+                h = json.load(f)
+            pre_tokens = h.get("total_tokens", 0)
+        log(f"Pre-compaction tokens (from health.json): {pre_tokens}")
+
+        # Trigger compaction
+        log("Triggering compaction...")
+        compact_ts = time.time()
+        send_compact_command()
+        send_doorbell("Please compact now.")
+
+        # Wait for compaction to complete
+        updates_path = find_updates_jsonl()
+        if updates_path:
+            events = watch_for_compaction_events(updates_path)
+            if not (events.get("auto_compact_completed") or events.get("compaction_checkpoint")):
+                log("FAIL: Compaction did not complete")
+                return False
+
+        # Wait for post-compaction output
+        log("Waiting for post-compaction output (180s)...")
+        read_agent_output(proc, timeout=180)
+
+        # CHECK 1: compaction_state.json has different before/after
+        state_path = TESTAGENT_HOME / "asdaaas" / "compaction_state.json"
+        state_ok = False
+        if state_path.exists():
+            with open(state_path) as f:
+                state = json.load(f)
+            tb = state.get("tokens_before", 0)
+            ta = state.get("tokens_after", 0)
+            log(f"compaction_state.json: before={tb}, after={ta}")
+            if tb > 0 and ta > 0 and tb != ta and tb > ta:
+                state_ok = True
+                log("CHECK 1 - compaction_state numbers valid: PASS")
+            else:
+                log(f"CHECK 1 - compaction_state numbers invalid: FAIL (before={tb}, after={ta})")
+        else:
+            log("CHECK 1 - compaction_state.json not found: SKIP")
+
+        # CHECK 2: Doorbell text has different before/after numbers
+        bell_dir = TESTAGENT_HOME / "asdaaas" / "doorbells"
+        compact_bells = []
+        for f in bell_dir.glob("*.json"):
+            try:
+                with open(f) as fh:
+                    d = json.load(fh)
+                if d.get("source") == "compaction" or "Compaction complete" in d.get("text", ""):
+                    compact_bells.append(d)
+            except (json.JSONDecodeError, IOError):
+                continue
+
+        # Also check TUI outbox for orientation messages
+        outbox = check_tui_outbox(since_ts=compact_ts)
+        all_compact_text = " ".join(d.get("text", "") for d in compact_bells)
+        all_compact_text += " ".join(t for _, t in outbox)
+
+        # Parse "Context reduced from X to Y" pattern
+        import re
+        matches = re.findall(r"Context reduced from (\d+) to (\d+)", all_compact_text)
+        report_ok = False
+        for before_str, after_str in matches:
+            b, a = int(before_str), int(after_str)
+            log(f"Report text: 'Context reduced from {b} to {a}'")
+            if b != a and b > a:
+                report_ok = True
+                log("CHECK 2 - Report numbers different and valid: PASS")
+            else:
+                log(f"CHECK 2 - Report numbers wrong: FAIL (before={b}, after={a}, same={b==a})")
+
+        if not matches:
+            log("CHECK 2 - No 'Context reduced from X to Y' found in output: SKIP")
+
+        passed = state_ok or report_ok
+        log(f"TEST 6 RESULT: {'PASS' if passed else 'FAIL'}")
+        return passed
+
+    finally:
+        stop_agent(proc)
+
+
+# ============================================================================
+# Test 7: No duplicate compaction reports
+# ============================================================================
+
+def test_no_duplicate_compaction_reports():
+    """
+    After a single compaction, exactly ONE compaction report should be
+    delivered to the agent. No duplicates.
+
+    Bug context: Trip got two "[Compaction complete...]" messages after
+    one compaction. The agent-initiated /compact path (Path 2) handled
+    it and queued a doorbell, but didn't consume the compaction event.
+    The event-based path (Path 1) then fired redundantly on the next
+    loop iteration, sending a second orientation turn.
+
+    Tests:
+      1. Count compaction doorbells — should be exactly 1
+      2. Count "[Compaction complete" messages in agent's received text
+      3. Count compaction_state.json writes (phase=complete)
+    """
+    log("=" * 60)
+    log("TEST 7: No duplicate compaction reports")
+    log("=" * 60)
+
+    setup_testagent_home()
+    ensure_testagent_in_config()
+    write_testagent_agents_md("""# TestAgent
+
+## Who I Am
+TestAgent. A test agent for duplicate compaction report detection.
+
+## Instructions
+You are a test agent. Do whatever is asked. After compaction, say
+exactly: "COMPACTION_REPORT_RECEIVED" every time you see a compaction
+complete message. If you see two, say it twice.
+""")
+
+    proc = start_agent()
+    try:
+        ready, _ = wait_for_ready(proc)
+        if not ready:
+            log("FAIL: Agent did not reach Ready state")
+            return False
+
+        # Let initial cycle settle
+        log("Waiting for initial cycle (60s)...")
+        read_agent_output(proc, timeout=60)
+
+        # Give agent work
+        send_doorbell("List the planets in our solar system with their distances from the sun.")
+        log("Waiting for agent work (90s)...")
+        read_agent_output(proc, timeout=90)
+
+        # Clean doorbells dir before compaction
+        bell_dir = TESTAGENT_HOME / "asdaaas" / "doorbells"
+        for f in bell_dir.glob("*.json"):
+            f.unlink()
+
+        # Trigger compaction
+        log("Triggering compaction...")
+        compact_ts = time.time()
+        send_compact_command()
+        send_doorbell("Please compact now.")
+
+        # Wait for compaction
+        updates_path = find_updates_jsonl()
+        if updates_path:
+            events = watch_for_compaction_events(updates_path)
+            if not (events.get("auto_compact_completed") or events.get("compaction_checkpoint")):
+                log("FAIL: Compaction did not complete")
+                return False
+
+        # Wait for ALL post-compaction activity to settle
+        # (need enough time for both Path 1 and Path 2 to fire if buggy)
+        log("Waiting for post-compaction activity to settle (240s)...")
+        post_output = read_agent_output(proc, timeout=240)
+
+        # CHECK 1: Count compaction doorbells
+        compact_bell_count = 0
+        for f in bell_dir.glob("*.json"):
+            try:
+                with open(f) as fh:
+                    d = json.load(fh)
+                if d.get("source") == "compaction" or "compact" in f.name.lower():
+                    compact_bell_count += 1
+                    log(f"  Compact bell: {f.name} — {d.get('text', '')[:80]}")
+            except (json.JSONDecodeError, IOError):
+                continue
+        log(f"CHECK 1 - Compaction doorbells: {compact_bell_count} (expected: 0 or 1 remaining)")
+
+        # CHECK 2: Count "[Compaction complete" in TUI outbox + stdout
+        outbox = check_tui_outbox(since_ts=compact_ts)
+        all_text = "\n".join(post_output) + "\n".join(t for _, t in outbox)
+        compact_report_count = all_text.count("[Compaction complete")
+        log(f"CHECK 2 - '[Compaction complete' count in output: {compact_report_count} (expected: 1)")
+
+        # CHECK 3: Count COMPACTION_REPORT_RECEIVED in agent speech
+        ack_count = all_text.count("COMPACTION_REPORT_RECEIVED")
+        log(f"CHECK 3 - Agent ack count: {ack_count} (expected: 1)")
+
+        # CHECK 4: Count orientation turns in asdaaas stdout
+        orientation_count = "\n".join(post_output).count("[asdaaas] Immediate orientation turn")
+        compact_log_count = "\n".join(post_output).count("[asdaaas] Compaction detected")
+        log(f"CHECK 4 - Orientation turns in logs: {orientation_count} (expected: <=1)")
+        log(f"           Compaction detected logs: {compact_log_count} (expected: <=1)")
+
+        # Verdict: any count > 1 is a duplicate
+        duplicates_found = (
+            compact_report_count > 1
+            or ack_count > 1
+            or orientation_count > 1
+        )
+        passed = not duplicates_found
+        log(f"TEST 7 RESULT: {'PASS' if passed else 'FAIL — duplicates detected'}")
+        if not passed:
+            log("DIAGNOSIS: Both event-based (Path 1) and agent-initiated (Path 2)")
+            log("compaction handlers fired. Path 2 should consume the compaction event")
+            log("via pop_compaction_event() to prevent Path 1 from double-firing.")
+        return passed
+
+    finally:
+        stop_agent(proc)
+
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -905,6 +1164,8 @@ if __name__ == "__main__":
         "test3": test_modular_agents_md,
         "test4": test_post_compaction_turn_fires,
         "test5": test_context_tag_after_compaction,
+        "test6": test_compaction_report_numbers,
+        "test7": test_no_duplicate_compaction_reports,
     }
 
     if len(sys.argv) > 1:

@@ -1,5 +1,9 @@
 # Backup Reference
 
+**Moved to `~/agents/docs/backup.md`** — backup is general operational, not agent-abide specific.
+
+The daily backup script remains at `scripts/backup_agents.sh` in this repo.
+
 ## Daily Automated Backup (cron, 3 AM)
 
 Script: `scripts/backup_agents.sh`

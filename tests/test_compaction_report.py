@@ -421,20 +421,17 @@ class TestDoubleFireIntegration:
         assert len(compact_bells) == 2, \
             f"Bug confirmed: expected 2 doorbells (double-fire), got {len(compact_bells)}"
 
-        # Verify the numbers in each doorbell
-        bells_data = []
-        for f in sorted(compact_bells):
-            bells_data.append(json.load(open(f)))
+        # Verify we have one correct and one stale doorbell (order-independent)
+        all_numbers = []
+        for f in compact_bells:
+            text = json.load(open(f))["text"]
+            m = re.findall(r"from (\d+) to (\d+)", text)
+            all_numbers.append((int(m[0][0]), int(m[0][1])))
 
-        # First bell: correct numbers
-        m1 = re.findall(r"from (\d+) to (\d+)", bells_data[0]["text"])
-        assert int(m1[0][0]) == 150000
-        assert int(m1[0][1]) == 43000
-
-        # Second bell: identical (wrong) numbers
-        m2 = re.findall(r"from (\d+) to (\d+)", bells_data[1]["text"])
-        assert int(m2[0][0]) == 43000
-        assert int(m2[0][1]) == 43000
+        correct = (150000, 43000)
+        stale = (43000, 43000)
+        assert correct in all_numbers, f"Missing correct doorbell {correct} in {all_numbers}"
+        assert stale in all_numbers, f"Missing stale doorbell {stale} in {all_numbers}"
 
     def test_fix_pop_prevents_double_fire(self, mock_session, agent_env):
         """Verify the fix: calling pop_compaction_event() in Path 2.

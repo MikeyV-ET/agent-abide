@@ -2294,6 +2294,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                     turns_since_compaction = 0
                                     write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
                                     _queue_post_compaction_doorbell(agent_name, tokens_before, total_tokens)
+                                    backend.pop_compaction_event()  # drain so top-of-loop doesn't double-fire
                                 else:
                                     # Compaction likely landed but refresh_tokens()
                                     # couldn't see the drop (file pointer past the
@@ -2305,6 +2306,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                     _queue_post_compaction_doorbell(agent_name, tokens_before, total_tokens)
                                     turns_since_compaction = 0
                                     _prev_tokens = total_tokens
+                                    backend.pop_compaction_event()  # drain so top-of-loop doesn't double-fire
                             else:
                                 probe_text = "[Compaction complete. You are resuming from a compacted context.]"
                                 await backend.drain_stale()
@@ -2320,6 +2322,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                                 _prev_tokens = total_tokens
                                 turns_since_compaction = 0
+                                backend.pop_compaction_event()  # drain so top-of-loop doesn't double-fire
                                 result_file = agent_dir(agent_name) / "command_result.json"
                                 tmp = str(result_file) + ".tmp"
                                 with open(tmp, "w") as f:

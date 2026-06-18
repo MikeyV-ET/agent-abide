@@ -1,7 +1,7 @@
 {
   "name": "slack_research",
-  "pid": 3614826,
-  "started": 1781024726.317425,
+  "pid": 146706,
+  "started": 1781307333.8692572,
   "capabilities": [
     "search",
     "history",
@@ -14,5 +14,5 @@
       "Cinco"
     ]
   },
-  "heartbeat": 1781057656.3111258
+  "heartbeat": 1781561705.7949717
 }

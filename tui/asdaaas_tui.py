@@ -669,6 +669,18 @@ class MessageInput(TextArea):
         self.theme = "underscore"
         self._update_mode_label()
 
+    async def _on_paste(self, event) -> None:
+        """Handle bracketed paste. Multi-line paste auto-switches to edit mode."""
+        if self.read_only:
+            return
+        text = event.text
+        if "\n" in text:
+            self.multiline_mode = True
+        if result := self._replace_via_keyboard(text, *self.selection):
+            self.move_cursor(result.end_location)
+            self.focus()
+        event.stop()
+
     def _update_mode_label(self) -> None:
         """Update border title to show current input mode."""
         if self.multiline_mode:

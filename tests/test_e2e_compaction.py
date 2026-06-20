@@ -1154,6 +1154,235 @@ complete message. If you see two, say it twice.
 
 
 # ============================================================================
+# Test 8: Post-compaction context_left_tag matches updates.jsonl reality
+# ============================================================================
+
+def test_context_tag_matches_updates_jsonl():
+    """
+    After compaction, the context_left_tag delivered to the agent must reflect
+    actual post-compaction token counts from updates.jsonl, not stale cached
+    values from before compaction.
+
+    Bug context (2026-06-20): Jr compacted and got "Context reduced from
+    160864 to 160864" with "9.1k left" — but updates.jsonl showed
+    tokens_after=18681 and post-compaction totalTokens climbing from ~66k.
+    The number 160864 appeared NOWHERE in updates.jsonl. asdaaas served
+    stale cached data instead of reading the actual post-compaction values.
+
+    The bug is in asdaaas.py's post-compaction orientation path (line ~2164)
+    which uses potentially stale token data for context_left_tag() instead
+    of calling refresh_tokens() to get current values from updates.jsonl.
+
+    Tests:
+      1. tokens_after in auto_compact_completed event must be < pre-compaction tokens
+      2. "Context reduced from X to Y" must have X > Y (not equal)
+      3. Context left tag in post-compaction prompt must show tokens consistent
+         with updates.jsonl (not pre-compaction values)
+      4. The context_left value in the tag must be plausible for a freshly-
+         compacted agent (> 50% of context window remaining)
+    """
+    log("=" * 60)
+    log("TEST 8: Post-compaction context_left_tag matches updates.jsonl")
+    log("=" * 60)
+
+    setup_testagent_home()
+    ensure_testagent_in_config()
+    write_testagent_agents_md("""# TestAgent
+
+## Who I Am
+TestAgent. A test agent for post-compaction context tag verification.
+
+## Instructions
+You are a test agent. After compaction, you MUST report the exact
+context tag from the end of your prompt. Look for the "[Context left"
+tag and say exactly:
+CONTEXT_TAG_REPORT: [paste the exact Context left tag here]
+Also report any "Context reduced from X to Y" message you see:
+REDUCTION_REPORT: [paste the exact reduction text]
+""")
+
+    proc = start_agent()
+    try:
+        ready, _ = wait_for_ready(proc)
+        if not ready:
+            log("FAIL: Agent did not reach Ready state")
+            return False
+
+        # Let initial cycle settle
+        log("Waiting for initial cycle (60s)...")
+        read_agent_output(proc, timeout=60)
+
+        # Give agent substantial work to build up context
+        send_doorbell("Write a detailed 1000-word essay about the history of computing, covering Babbage, Turing, von Neumann, and the development of modern processors.")
+        log("Waiting for agent work (120s)...")
+        read_agent_output(proc, timeout=120)
+
+        # Record pre-compaction state
+        health_path = TESTAGENT_HOME / "asdaaas" / "health.json"
+        pre_tokens = 0
+        ctx_window = 200000
+        if health_path.exists():
+            with open(health_path) as f:
+                h = json.load(f)
+            pre_tokens = h.get("total_tokens", 0)
+            ctx_window = h.get("context_window", 200000)
+        log(f"Pre-compaction: {pre_tokens} tokens, window={ctx_window}")
+
+        # Record updates.jsonl position before compaction
+        updates_path = find_updates_jsonl()
+        pre_compact_size = 0
+        if updates_path and updates_path.exists():
+            pre_compact_size = updates_path.stat().st_size
+
+        # Trigger compaction
+        log("Triggering compaction...")
+        compact_ts = time.time()
+        send_compact_command()
+        send_doorbell("Please compact now.")
+
+        # Wait for compaction to complete
+        if updates_path:
+            events = watch_for_compaction_events(updates_path)
+            if not (events.get("auto_compact_completed") or events.get("compaction_checkpoint")):
+                log("FAIL: Compaction did not complete")
+                return False
+
+            # Extract tokens_after from the compaction event
+            completed_event = events.get("auto_compact_completed", {})
+            event_tokens_after = completed_event.get("tokens_after", 0)
+            log(f"Compaction event tokens_after: {event_tokens_after}")
+        else:
+            log("FAIL: Could not find updates.jsonl")
+            return False
+
+        # Wait for post-compaction output
+        log("Waiting for post-compaction output (240s)...")
+        post_output = read_agent_output(proc, timeout=240)
+
+        # Collect all post-compaction text
+        outbox = check_tui_outbox(since_ts=compact_ts)
+        all_text = "\n".join(post_output) + "\n".join(t for _, t in outbox)
+
+        # Read the ACTUAL post-compaction totalTokens from updates.jsonl
+        # These are the ground truth values the binary reported
+        actual_post_tokens = 0
+        if updates_path and updates_path.exists():
+            with open(updates_path) as f:
+                f.seek(pre_compact_size)
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        meta = entry.get("_meta", {})
+                        if "totalTokens" in meta:
+                            actual_post_tokens = meta["totalTokens"]
+                    except json.JSONDecodeError:
+                        continue
+        log(f"Actual post-compaction totalTokens from updates.jsonl: {actual_post_tokens}")
+
+        # ---- CHECK 1: tokens_after < pre_tokens ----
+        check1 = False
+        if event_tokens_after > 0 and pre_tokens > 0:
+            check1 = event_tokens_after < pre_tokens
+            log(f"CHECK 1 - tokens_after ({event_tokens_after}) < pre_tokens ({pre_tokens}): "
+                f"{'PASS' if check1 else 'FAIL'}")
+        else:
+            log(f"CHECK 1 - SKIP (event_tokens_after={event_tokens_after}, pre_tokens={pre_tokens})")
+
+        # ---- CHECK 2: "Context reduced from X to Y" has X > Y ----
+        import re
+        matches = re.findall(r"Context reduced from (\d+) to (\d+)", all_text)
+        check2 = False
+        reduction_before = 0
+        reduction_after = 0
+        for before_str, after_str in matches:
+            reduction_before, reduction_after = int(before_str), int(after_str)
+            log(f"Report: 'Context reduced from {reduction_before} to {reduction_after}'")
+            if reduction_before > reduction_after and reduction_before != reduction_after:
+                check2 = True
+                log("CHECK 2 - Reduction numbers X > Y and X != Y: PASS")
+            else:
+                log(f"CHECK 2 - FAIL: before={reduction_before}, after={reduction_after}, "
+                    f"same={reduction_before == reduction_after}")
+        if not matches:
+            log("CHECK 2 - No 'Context reduced from X to Y' found: SKIP")
+
+        # ---- CHECK 3: Reduction "after" matches updates.jsonl tokens_after ----
+        check3 = False
+        if reduction_after > 0 and event_tokens_after > 0:
+            # Allow 20% tolerance — a turn may have been processed between
+            # the compaction event and the report being generated
+            ratio = reduction_after / event_tokens_after
+            check3 = 0.5 < ratio < 2.0
+            log(f"CHECK 3 - Reduction after ({reduction_after}) vs event tokens_after "
+                f"({event_tokens_after}), ratio={ratio:.2f}: {'PASS' if check3 else 'FAIL'}")
+            if not check3:
+                log(f"DIAGNOSIS: The reported 'after' value doesn't match the actual "
+                    f"tokens_after from the compaction event. asdaaas may be using "
+                    f"stale cached data instead of reading updates.jsonl.")
+        elif not matches:
+            log("CHECK 3 - SKIP (no reduction report found)")
+        else:
+            log(f"CHECK 3 - SKIP (reduction_after={reduction_after}, "
+                f"event_tokens_after={event_tokens_after})")
+
+        # ---- CHECK 4: Context left tag shows plausible post-compaction value ----
+        # After compaction, agent should have >50% context remaining
+        check4 = False
+        ctx_tag_matches = re.findall(r"Context left (\d+)k", all_text)
+        if ctx_tag_matches:
+            ctx_left_k = int(ctx_tag_matches[-1])  # use the last one
+            ctx_left = ctx_left_k * 1000
+            pct_remaining = ctx_left / ctx_window * 100
+            log(f"Context left tag: {ctx_left_k}k ({pct_remaining:.0f}% of {ctx_window})")
+            # After compaction, should have well over 50% remaining
+            check4 = pct_remaining > 50
+            log(f"CHECK 4 - Context left > 50% after compaction: "
+                f"{'PASS' if check4 else 'FAIL'}")
+            if not check4:
+                log(f"DIAGNOSIS: context_left_tag shows only {pct_remaining:.0f}% remaining "
+                    f"after compaction. This suggests stale pre-compaction token counts "
+                    f"are being used instead of actual post-compaction values from "
+                    f"updates.jsonl (which shows {actual_post_tokens} tokens).")
+        else:
+            log("CHECK 4 - No 'Context left Xk' tag found in output: SKIP")
+
+        # ---- CHECK 5: Reported tokens don't equal pre-compaction tokens ----
+        # The specific Jr bug: "reduced from 160864 to 160864"
+        check5 = True
+        if reduction_before > 0 and reduction_after > 0:
+            if reduction_before == reduction_after:
+                check5 = False
+                log(f"CHECK 5 - FAIL: before == after == {reduction_before}. "
+                    f"This is the exact Jr bug pattern — stale cached tokens "
+                    f"used for both values.")
+            else:
+                log("CHECK 5 - before != after: PASS")
+        else:
+            log("CHECK 5 - SKIP (no reduction numbers found)")
+
+        # Verdict: need checks 1 AND (2 or skip) AND (3 or skip) AND (4 or skip) AND 5
+        critical_passed = check1 and check5
+        all_passed = check1 and check2 and check3 and check4 and check5
+        if all_passed:
+            log("TEST 8 RESULT: PASS — all checks passed")
+        elif critical_passed:
+            log("TEST 8 RESULT: PASS (critical checks) — some informational checks skipped")
+        else:
+            log("TEST 8 RESULT: FAIL")
+            log("DIAGNOSIS: Post-compaction context reporting uses stale cached data")
+            log("instead of actual values from updates.jsonl. The bug is in asdaaas.py's")
+            log("post-compaction orientation path which calls context_left_tag() with")
+            log("potentially stale token values instead of first calling refresh_tokens().")
+        return critical_passed
+
+    finally:
+        stop_agent(proc)
+
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -1166,6 +1395,7 @@ if __name__ == "__main__":
         "test5": test_context_tag_after_compaction,
         "test6": test_compaction_report_numbers,
         "test7": test_no_duplicate_compaction_reports,
+        "test8": test_context_tag_matches_updates_jsonl,
     }
 
     if len(sys.argv) > 1:

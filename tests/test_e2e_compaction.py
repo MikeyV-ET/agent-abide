@@ -1212,9 +1212,13 @@ REDUCTION_REPORT: [paste the exact reduction text]
         log("Waiting for initial cycle (60s)...")
         read_agent_output(proc, timeout=60)
 
-        # Give agent substantial work to build up context
-        send_doorbell("Write a detailed 1000-word essay about the history of computing, covering Babbage, Turing, von Neumann, and the development of modern processors.")
-        log("Waiting for agent work (120s)...")
+        # Give agent a large file to read — builds context deterministically
+        bulk_file = TESTAGENT_HOME / "bulk_context.txt"
+        bulk_text = ("The quick brown fox jumps over the lazy dog. " * 200 + "\n") * 50
+        bulk_file.write_text(bulk_text)
+        log(f"Wrote bulk file: {len(bulk_text)} chars ({len(bulk_text.split())} words)")
+        send_doorbell(f"Read the file {bulk_file} and tell me how many paragraphs it has.")
+        log("Waiting for agent to read file (120s)...")
         read_agent_output(proc, timeout=120)
 
         # Record pre-compaction state

@@ -1274,8 +1274,9 @@ REDUCTION_REPORT: [paste the exact reduction text]
         log("Waiting for post-compaction output (240s)...")
         post_output = read_agent_output(proc, timeout=240)
 
-        # Collect all post-compaction text
-        outbox = check_tui_outbox(since_ts=compact_ts)
+        # Collect all post-compaction text (don't filter by ts — outbox
+        # entries may lack numeric timestamps)
+        outbox = check_tui_outbox(since_ts=0)
         all_text = "\n".join(post_output) + "\n".join(t for _, t in outbox)
 
         # Read the ACTUAL post-compaction totalTokens from updates.jsonl

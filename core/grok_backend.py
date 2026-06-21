@@ -105,7 +105,8 @@ class GrokBackend(AgentBackend):
         self._model_id: str = "unknown"
         self._total_tokens: int = 0
         self._compaction_event: Optional[dict] = None  # set by refresh_tokens when auto_compact_completed seen
-        self._compaction_tokens_before: int = 0  # snapshot of tokens before compaction event
+        self._compaction_tokens_before: int = 0  # from event's tokens_before field
+        self._compaction_tokens_after: int = 0   # from event's tokens_after field
         self._context_window: int = 200000
         self._rpc_id: int = 0
         self._grok_sessions_dir = grok_sessions_dir or Path.home() / ".grok" / "sessions"
@@ -515,6 +516,7 @@ class GrokBackend(AgentBackend):
                 if tokens_before:
                     self._compaction_tokens_before = tokens_before
                 if tokens_after:
+                    self._compaction_tokens_after = tokens_after
                     self._total_tokens = tokens_after
                 self._compaction_event = frame
 
@@ -530,13 +532,11 @@ class GrokBackend(AgentBackend):
         the compaction event, so it reflects the actual pre-compaction count.
         """
         if self._compaction_event:
-            tokens_after = (
-                self._compaction_event.get("params", {})
-                .get("update", {}).get("tokens_after")
-            )
+            tokens_after = self._compaction_tokens_after
             tokens_before = self._compaction_tokens_before
             self._compaction_event = None
             self._compaction_tokens_before = 0
+            self._compaction_tokens_after = 0
             return True, tokens_after, tokens_before
         return False, None, 0
 
@@ -564,6 +564,7 @@ class GrokBackend(AgentBackend):
                 if tokens_before:
                     self._compaction_tokens_before = tokens_before
                 if tokens_after:
+                    self._compaction_tokens_after = tokens_after
                     self._total_tokens = tokens_after
                 self._compaction_event = frame
             meta = params.get("_meta", {})

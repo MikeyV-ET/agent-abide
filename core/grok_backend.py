@@ -502,7 +502,6 @@ class GrokBackend(AgentBackend):
             return self._total_tokens
 
         updates, _ = self._file_source.read_new_lines()
-        pre_refresh_tokens = self._total_tokens
         for frame in updates:
             meta = frame.get("params", {}).get("_meta", {})
             if meta.get("totalTokens"):
@@ -512,9 +511,9 @@ class GrokBackend(AgentBackend):
             su = frame.get("params", {}).get("update", {}).get("sessionUpdate", "")
             if su == "auto_compact_completed":
                 tokens_after = frame.get("params", {}).get("update", {}).get("tokens_after")
-                # Snapshot pre-compaction tokens BEFORE overwriting
-                if not self._compaction_event:
-                    self._compaction_tokens_before = pre_refresh_tokens
+                tokens_before = frame.get("params", {}).get("update", {}).get("tokens_before")
+                if tokens_before:
+                    self._compaction_tokens_before = tokens_before
                 if tokens_after:
                     self._total_tokens = tokens_after
                 self._compaction_event = frame

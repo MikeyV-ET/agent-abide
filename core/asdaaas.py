@@ -2289,24 +2289,28 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                         compaction_landed = True
                                         break
                                 if compaction_landed:
+                                    _, event_ta, event_tb = backend.pop_compaction_event()  # drain + get event values
+                                    tokens_before = event_tb or tokens_before
+                                    total_tokens = event_ta or total_tokens
                                     print(f"[asdaaas] Compact completed (async): {tokens_before} -> {total_tokens}")
                                     _prev_tokens = total_tokens
                                     turns_since_compaction = 0
                                     write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
                                     _queue_post_compaction_doorbell(agent_name, tokens_before, total_tokens)
-                                    backend.pop_compaction_event()  # drain so top-of-loop doesn't double-fire
                                 else:
                                     # Compaction likely landed but refresh_tokens()
                                     # couldn't see the drop (file pointer past the
                                     # post-compaction _meta frames). Queue doorbell
                                     # unconditionally — false positive is better than
                                     # a stuck agent with no turn.
+                                    _, event_ta, event_tb = backend.pop_compaction_event()  # drain + get event values
+                                    tokens_before = event_tb or tokens_before
+                                    total_tokens = event_ta or total_tokens
                                     print(f"[asdaaas] Compact still pending after 30s poll — queueing doorbell anyway")
                                     write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
                                     _queue_post_compaction_doorbell(agent_name, tokens_before, total_tokens)
                                     turns_since_compaction = 0
                                     _prev_tokens = total_tokens
-                                    backend.pop_compaction_event()  # drain so top-of-loop doesn't double-fire
                             else:
                                 probe_text = "[Compaction complete. You are resuming from a compacted context.]"
                                 await backend.drain_stale()
@@ -2320,9 +2324,11 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                     gaze = read_gaze(agent_name)
                                     write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
 
+                                _, event_ta, event_tb = backend.pop_compaction_event()  # drain + get event values
+                                tokens_before = event_tb or tokens_before
+                                total_tokens = event_ta or total_tokens
                                 _prev_tokens = total_tokens
                                 turns_since_compaction = 0
-                                backend.pop_compaction_event()  # drain so top-of-loop doesn't double-fire
                                 result_file = agent_dir(agent_name) / "command_result.json"
                                 tmp = str(result_file) + ".tmp"
                                 with open(tmp, "w") as f:

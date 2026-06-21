@@ -1246,6 +1246,13 @@ REDUCTION_REPORT: [paste the exact reduction text]
         if updates_path and updates_path.exists():
             pre_compact_size = updates_path.stat().st_size
 
+        # Clear TUI outbox before compaction so we only see this run's output
+        outbox_dir = TESTAGENT_HOME / "asdaaas" / "adapters" / "tui" / "outbox"
+        if outbox_dir.exists():
+            for f in outbox_dir.glob("resp_*.json"):
+                f.unlink()
+            log("Cleared TUI outbox")
+
         # Trigger compaction
         log("Triggering compaction...")
         compact_ts = time.time()

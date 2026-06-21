@@ -485,6 +485,20 @@ class GrokBackend(AgentBackend):
                 if tool_id and update.get("status") == "completed":
                     pending_tool_calls.discard(tool_id)
 
+            # Preserve compaction events — collect_response reads from the
+            # same FileEventSource as refresh_tokens.  If the compaction event
+            # lands during the post-turn drain, the file pointer advances past
+            # it and refresh_tokens / pop_compaction_event never see it.
+            elif su == "auto_compact_completed":
+                tokens_after = update.get("tokens_after")
+                tokens_before = update.get("tokens_before")
+                if tokens_before:
+                    self._compaction_tokens_before = tokens_before
+                if tokens_after:
+                    self._compaction_tokens_after = tokens_after
+                    self._total_tokens = tokens_after
+                self._compaction_event = frame
+
             # Token tracking from _meta
             meta = params.get("_meta", {})
             if meta.get("totalTokens"):

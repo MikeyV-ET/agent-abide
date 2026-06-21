@@ -127,11 +127,19 @@ complete message, follow the boot protocol: re-read this file and confirm.
 
 def start_agent():
     """Start asdaaas.py for TestAgent. Returns subprocess.Popen."""
+    # Read session ID from agents.json so we continue an existing session
+    session_id = None
+    with open(AGENTS_JSON) as f:
+        cfg = json.load(f)
+    session_id = cfg.get("agents", {}).get("TestAgent", {}).get("session", "")
+
     cmd = [
         sys.executable, str(CORE / "asdaaas.py"),
         "--agent", "TestAgent",
         "--cwd", str(TESTAGENT_HOME),
     ]
+    if session_id:
+        cmd.extend(["--session", session_id])
     log(f"Starting: {' '.join(cmd)}")
 
     proc = subprocess.Popen(

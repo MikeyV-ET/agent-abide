@@ -142,6 +142,8 @@ def start_agent():
         cmd.extend(["--session", session_id])
     log(f"Starting: {' '.join(cmd)}")
 
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -149,6 +151,7 @@ def start_agent():
         text=True,
         bufsize=1,
         cwd=str(AGENT_ABIDE),
+        env=env,
     )
     log(f"asdaaas PID: {proc.pid}")
     return proc
@@ -1211,7 +1214,7 @@ REDUCTION_REPORT: [paste the exact reduction text]
 
     proc = start_agent()
     try:
-        ready, _ = wait_for_ready(proc)
+        ready, _ = wait_for_ready(proc, timeout=300)
         if not ready:
             log("FAIL: Agent did not reach Ready state")
             return False

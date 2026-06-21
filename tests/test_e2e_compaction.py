@@ -1236,8 +1236,8 @@ REDUCTION_REPORT: [paste the exact reduction text]
         if health_path.exists():
             with open(health_path) as f:
                 h = json.load(f)
-            pre_tokens = h.get("total_tokens", 0)
-            ctx_window = h.get("context_window", 200000)
+            pre_tokens = h.get("totalTokens", h.get("total_tokens", 0))
+            ctx_window = h.get("contextWindow", h.get("context_window", 200000))
         log(f"Pre-compaction: {pre_tokens} tokens, window={ctx_window}")
 
         # Record updates.jsonl position before compaction
@@ -1261,8 +1261,11 @@ REDUCTION_REPORT: [paste the exact reduction text]
 
             # Extract tokens_after from the compaction event
             completed_event = events.get("auto_compact_completed", {})
-            event_tokens_after = completed_event.get("tokens_after", 0)
-            log(f"Compaction event tokens_after: {event_tokens_after}")
+            # tokens_after is nested under params.update
+            event_update = completed_event.get("params", {}).get("update", {})
+            event_tokens_after = event_update.get("tokens_after", completed_event.get("tokens_after", 0))
+            event_tokens_before = event_update.get("tokens_before", 0)
+            log(f"Compaction event: tokens_before={event_tokens_before}, tokens_after={event_tokens_after}")
         else:
             log("FAIL: Could not find updates.jsonl")
             return False
@@ -1287,7 +1290,8 @@ REDUCTION_REPORT: [paste the exact reduction text]
                         continue
                     try:
                         entry = json.loads(line)
-                        meta = entry.get("_meta", {})
+                        # totalTokens is at params._meta.totalTokens
+                        meta = entry.get("params", {}).get("_meta", {})
                         if "totalTokens" in meta:
                             actual_post_tokens = meta["totalTokens"]
                     except json.JSONDecodeError:

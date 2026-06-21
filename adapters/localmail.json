@@ -1,7 +1,7 @@
 {
   "name": "localmail",
-  "pid": 3991,
-  "started": 1781562617.3351786,
+  "pid": 6089,
+  "started": 1781994529.9123185,
   "capabilities": [
     "send",
     "receive",
@@ -17,5 +17,5 @@
       "Cinco"
     ]
   },
-  "heartbeat": 1781748603.3575757
+  "heartbeat": 1782059990.5538502
 }

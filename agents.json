@@ -54,9 +54,14 @@
       "yolo": true
     },
     "TestAgent": {
-      "session": "019eae4b-2c25-7213-8240-6bf14102283c",
+      "session": "019ee761-293b-7842-8b52-d214ddfd8430",
       "home": "/home/eric/agents/TestAgent",
-      "yolo": true
+      "yolo": true,
+      "sandbox": "workspace",
+      "permission_mode": "auto",
+      "deny_rules": [
+        "Write(/home/eric/.grok/**)"
+      ]
     }
   },
   "adapters": {

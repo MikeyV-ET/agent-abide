@@ -2135,7 +2135,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             # agent-initiated compaction with accurate tokens_after.
             # Heuristic: 40%+ token drop catches cases where the event was
             # missed (e.g. older binary without event support).
-            compaction_event, event_tokens = backend.pop_compaction_event()
+            compaction_event, event_tokens, event_tokens_before = backend.pop_compaction_event()
             heuristic_compaction = (
                 not compaction_event
                 and total_tokens < _prev_tokens * 0.6
@@ -2144,7 +2144,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             compaction_detected = compaction_event or heuristic_compaction
 
             if compaction_detected and turns_since_compaction > 0:
-                tokens_before = _prev_tokens
+                tokens_before = event_tokens_before or _prev_tokens
                 tokens_after = event_tokens or total_tokens
                 source = "event" if compaction_event else "heuristic"
                 print(f"[asdaaas] Compaction detected ({source}): {tokens_before} -> {tokens_after}")

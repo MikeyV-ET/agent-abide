@@ -105,6 +105,7 @@ class GrokBackend(AgentBackend):
         self._model_id: str = "unknown"
         self._total_tokens: int = 0
         self._compaction_event: Optional[dict] = None  # set by refresh_tokens when auto_compact_completed seen
+        self._compaction_tokens_before: int = 0  # snapshot of tokens before compaction event
         self._context_window: int = 200000
         self._rpc_id: int = 0
         self._grok_sessions_dir = grok_sessions_dir or Path.home() / ".grok" / "sessions"
@@ -501,6 +502,7 @@ class GrokBackend(AgentBackend):
             return self._total_tokens
 
         updates, _ = self._file_source.read_new_lines()
+        pre_refresh_tokens = self._total_tokens
         for frame in updates:
             meta = frame.get("params", {}).get("_meta", {})
             if meta.get("totalTokens"):
@@ -510,26 +512,34 @@ class GrokBackend(AgentBackend):
             su = frame.get("params", {}).get("update", {}).get("sessionUpdate", "")
             if su == "auto_compact_completed":
                 tokens_after = frame.get("params", {}).get("update", {}).get("tokens_after")
+                # Snapshot pre-compaction tokens BEFORE overwriting
+                if not self._compaction_event:
+                    self._compaction_tokens_before = pre_refresh_tokens
                 if tokens_after:
                     self._total_tokens = tokens_after
                 self._compaction_event = frame
 
         return self._total_tokens
 
-    def pop_compaction_event(self) -> tuple[bool, Optional[int]]:
-        """Return (True, tokens_after) if compaction detected since last check.
+    def pop_compaction_event(self) -> tuple[bool, Optional[int], int]:
+        """Return (True, tokens_after, tokens_before) if compaction detected.
 
-        Clears the flag so subsequent calls return (False, None) until
+        Clears the flag so subsequent calls return (False, None, 0) until
         another compaction event appears in updates.jsonl.
+
+        tokens_before is a snapshot taken before refresh_tokens() processed
+        the compaction event, so it reflects the actual pre-compaction count.
         """
         if self._compaction_event:
             tokens_after = (
                 self._compaction_event.get("params", {})
                 .get("update", {}).get("tokens_after")
             )
+            tokens_before = self._compaction_tokens_before
             self._compaction_event = None
-            return True, tokens_after
-        return False, None
+            self._compaction_tokens_before = 0
+            return True, tokens_after, tokens_before
+        return False, None, 0
 
     async def drain_stale(self) -> tuple[int, str]:
         if not self._file_source:

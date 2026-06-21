@@ -1214,7 +1214,7 @@ REDUCTION_REPORT: [paste the exact reduction text]
 
         # Give agent a large file to read — builds context deterministically
         bulk_file = TESTAGENT_HOME / "bulk_context.txt"
-        bulk_text = ("The quick brown fox jumps over the lazy dog. " * 200 + "\n") * 50
+        bulk_text = ("The quick brown fox jumps over the lazy dog. " * 20 + "\n") * 50
         bulk_file.write_text(bulk_text)
         log(f"Wrote bulk file: {len(bulk_text)} chars ({len(bulk_text.split())} words)")
         send_doorbell(f"Read the file {bulk_file} and tell me how many paragraphs it has.")

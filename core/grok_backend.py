@@ -550,11 +550,22 @@ class GrokBackend(AgentBackend):
         for frame in updates:
             params = frame.get("params", {})
             update = params.get("update", {})
-            if update.get("sessionUpdate") == "agent_message_chunk":
+            su = update.get("sessionUpdate", "")
+            if su == "agent_message_chunk":
                 c = update.get("content", {})
                 text = c.get("text", "") if isinstance(c, dict) else ""
                 if text:
                     speech_chunks.append(text)
+            # Preserve compaction events even during drain — refresh_tokens()
+            # won't see these frames (file pointer already advanced).
+            elif su == "auto_compact_completed":
+                tokens_after = update.get("tokens_after")
+                tokens_before = update.get("tokens_before")
+                if tokens_before:
+                    self._compaction_tokens_before = tokens_before
+                if tokens_after:
+                    self._total_tokens = tokens_after
+                self._compaction_event = frame
             meta = params.get("_meta", {})
             if meta.get("totalTokens"):
                 self._total_tokens = meta["totalTokens"]

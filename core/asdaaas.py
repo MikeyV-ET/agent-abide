@@ -2312,7 +2312,15 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                     turns_since_compaction = 0
                                     _prev_tokens = total_tokens
                             else:
-                                probe_text = "[Compaction complete. You are resuming from a compacted context.]"
+                                _, event_ta, event_tb = backend.pop_compaction_event()
+                                tokens_before = event_tb or tokens_before
+                                total_tokens = event_ta or total_tokens
+                                gaze = read_gaze(agent_name)
+                                probe_text = (
+                                    f"[Compaction complete. Context reduced from {tokens_before} to {total_tokens} tokens. "
+                                    f"You are resuming from a compacted context. Follow your boot protocol.]"
+                                    + context_left_tag(total_tokens, context_window, 0, gaze=gaze)
+                                )
                                 await backend.drain_stale()
                                 probe_handle = await backend.send_prompt(probe_text)
                                 probe_result = await backend.collect_response(
@@ -2321,12 +2329,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                 total_tokens = backend.total_tokens
                                 print(f"[asdaaas] Compact probe: real totalTokens={total_tokens}")
                                 if probe_result.speech.strip():
-                                    gaze = read_gaze(agent_name)
                                     write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
-
-                                _, event_ta, event_tb = backend.pop_compaction_event()  # drain + get event values
-                                tokens_before = event_tb or tokens_before
-                                total_tokens = event_ta or total_tokens
                                 _prev_tokens = total_tokens
                                 turns_since_compaction = 0
                                 result_file = agent_dir(agent_name) / "command_result.json"
@@ -2372,7 +2375,15 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                             write_compaction_state(agent_name, "pending", tokens_before=tokens_before)
                             _prev_tokens = total_tokens
                         else:
-                            probe_text = "[Compaction complete. You are resuming from a compacted context.]"
+                            _, event_ta, event_tb = backend.pop_compaction_event()
+                            tokens_before = event_tb or tokens_before
+                            total_tokens = event_ta or total_tokens
+                            gaze = read_gaze(agent_name)
+                            probe_text = (
+                                f"[Compaction complete. Context reduced from {tokens_before} to {total_tokens} tokens. "
+                                f"You are resuming from a compacted context. Follow your boot protocol.]"
+                                + context_left_tag(total_tokens, context_window, 0, gaze=gaze)
+                            )
                             await backend.drain_stale()
                             probe_handle = await backend.send_prompt(probe_text)
                             probe_result = await backend.collect_response(
@@ -2381,7 +2392,6 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                             total_tokens = backend.total_tokens
                             print(f"[asdaaas] Force compact probe: real totalTokens={total_tokens}")
                             if probe_result.speech.strip():
-                                gaze = read_gaze(agent_name)
                                 write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
 
                             _prev_tokens = total_tokens

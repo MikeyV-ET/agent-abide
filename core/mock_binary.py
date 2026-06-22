@@ -97,6 +97,7 @@ class MockBinary(AgentBackend):
         self._model_id: str = "mock-model"
         self._prompt_count: int = 0
         self._last_prompt: str = ""
+        self._all_prompts: list[str] = []
         self._compaction_event: Optional[dict] = None
         self._compaction_tokens_before: int = 0
         self._compaction_tokens_after: int = 0
@@ -179,6 +180,7 @@ class MockBinary(AgentBackend):
     async def send_prompt(self, text: str) -> Any:
         self._prompt_count += 1
         self._last_prompt = text
+        self._all_prompts.append(text)
 
         # Write the prompt as a user_message_chunk so audit tools can see it
         self._write_update({
@@ -435,3 +437,7 @@ class MockBinary(AgentBackend):
     @property
     def prompt_count(self) -> int:
         return self._prompt_count
+
+    @property
+    def all_prompts(self) -> list[str]:
+        return list(self._all_prompts)

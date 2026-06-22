@@ -59,7 +59,7 @@ If you find nothing, say so explicitly. Do not speculate.
 ### Key Principles
 
 1. **Specify file paths, not directions.** "Read ~/agents/Jr/lab_notebook_jr.md" not "look in Jr's directory."
-2. **Tell them what to skip.** Explore agents have ~30k context. One large file (chat_history.jsonl, updates.jsonl) can consume 87%+ of their capacity. Say "Do NOT read updates.jsonl or chat_history.jsonl."
+2. **Large files are a strength, not a weakness.** Subagents inherit your model's context (~200k). Reading large files (logs, session histories, notebooks) is one of the best reasons to delegate — it keeps raw data in their context while yours stays clean for synthesis.
 3. **Request structured output.** Subagent results come back as text. Ask for markdown tables or labeled sections so you can extract findings without re-reading everything.
 4. **Targeted beats broad.** A prompt asking "find X in files A, B, C" produces better results than "search for patterns across the codebase." Start narrow, widen based on initial findings.
 
@@ -101,7 +101,7 @@ This prevents context contamination — your working memory stays clean for synt
 
 ## Gotchas
 
-- **Large files consume context fast.** Even with a large context window, a single multi-thousand-line file can dominate a subagent's capacity. Always specify which files to read and which to skip.
+- **Be specific about what to read.** Subagents have ~200k context (inherited from parent), but a focused prompt with specific file paths still produces better results than "search everything."
 - **Results are unstructured text.** If you need to cross-reference findings from multiple subagents, request a consistent output format in every prompt.
 - **No shared state.** Subagents can't see each other's results. If agent B needs agent A's findings, you must relay them.
 - **Background agents need polling.** Use `get_command_or_subagent_output` to check on background subagents. You'll get notified when they finish.
@@ -123,7 +123,7 @@ Eric asked Cinco to mine operational patterns across all agents — convergent t
 **Lessons learned:**
 1. Targeted agents (known examples) produced cleaner results than broad-sweep agents
 2. Start narrow → use initial findings to scope the broad sweep
-3. Tell subagents to skip large files (chat_history.jsonl, updates.jsonl)
+3. Delegate large files to subagents rather than reading them yourself — keeps your context clean
 4. Request structured output (tables, not prose)
 
 ---

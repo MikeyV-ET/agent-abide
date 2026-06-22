@@ -199,12 +199,17 @@ async def test_no_continues_during_retry():
 
 ---
 
-## Open Questions for Sr
+## Answers from Sr (2026-06-22)
 
-1. **Backend injection:** What's the cleanest way to swap GrokBackend for MockBinary in the main loop? Env var + config, or direct injection via test helper?
-2. **Main loop entry point:** Is there a way to run the main loop as an async function that returns (for test assertions), or do we need to run it in a task and inspect state externally?
-3. **Retry state detection:** Does asdaaas currently see `retry_state` events from updates.jsonl, or does it only know about retries indirectly (via collect_response timing)?
-4. **Continue generation:** Where exactly in the main loop are continues generated? Need to confirm the code path the fix will target.
+1. **Backend injection:** Already supported. `main()` at line 1856 accepts `backend=None`. Pass MockBinary directly: `await main("TestAgent", backend=mock)`. No env var needed.
+
+2. **Main loop entry point:** `main()` is async. Run in asyncio.Task, inject events via filesystem, set `_shutdown_requested = True` to cleanly stop, then assert on doorbells/outbox/health.json.
+
+3. **Retry state detection:** asdaaas does NOT see `retry_state` events. `_process_update_frames()` only handles agent_message_chunk, agent_thought_chunk, tool_call, tool_call_update, auto_compact_completed, _meta. The binary's retry is internal — from asdaaas's perspective, `collect_response` just takes longer or returns empty speech.
+
+4. **Continue generation:** Line 2611: `queue_continue_doorbell()`, inside the `if not messages and not bells and not commands:` block (step 3, line 2560). Fires when `default_doorbell_enabled and not delay_until_event` and delay timer elapsed.
+
+**Sr's correction on ToolCallOnly:** The binary's `no_visible_content` retry is NOT visible to asdaaas as retry_state events. The agent emits a tool call, binary runs it, and if final output has no visible text, binary retries internally. MockBinary should model this as: `collect_response` returns empty speech (the binary handles retries itself). From asdaaas's perspective, it just sees an empty `ResponseResult`.
 
 ---
 

@@ -2608,6 +2608,22 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                 print(f"[asdaaas] Delay interrupted by {reason}")
                                 continue
 
+                    # Collection window: wait briefly for late-arriving
+                    # messages before committing to a continue.  Messages
+                    # often arrive while the agent is working (user typing
+                    # during agent's turn, binary retry state).  Delivering
+                    # a real message is always better than burning a turn on
+                    # a continue doorbell.  3s balances responsiveness with
+                    # message collection — matches typical human typing gap.
+                    collected = False
+                    for _cw in range(12):  # 12 x 0.25s = 3s
+                        await asyncio.sleep(0.25)
+                        if has_pending_adapter_messages(agent_name, awareness):
+                            collected = True
+                            break
+                    if collected:
+                        print(f"[asdaaas] Message arrived during collection window — skipping continue")
+                        continue  # loop back to step 2 which will poll everything
                     if queue_continue_doorbell(agent_name, text=delay_text):
                         print(f"[asdaaas] Default doorbell queued for {agent_name}")
                     delay_text = None
@@ -2680,6 +2696,11 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 total_tokens = backend.total_tokens
                 turns_since_compaction += 1
                 last_response_ts = time.time()
+                # Clean up continue doorbells after every response. Prevents
+                # re-delivery cascade: without this, a persistent continue bell
+                # gets re-delivered with delivery+1 on each loop iteration,
+                # burning turns on redundant prompts.
+                _cleanup_continue_doorbells(agent_name)
                 # Foreground if any in-room messages included; doorbell-only = non-foreground
                 last_was_foreground = has_msgs
 
@@ -2704,6 +2725,12 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     # Empty response tracking (only for doorbell-only prompts)
                     if has_bells and not has_msgs:
                         consecutive_empty_doorbell += 1
+                        # Clean up the continue doorbell that produced the
+                        # empty response — prevents re-delivery flood.  Step 3
+                        # will queue a fresh continue on the next iteration
+                        # (after the collection window), so agent continuity
+                        # is preserved without the re-delivery cascade.
+                        _cleanup_continue_doorbells(agent_name)
                         print(f"[asdaaas] {agent_name} doorbell -> (empty) [consecutive={consecutive_empty_doorbell}]")
                         write_health(agent_name, "active", f"empty doorbell response (x{consecutive_empty_doorbell})", total_tokens, context_window)
                         if consecutive_empty_doorbell >= EMPTY_DOORBELL_BACKOFF_AFTER:

@@ -1,0 +1,437 @@
+"""
+mock_binary.py -- MockBinary: Scriptable AgentBackend for E2E testing.
+
+Replaces GrokBackend in tests. No subprocess, no LLM calls. The test
+defines a scenario (list of steps), and MockBinary executes them in order
+when asdaaas calls collect_response.
+
+Usage:
+    scenario = [
+        NormalResponse(speech="Hello.", tokens=5000),
+        ToolCallOnly(retry_duration=2.0, resolve_speech="Done."),
+        Compaction(tokens_before=150000, tokens_after=30000),
+    ]
+    mock = MockBinary(scenario)
+    await main("TestAgent", backend=mock)
+"""
+
+import asyncio
+import json
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from agent_backend import AgentBackend, ResponseResult, TurnCancelled
+
+
+# ---------------------------------------------------------------------------
+# Scenario step types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class NormalResponse:
+    """Clean turn: agent produces speech."""
+    speech: str = "OK."
+    tokens: int = 5000
+
+
+@dataclass
+class ToolCallOnly:
+    """Turn ends with tool call, no visible text -- triggers binary retry.
+
+    From asdaaas's perspective, collect_response just takes longer and
+    returns empty speech (the binary handles retries internally).
+    retry_duration is how long collect_response blocks (simulating the
+    binary's internal retry loop). resolve_speech is what eventually
+    comes back (empty string = the retry never resolved with text).
+    """
+    retry_duration: float = 2.0
+    resolve_speech: str = ""
+    tokens: int = 5000
+
+
+@dataclass
+class DoomLoop:
+    """Consecutive non-zero exits -- doom_loop_detected."""
+    exit_count: int = 5
+    tokens: int = 5000
+
+
+@dataclass
+class Compaction:
+    """Simulate auto-compaction."""
+    tokens_before: int = 150000
+    tokens_after: int = 30000
+
+
+@dataclass
+class EmptyResponse:
+    """Turn with no speech or tools."""
+    tokens: int = 5000
+
+
+@dataclass
+class SlowResponse:
+    """Response that takes wall-clock time (for keepalive timeout testing)."""
+    speech: str = "Thinking..."
+    delay: float = 5.0
+    tokens: int = 5000
+
+
+# ---------------------------------------------------------------------------
+# MockBinary
+# ---------------------------------------------------------------------------
+
+class MockBinary(AgentBackend):
+    """Scriptable AgentBackend that executes scenario steps without a subprocess."""
+
+    def __init__(self, scenario: list, context_window: int = 200000):
+        self._scenario = list(scenario)
+        self._step_index = 0
+        self._session_id: Optional[str] = None
+        self._session_dir: Optional[Path] = None
+        self._total_tokens: int = 0
+        self._context_window: int = context_window
+        self._model_id: str = "mock-model"
+        self._prompt_count: int = 0
+        self._last_prompt: str = ""
+        self._compaction_event: Optional[dict] = None
+        self._compaction_tokens_before: int = 0
+        self._compaction_tokens_after: int = 0
+
+    # -- Event writing helpers --
+
+    def _write_update(self, update: dict):
+        """Append a session update event to updates.jsonl."""
+        if not self._session_dir:
+            return
+        frame = {
+            "timestamp": int(time.time()),
+            "method": "session/update",
+            "params": {
+                "sessionId": self._session_id,
+                "update": update,
+            },
+        }
+        path = self._session_dir / "updates.jsonl"
+        with open(path, "a") as f:
+            f.write(json.dumps(frame) + "\n")
+
+    def _write_update_with_meta(self, update: dict, tokens: int):
+        """Append a session update with _meta.totalTokens."""
+        if not self._session_dir:
+            return
+        frame = {
+            "timestamp": int(time.time()),
+            "method": "session/update",
+            "params": {
+                "sessionId": self._session_id,
+                "update": update,
+                "_meta": {"totalTokens": tokens},
+            },
+        }
+        path = self._session_dir / "updates.jsonl"
+        with open(path, "a") as f:
+            f.write(json.dumps(frame) + "\n")
+
+    def _write_event(self, event: dict):
+        """Append a lifecycle event to events.jsonl."""
+        if not self._session_dir:
+            return
+        path = self._session_dir / "events.jsonl"
+        with open(path, "a") as f:
+            f.write(json.dumps(event) + "\n")
+
+    def _write_speech(self, text: str, tokens: int):
+        """Write agent_message_chunk + turn_ended."""
+        if text:
+            self._write_update_with_meta({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text},
+            }, tokens)
+        self._write_event({"type": "turn_ended", "outcome": "completed"})
+        self._total_tokens = tokens
+
+    # -- AgentBackend interface --
+
+    async def start(self, agent_cwd: str, model: Optional[str] = None,
+                    session_id: Optional[str] = None, **kwargs) -> str:
+        self._session_id = session_id or str(uuid.uuid4())
+
+        # Create session dir with empty files
+        encoded_cwd = agent_cwd.replace("/", "%2F")
+        sessions_base = Path.home() / ".grok" / "sessions"
+        self._session_dir = sessions_base / encoded_cwd / self._session_id
+        self._session_dir.mkdir(parents=True, exist_ok=True)
+
+        for fname in ("updates.jsonl", "events.jsonl"):
+            fpath = self._session_dir / fname
+            if not fpath.exists():
+                fpath.touch()
+
+        if model:
+            self._model_id = model
+
+        return self._session_id
+
+    async def send_prompt(self, text: str) -> Any:
+        self._prompt_count += 1
+        self._last_prompt = text
+
+        # Write the prompt as a user_message_chunk so audit tools can see it
+        self._write_update({
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": text},
+        })
+
+        return self._prompt_count
+
+    async def collect_response(
+        self,
+        handle: Any,
+        on_speech_chunk: Optional[Callable[[str], None]] = None,
+        on_tool_call: Optional[Callable[[str], None]] = None,
+        on_meta: Optional[Callable[[int], None]] = None,
+        keepalive_timeout: float = 30.0,
+        max_wall_clock: float = 600.0,
+        cancel_event: Optional[asyncio.Event] = None,
+    ) -> ResponseResult:
+        if self._step_index >= len(self._scenario):
+            # No more steps -- return empty response
+            self._write_speech("", self._total_tokens)
+            return ResponseResult(
+                speech="", thoughts="",
+                total_tokens=self._total_tokens,
+                model_id=self._model_id,
+                stop_reason="completed",
+            )
+
+        step = self._scenario[self._step_index]
+        self._step_index += 1
+
+        if isinstance(step, NormalResponse):
+            return await self._do_normal(step, on_speech_chunk, on_meta, cancel_event)
+        elif isinstance(step, ToolCallOnly):
+            return await self._do_tool_call_only(step, on_speech_chunk, on_meta, cancel_event, on_tool_call)
+        elif isinstance(step, DoomLoop):
+            return await self._do_doom_loop(step, on_meta)
+        elif isinstance(step, Compaction):
+            return await self._do_compaction(step, on_meta)
+        elif isinstance(step, EmptyResponse):
+            return await self._do_empty(step, on_meta)
+        elif isinstance(step, SlowResponse):
+            return await self._do_slow(step, on_speech_chunk, on_meta, cancel_event)
+        else:
+            raise ValueError(f"Unknown scenario step type: {type(step)}")
+
+    async def _do_normal(self, step: NormalResponse, on_speech_chunk, on_meta, cancel_event):
+        if cancel_event and cancel_event.is_set():
+            raise TurnCancelled("cancel_event set")
+
+        self._write_speech(step.speech, step.tokens)
+
+        if on_speech_chunk and step.speech:
+            on_speech_chunk(step.speech)
+        if on_meta:
+            on_meta(step.tokens)
+
+        return ResponseResult(
+            speech=step.speech, thoughts="",
+            total_tokens=step.tokens,
+            model_id=self._model_id,
+            stop_reason="completed",
+        )
+
+    async def _do_tool_call_only(self, step: ToolCallOnly, on_speech_chunk, on_meta, cancel_event, on_tool_call=None):
+        # Simulate the binary's internal retry loop -- asdaaas just sees a
+        # long collect_response that returns empty or resolved speech.
+        tool_id = str(uuid.uuid4())
+        self._write_update({
+            "sessionUpdate": "tool_call",
+            "toolCallId": tool_id,
+            "title": "mock_tool",
+        })
+
+        if on_tool_call:
+            on_tool_call("mock_tool")
+
+        # Block for retry_duration (simulating binary retries)
+        if step.retry_duration > 0:
+            try:
+                await asyncio.sleep(step.retry_duration)
+            except asyncio.CancelledError:
+                raise TurnCancelled("cancelled during retry simulation")
+
+        if cancel_event and cancel_event.is_set():
+            raise TurnCancelled("cancel_event set during retry")
+
+        # Tool completes
+        self._write_update({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": tool_id,
+            "status": "completed",
+        })
+
+        # Resolve with speech (may be empty -- that's the no_visible_content case)
+        self._write_speech(step.resolve_speech, step.tokens)
+
+        if on_speech_chunk and step.resolve_speech:
+            on_speech_chunk(step.resolve_speech)
+        if on_meta:
+            on_meta(step.tokens)
+
+        return ResponseResult(
+            speech=step.resolve_speech, thoughts="",
+            total_tokens=step.tokens,
+            model_id=self._model_id,
+            stop_reason="completed",
+        )
+
+    async def _do_doom_loop(self, step: DoomLoop, on_meta):
+        self._write_update({
+            "sessionUpdate": "doom_loop_detected",
+            "exit_count": step.exit_count,
+        })
+        self._write_event({"type": "turn_ended", "outcome": "doom_loop"})
+        self._total_tokens = step.tokens
+
+        return ResponseResult(
+            speech="", thoughts="",
+            total_tokens=step.tokens,
+            model_id=self._model_id,
+            stop_reason="doom_loop",
+        )
+
+    async def _do_compaction(self, step: Compaction, on_meta):
+        self._write_update({
+            "sessionUpdate": "auto_compact_completed",
+            "tokens_before": step.tokens_before,
+            "tokens_after": step.tokens_after,
+        })
+
+        # Store for pop_compaction_event
+        self._compaction_event = True
+        self._compaction_tokens_before = step.tokens_before
+        self._compaction_tokens_after = step.tokens_after
+        self._total_tokens = step.tokens_after
+
+        self._write_event({"type": "turn_ended", "outcome": "completed"})
+
+        if on_meta:
+            on_meta(step.tokens_after)
+
+        return ResponseResult(
+            speech="", thoughts="",
+            total_tokens=step.tokens_after,
+            model_id=self._model_id,
+            stop_reason="completed",
+        )
+
+    async def _do_empty(self, step: EmptyResponse, on_meta):
+        self._write_speech("", step.tokens)
+        if on_meta:
+            on_meta(step.tokens)
+
+        return ResponseResult(
+            speech="", thoughts="",
+            total_tokens=step.tokens,
+            model_id=self._model_id,
+            stop_reason="completed",
+        )
+
+    async def _do_slow(self, step: SlowResponse, on_speech_chunk, on_meta, cancel_event):
+        # Delay before producing speech (tests keepalive timeout)
+        try:
+            await asyncio.sleep(step.delay)
+        except asyncio.CancelledError:
+            raise TurnCancelled("cancelled during slow response")
+
+        if cancel_event and cancel_event.is_set():
+            raise TurnCancelled("cancel_event set during slow response")
+
+        self._write_speech(step.speech, step.tokens)
+
+        if on_speech_chunk and step.speech:
+            on_speech_chunk(step.speech)
+        if on_meta:
+            on_meta(step.tokens)
+
+        return ResponseResult(
+            speech=step.speech, thoughts="",
+            total_tokens=step.tokens,
+            model_id=self._model_id,
+            stop_reason="completed",
+        )
+
+    async def drain_stale(self) -> tuple[int, str]:
+        return 0, ""
+
+    async def request_compaction(self) -> bool:
+        # If there's a Compaction step next, execute it
+        if (self._step_index < len(self._scenario)
+                and isinstance(self._scenario[self._step_index], Compaction)):
+            step = self._scenario[self._step_index]
+            self._step_index += 1
+            await self._do_compaction(step, None)
+            return True
+        return False
+
+    async def shutdown(self):
+        pass
+
+    @property
+    def proc(self) -> None:
+        return None
+
+    @property
+    def session_id(self) -> Optional[str]:
+        return self._session_id
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
+    def refresh_tokens(self) -> int:
+        return self._total_tokens
+
+    def pop_compaction_event(self) -> tuple[bool, Optional[int], int]:
+        if self._compaction_event:
+            after = self._compaction_tokens_after
+            before = self._compaction_tokens_before
+            self._compaction_event = None
+            self._compaction_tokens_before = 0
+            self._compaction_tokens_after = 0
+            return True, after, before
+        return False, None, 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self._total_tokens
+
+    @total_tokens.setter
+    def total_tokens(self, value: int):
+        self._total_tokens = value
+
+    @property
+    def context_window(self) -> int:
+        return self._context_window
+
+    @context_window.setter
+    def context_window(self, value: int):
+        self._context_window = value
+
+    # -- Test introspection helpers --
+
+    @property
+    def steps_remaining(self) -> int:
+        return max(0, len(self._scenario) - self._step_index)
+
+    @property
+    def last_prompt(self) -> str:
+        return self._last_prompt
+
+    @property
+    def prompt_count(self) -> int:
+        return self._prompt_count

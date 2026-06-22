@@ -19,13 +19,15 @@ Don't delegate when:
 
 ## Subagent Types
 
-| Type | Context | Tools | Best for |
-|------|---------|-------|----------|
-| `explore` | ~30k | read_file, grep, list_dir, run_terminal_command | Searching code, reading logs, finding patterns |
-| `general-purpose` | ~200k | all tools | Complex multi-step tasks, writing files |
-| `plan` | ~200k | all except search_replace | Designing approaches, analyzing architecture |
+| Type | Tools | Best for |
+|------|-------|----------|
+| `explore` | read_file, grep, list_dir, run_terminal_command | Searching code, reading logs, finding patterns |
+| `general-purpose` | all tools | Complex multi-step tasks, writing files |
+| `plan` | all except search_replace | Designing approaches, analyzing architecture |
 
-**Default to `explore`** for read-only research. It's fast and cheap. Use `general-purpose` only when the subagent needs to write files or run complex commands.
+Context window is **inherited from the parent's model**, not fixed per type. All three types get the same context as the parent session.
+
+**Default to `explore`** for read-only research. It's read-only (no file editing). Use `general-purpose` only when the subagent needs to write files.
 
 ## Prompt Structure
 
@@ -99,7 +101,7 @@ This prevents context contamination — your working memory stays clean for synt
 
 ## Gotchas
 
-- **Explore agents have ~30k context.** A single 4000-line notebook can fill most of it. Always specify which files to read and which to skip.
+- **Large files consume context fast.** Even with a large context window, a single multi-thousand-line file can dominate a subagent's capacity. Always specify which files to read and which to skip.
 - **Results are unstructured text.** If you need to cross-reference findings from multiple subagents, request a consistent output format in every prompt.
 - **No shared state.** Subagents can't see each other's results. If agent B needs agent A's findings, you must relay them.
 - **Background agents need polling.** Use `get_command_or_subagent_output` to check on background subagents. You'll get notified when they finish.

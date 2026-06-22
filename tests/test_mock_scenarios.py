@@ -208,22 +208,34 @@ async def test_normal_round_trip():
 
 
 @pytest.mark.asyncio
-async def test_message_during_long_response():
-    """issue_0023 scenario: message arrives during long collect_response.
+async def test_no_continue_flood_after_empty_retry():
+    """issue_0023 regression: empty retry response must not trigger continue cascade.
 
-    MockBinary blocks for 3s (simulating retry). During that time, a TUI
-    message is injected. After collect_response returns, the message should
-    be picked up on the next loop iteration — NOT lost, and NOT causing
-    extra continue doorbells.
+    Scenario: agent makes a tool-call-only turn. Binary retries internally.
+    collect_response returns empty speech. A user message arrives during the
+    retry window.
+
+    Expected behavior (what the fix should achieve):
+    1. After empty collect_response, asdaaas should check for pending messages
+       BEFORE generating a continue doorbell
+    2. The user message should be delivered directly — not after a continue
+    3. No continue doorbells should fire between the empty response and the
+       message delivery
+
+    This test should FAIL until Sr's fix for issue_0023 lands.
     """
     scenario = [
+        # Step 1: normal boot response
         NormalResponse(speech="Ready.", tokens=5000),
-        # Step 2: long tool-call-only (simulates binary retry)
+        # Step 2: tool-call-only with empty resolve (the retry scenario)
+        # 3s simulates the binary's internal retry loop
         ToolCallOnly(retry_duration=3.0, resolve_speech="", tokens=6000),
-        # Step 3: response to the injected message
+        # Step 3: this should be the user's message, NOT a continue
         NormalResponse(speech="Got your message.", tokens=7000),
-        # Step 4: absorb continue if one fires
-        NormalResponse(speech="Standing by.", tokens=8000),
+        # Steps 4-6: absorb any continues that fire (the bug)
+        EmptyResponse(tokens=7100),
+        EmptyResponse(tokens=7200),
+        EmptyResponse(tokens=7300),
     ]
     mock = MockBinary(scenario)
 
@@ -235,12 +247,12 @@ async def test_message_during_long_response():
     inject_tui_message("Start")
 
     async def inject_during_retry():
-        # Wait for step 2 to start (after step 1 completes)
+        # Wait for step 1 to complete and step 2 to start
         await asyncio.sleep(2)
-        # Inject message during the ToolCallOnly retry period
-        inject_tui_message("Message during retry")
-        # Wait for processing
-        await asyncio.sleep(6)
+        # Inject message while ToolCallOnly is blocking collect_response
+        inject_tui_message("Important message during retry")
+        # Wait for asdaaas to process everything
+        await asyncio.sleep(8)
         # Stop
         inject_shutdown_command()
 
@@ -250,12 +262,42 @@ async def test_message_during_long_response():
     injector = asyncio.create_task(inject_during_retry())
 
     try:
-        await asyncio.wait_for(task, timeout=20)
+        await asyncio.wait_for(task, timeout=25)
     except (asyncio.TimeoutError, SystemExit):
         pass
     finally:
         asdaaas._shutdown_requested = True
         injector.cancel()
 
-    # The injected message should have been delivered as a prompt
-    assert mock.prompt_count >= 2, f"Expected at least 2 prompts (initial + retry message), got {mock.prompt_count}"
+    # === ASSERTIONS ===
+
+    # 1. The user message must have been delivered
+    assert any("Important message during retry" in p for p in mock.all_prompts), \
+        f"User message never delivered. All prompts: {mock.all_prompts}"
+
+    # 2. The FIRST prompt after the empty retry should contain the user message,
+    #    NOT a continue doorbell. This is the core bug: asdaaas generates a
+    #    continue before checking for pending messages.
+    #    Prompt 0 = "Start", prompt 1 = continue (step 2 trigger),
+    #    prompt 2 = should be user message, not another continue.
+    prompts_after_start = [p for p in mock.all_prompts if "Start" not in p]
+    user_msg_prompt_idx = None
+    first_continue_after_retry_idx = None
+
+    for i, p in enumerate(prompts_after_start):
+        if "Important message during retry" in p:
+            user_msg_prompt_idx = i
+        if i == 0 and "continue" in p.lower():
+            first_continue_after_retry_idx = i
+
+    # The user message should arrive before or instead of a continue
+    if user_msg_prompt_idx is not None and first_continue_after_retry_idx is not None:
+        assert user_msg_prompt_idx <= first_continue_after_retry_idx, \
+            "BUG (issue_0023): Continue doorbell fired before user message was delivered. " \
+            f"User msg at index {user_msg_prompt_idx}, continue at {first_continue_after_retry_idx}"
+
+    # 3. Count total continues — should be minimal (0-1), not a flood (3+)
+    continue_prompts = [p for p in mock.all_prompts if "[continue" in p.lower()]
+    assert len(continue_prompts) <= 1, \
+        f"BUG (issue_0023): Continue flood detected. {len(continue_prompts)} continues fired. " \
+        f"Expected 0-1. Continues: {continue_prompts[:3]}"

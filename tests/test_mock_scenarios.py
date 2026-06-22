@@ -301,3 +301,168 @@ async def test_no_continue_flood_after_empty_retry():
     assert len(continue_prompts) <= 1, \
         f"BUG (issue_0023): Continue flood detected. {len(continue_prompts)} continues fired. " \
         f"Expected 0-1. Continues: {continue_prompts[:3]}"
+
+
+@pytest.mark.asyncio
+async def test_delay_suppresses_continues_after_empty_retry():
+    """issue_0023 variant: delay/ack after empty retry must suppress further continues.
+
+    Scenario from Trip's 2026-06-22 15:26 session:
+    1. Agent turn ends with tool call only (binary retries for ~6.5 min)
+    2. Retry resolves, messages delivered, agent responds
+    3. Agent sets 600s delay on the first continue
+    4. BUG: two more continues fire at 8s intervals, ignoring the delay
+
+    The agent's delay command must be respected. After acking a continue
+    and setting a delay, no further continues should fire until the delay
+    expires or an event interrupts.
+
+    This test should FAIL until the delay-after-retry bug is fixed.
+    """
+    scenario = [
+        # Step 1: normal response to initial message
+        NormalResponse(speech="Ready.", tokens=5000),
+        # Step 2: tool-call-only turn (empty retry, simulates binary retry window)
+        ToolCallOnly(retry_duration=3.0, resolve_speech="", tokens=6000),
+        # Step 3: response to continue (agent sets delay via command queue)
+        NormalResponse(speech="Setting delay.", tokens=7000),
+        # Steps 4-5: if continues leak through despite delay, these absorb them
+        EmptyResponse(tokens=7100),
+        EmptyResponse(tokens=7200),
+        EmptyResponse(tokens=7300),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("Start")
+
+    continues_seen = []
+
+    async def monitor_and_stop():
+        # Wait for step 1 + step 2 (3s retry) + step 3 response
+        await asyncio.sleep(6)
+
+        # Now inject a delay command (simulating what the agent would do)
+        # Agent responds to first continue and sets 600s delay
+        cmd_dir = AGENT_HOME / "asdaaas" / "commands"
+        cmd = {"action": "delay", "seconds": 600}
+        path = cmd_dir / f"cmd_delay_{int(time.time() * 1000)}.json"
+        with open(path, "w") as f:
+            json.dump(cmd, f)
+
+        # Wait to see if more continues fire despite the delay
+        await asyncio.sleep(8)
+
+        # Stop
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    monitor = asyncio.create_task(monitor_and_stop())
+
+    try:
+        await asyncio.wait_for(task, timeout=25)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        monitor.cancel()
+
+    # Count continues after the first one
+    continue_prompts = [p for p in mock.all_prompts if "[continue" in p.lower()]
+
+    # At most 1 continue should fire (the initial one before delay is set).
+    # The bug: 3 continues fire in rapid succession ignoring the delay.
+    assert len(continue_prompts) <= 1, \
+        f"BUG: {len(continue_prompts)} continues fired despite delay command. " \
+        f"Expected at most 1. Delay should suppress further continues."
+
+
+@pytest.mark.asyncio
+async def test_stale_continues_purged_on_recovery():
+    """issue_0023 variant 2: stale continues from timeout cycle must not survive recovery.
+
+    Scenario (from Trip's 2026-06-22 15:26 session):
+    1. Agent turn produces empty speech (simulates keepalive timeout during retry)
+    2. This repeats — each empty response cycles the main loop, queuing a continue
+    3. Recovery: user message arrives and gets delivered with speech
+    4. BUG: stale continue doorbells from steps 1-2 fire AFTER recovery
+
+    The stale continues are ghosts from the timeout cycle. After recovery
+    delivers real user messages, those continues are meaningless and should
+    be purged.
+
+    This test should FAIL until the stale-continue-purge fix lands.
+    """
+    scenario = [
+        # Step 1: normal boot
+        NormalResponse(speech="Ready.", tokens=5000),
+        # Steps 2-4: empty responses simulating keepalive timeouts during retry
+        # Each one cycles the main loop and queues a continue doorbell
+        EmptyResponse(tokens=5100),
+        EmptyResponse(tokens=5200),
+        EmptyResponse(tokens=5300),
+        # Step 5: recovery — user message arrives, agent responds with speech
+        NormalResponse(speech="Got the message after recovery.", tokens=6000),
+        # Steps 6-8: absorb any stale continues that fire after recovery (the bug)
+        EmptyResponse(tokens=6100),
+        EmptyResponse(tokens=6200),
+        EmptyResponse(tokens=6300),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("Start")
+
+    async def inject_after_timeout_cycle():
+        # Wait for boot + 3 empty timeout cycles
+        await asyncio.sleep(5)
+        # Inject user message (the recovery trigger)
+        inject_tui_message("Recovery message")
+        # Wait for processing
+        await asyncio.sleep(8)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    injector = asyncio.create_task(inject_after_timeout_cycle())
+
+    try:
+        await asyncio.wait_for(task, timeout=25)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        injector.cancel()
+
+    # === ASSERTIONS ===
+
+    # 1. Recovery message must have been delivered
+    assert any("Recovery message" in p for p in mock.all_prompts), \
+        f"Recovery message never delivered. All prompts: {[p[:80] for p in mock.all_prompts]}"
+
+    # 2. Find where recovery happens in the prompt sequence
+    recovery_idx = None
+    for i, p in enumerate(mock.all_prompts):
+        if "Recovery message" in p:
+            recovery_idx = i
+            break
+
+    # 3. No continues should fire AFTER recovery. The continues from the
+    #    timeout cycle (steps 2-4) are stale — they should be purged when
+    #    the recovery message is delivered.
+    prompts_after_recovery = mock.all_prompts[recovery_idx + 1:] if recovery_idx is not None else []
+    continues_after_recovery = [p for p in prompts_after_recovery if "[continue" in p.lower()]
+
+    assert len(continues_after_recovery) == 0, \
+        f"BUG (issue_0023v2): {len(continues_after_recovery)} stale continues delivered AFTER recovery. " \
+        f"These are ghosts from the timeout cycle and should have been purged. " \
+        f"Continues: {[c[:80] for c in continues_after_recovery]}"

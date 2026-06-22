@@ -2721,6 +2721,14 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     if has_bells and has_msgs:
                         detail = f"coalesced response ({len(bells)} bells + {len(in_room_msgs)} msgs), {len(result.speech)} chars"
                     write_health(agent_name, "active", detail, total_tokens, context_window)
+                    # After responding to a user message with speech, wait
+                    # for the agent's delay command before queueing continues.
+                    # The agent controls its own pacing via delay commands.
+                    # Without this, step 3 immediately queues continues after
+                    # recovery from a timeout cycle, flooding the agent with
+                    # stale-looking turns it didn't ask for.
+                    if has_msgs:
+                        delay_until_event = True
                 else:
                     # Empty response tracking (only for doorbell-only prompts)
                     if has_bells and not has_msgs:

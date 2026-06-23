@@ -505,12 +505,14 @@ class GrokBackend(AgentBackend):
                     self._total_tokens = tokens_after
                 self._compaction_event = frame
 
-            # Token tracking from _meta
-            meta = params.get("_meta", {})
-            if meta.get("totalTokens"):
-                self._total_tokens = meta["totalTokens"]
-                if on_meta:
-                    on_meta(self._total_tokens)
+            # Token tracking from _meta — skip if compaction event already
+            # set authoritative tokens_after (stale _meta clobber, issue_0029)
+            elif not self._compaction_event:
+                meta = params.get("_meta", {})
+                if meta.get("totalTokens"):
+                    self._total_tokens = meta["totalTokens"]
+                    if on_meta:
+                        on_meta(self._total_tokens)
 
     def refresh_tokens(self) -> int:
         """Read latest from updates.jsonl to get current token count.
@@ -523,14 +525,12 @@ class GrokBackend(AgentBackend):
             return self._total_tokens
 
         updates, _ = self._file_source.read_new_lines()
+        compaction_seen = False
         for frame in updates:
             self._last_activity_ts = time.time()
 
-            meta = frame.get("params", {}).get("_meta", {})
-            if meta.get("totalTokens"):
-                self._total_tokens = meta["totalTokens"]
-
-            # Detect compaction completion event
+            # Detect compaction completion event FIRST — _meta frames that
+            # follow carry stale pre-compaction totalTokens (issue_0029).
             su = frame.get("params", {}).get("update", {}).get("sessionUpdate", "")
             if su == "auto_compact_completed":
                 tokens_after = frame.get("params", {}).get("update", {}).get("tokens_after")
@@ -541,6 +541,11 @@ class GrokBackend(AgentBackend):
                     self._compaction_tokens_after = tokens_after
                     self._total_tokens = tokens_after
                 self._compaction_event = frame
+                compaction_seen = True
+            elif not compaction_seen:
+                meta = frame.get("params", {}).get("_meta", {})
+                if meta.get("totalTokens"):
+                    self._total_tokens = meta["totalTokens"]
 
         return self._total_tokens
 
@@ -589,9 +594,11 @@ class GrokBackend(AgentBackend):
                     self._compaction_tokens_after = tokens_after
                     self._total_tokens = tokens_after
                 self._compaction_event = frame
-            meta = params.get("_meta", {})
-            if meta.get("totalTokens"):
-                self._total_tokens = meta["totalTokens"]
+            # Skip _meta totalTokens after compaction (stale values, issue_0029)
+            elif not self._compaction_event:
+                meta = params.get("_meta", {})
+                if meta.get("totalTokens"):
+                    self._total_tokens = meta["totalTokens"]
 
         return len(updates) + len(events), "".join(speech_chunks)
 

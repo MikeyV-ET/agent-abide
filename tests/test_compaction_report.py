@@ -559,12 +559,8 @@ class TestCompactionTokenClobber:
         }
 
     def test_meta_after_compaction_clobbers_total_tokens_in_refresh(self, tmp_path):
-        """Bug 1: _meta frame AFTER auto_compact_completed in refresh_tokens
-        clobbers _total_tokens back to pre-compaction value.
-
-        refresh_tokens processes _meta BEFORE compaction check (line order),
-        so if compaction event comes first and a _meta frame follows, the
-        _meta frame wins for _total_tokens.
+        """Regression test: _meta frames after auto_compact_completed in
+        refresh_tokens must not clobber _total_tokens (issue_0029 fix).
         """
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -582,14 +578,10 @@ class TestCompactionTokenClobber:
 
         total = backend.refresh_tokens()
 
-        # BUG: refresh_tokens processes frames sequentially. The compaction
-        # event sets _total_tokens = 18746, then the _meta frame sets it
-        # back to 164643.
-        #
-        # EXPECTED (after fix): total should be POST_COMPACT (18746)
-        # ACTUAL (bug): total is STALE_META (164643)
-        assert total == STALE_META, \
-            f"Bug reproduced: refresh_tokens returned {total}, expected {STALE_META} (clobbered by _meta)"
+        # FIX (issue_0029): once auto_compact_completed is seen, subsequent
+        # _meta frames in the same batch are skipped. tokens_after wins.
+        assert total == POST_COMPACT, \
+            f"refresh_tokens should return post-compaction tokens {POST_COMPACT}, got {total}"
 
         # But _compaction_tokens_after should still be correct
         found, event_tokens, event_before = backend.pop_compaction_event()
@@ -598,11 +590,8 @@ class TestCompactionTokenClobber:
             f"_compaction_tokens_after should be {POST_COMPACT}, got {event_tokens}"
 
     def test_meta_on_same_frame_clobbers_in_process_update(self, tmp_path):
-        """Bug 2: In _process_update_frames, _meta is `if` not `elif`.
-
-        If the auto_compact_completed frame itself carries _meta.totalTokens
-        (which it does when embedded in a response stream), the non-elif _meta
-        check runs on the same frame and clobbers _total_tokens.
+        """Regression test: combined auto_compact_completed + _meta frame
+        must not clobber _total_tokens (issue_0029 fix).
         """
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -634,24 +623,17 @@ class TestCompactionTokenClobber:
             frames, [], [], set(), None, None, None
         )
 
-        # BUG: _process_update_frames handles auto_compact_completed (elif),
-        # sets _total_tokens = POST_COMPACT. Then the non-elif _meta check
-        # runs on the SAME frame and sets _total_tokens = PRE_COMPACT.
-        #
-        # EXPECTED (after fix): _total_tokens should be POST_COMPACT
-        # ACTUAL (bug): _total_tokens is PRE_COMPACT
-        assert backend._total_tokens == PRE_COMPACT, \
-            f"Bug reproduced: _total_tokens={backend._total_tokens}, expected {PRE_COMPACT} (clobbered)"
+        # FIX (issue_0029): _meta check is now elif, so the compaction
+        # event's tokens_after is authoritative even on combined frames.
+        assert backend._total_tokens == POST_COMPACT, \
+            f"_total_tokens should be post-compaction {POST_COMPACT}, got {backend._total_tokens}"
 
         # _compaction_tokens_after should still be correct
         assert backend._compaction_tokens_after == POST_COMPACT
 
     def test_compaction_without_tokens_after_falls_back_to_clobbered(self, tmp_path):
-        """Bug 3: If auto_compact_completed lacks tokens_after,
-        pop_compaction_event returns 0, and asdaaas falls back to
-        total_tokens which was clobbered by _meta.
-
-        This reproduces the exact "164641 to 164643" report.
+        """Regression test: when compaction event lacks tokens_after,
+        fallback to _total_tokens must not use stale _meta value (issue_0029 fix).
         """
         session_dir = tmp_path / "session"
         session_dir.mkdir()
@@ -693,11 +675,9 @@ class TestCompactionTokenClobber:
         tokens_before = event_before or _prev_tokens
         tokens_after = event_tokens or backend._total_tokens
 
-        # BUG: tokens_after falls back to _total_tokens which is STALE_META
+        # FIX (issue_0029): _meta frames after compaction are skipped, so
+        # _total_tokens stays at PRE_COMPACT (last valid value before compaction).
+        # The fallback chain gives PRE_COMPACT, not the stale 164643.
         assert tokens_before == PRE_COMPACT
-        assert tokens_after == STALE_META, \
-            f"Bug reproduced: tokens_after={tokens_after}, expected {STALE_META} (fallback to clobbered total)"
-
-        # This is exactly what the agent saw: "reduced from 164641 to 164643"
-        assert abs(tokens_before - tokens_after) < 10, \
-            "Both values are pre-compaction — compaction report is meaningless"
+        assert tokens_after == PRE_COMPACT, \
+            f"tokens_after should fall back to PRE_COMPACT {PRE_COMPACT}, got {tokens_after}"

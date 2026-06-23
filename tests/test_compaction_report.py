@@ -232,25 +232,29 @@ class TestCompactionEventConsumption:
                 }
             }
         }
+        backend._compaction_tokens_before = 150000
+        backend._compaction_tokens_after = 43000
 
         # First pop: returns the event
-        found, tokens = backend.pop_compaction_event()
+        found, tokens, tokens_before = backend.pop_compaction_event()
         assert found is True
         assert tokens == 43000
 
         # Second pop: event consumed, returns nothing
-        found2, tokens2 = backend.pop_compaction_event()
+        found2, tokens2, _ = backend.pop_compaction_event()
         assert found2 is False
         assert tokens2 is None
 
     def test_pop_without_event_returns_false(self):
-        """pop_compaction_event returns (False, None) when no event pending."""
+        """pop_compaction_event returns (False, None, 0) when no event pending."""
         from grok_backend import GrokBackend
 
         backend = GrokBackend.__new__(GrokBackend)
         backend._compaction_event = None
+        backend._compaction_tokens_before = 0
+        backend._compaction_tokens_after = 0
 
-        found, tokens = backend.pop_compaction_event()
+        found, tokens, tokens_before = backend.pop_compaction_event()
         assert found is False
         assert tokens is None
 
@@ -324,6 +328,9 @@ class TestDoubleFireIntegration:
         backend = GrokBackend.__new__(GrokBackend)
         backend._total_tokens = 0
         backend._compaction_event = None
+        backend._compaction_tokens_before = 0
+        backend._compaction_tokens_after = 0
+        backend._last_activity_ts = 0.0
         backend._file_source = FileEventSource(session_dir)
         # Open and seek to start (we want to read everything)
         backend._file_source._updates_path = session_dir / "updates.jsonl"
@@ -349,7 +356,7 @@ class TestDoubleFireIntegration:
         assert tokens == 43000
 
         # Event should be stored for pop_compaction_event
-        found, event_tokens = backend.pop_compaction_event()
+        found, event_tokens, _ = backend.pop_compaction_event()
         assert found is True
         assert event_tokens == 43000
 
@@ -399,7 +406,7 @@ class TestDoubleFireIntegration:
 
         # Path 1: event-based detection at top of loop
         total_tokens = backend.refresh_tokens()  # no new data
-        compaction_event, event_tokens = backend.pop_compaction_event()
+        compaction_event, event_tokens, _ = backend.pop_compaction_event()
 
         # THE BUG: event was never consumed by Path 2
         # So pop_compaction_event() returns it again
@@ -467,7 +474,7 @@ class TestDoubleFireIntegration:
         # --- Next loop iteration ---
         turns_since_compaction = 1
         total_tokens = backend.refresh_tokens()
-        compaction_event, event_tokens = backend.pop_compaction_event()
+        compaction_event, event_tokens, _ = backend.pop_compaction_event()
 
         # Event was consumed — Path 1 does NOT fire
         assert compaction_event is False

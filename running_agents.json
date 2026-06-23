@@ -1,20 +1,23 @@
 {
-  "Q": {
-    "home": "/home/eric/agents/Q"
-  },
-  "Cinco": {
-    "home": "/home/eric/agents/Cinco"
-  },
-  "Trip": {
-    "home": "/home/eric/agents/Trip"
+  "TestAgent": {
+    "home": "/home/eric/agents/TestAgent"
   },
   "Sr": {
     "home": "/home/eric/agents/Sr"
   },
+  "Cinco": {
+    "home": "/home/eric/agents/Cinco"
+  },
+  "Q": {
+    "home": "/home/eric/agents/Q"
+  },
   "Jr": {
     "home": "/home/eric/agents/Jr"
   },
-  "TestAgent": {
-    "home": "/home/eric/agents/TestAgent"
+  "MockTestAgent": {
+    "home": "/home/eric/agents/MockTestAgent"
+  },
+  "Trip": {
+    "home": "/home/eric/agents/Trip"
   }
 }

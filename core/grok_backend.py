@@ -108,6 +108,7 @@ class GrokBackend(AgentBackend):
         self._compaction_tokens_before: int = 0  # from event's tokens_before field
         self._compaction_tokens_after: int = 0   # from event's tokens_after field
         self._context_window: int = 200000
+        self._last_activity_ts: float = 0.0  # epoch ts of most recent updates.jsonl frame
         self._rpc_id: int = 0
         self._grok_sessions_dir = grok_sessions_dir or Path.home() / ".grok" / "sessions"
         self._grok_binary = grok_binary or "grok"
@@ -453,6 +454,11 @@ class GrokBackend(AgentBackend):
     ):
         """Process update frames from updates.jsonl."""
         for frame in frames:
+            # Track wall-clock time of most recent frame for midturn detection.
+            # Even when collect_response returns on wall_clock_timeout, this
+            # timestamp shows the agent was still active.
+            self._last_activity_ts = time.time()
+
             params = frame.get("params", {})
             update = params.get("update", {})
             su = update.get("sessionUpdate", "")
@@ -518,6 +524,8 @@ class GrokBackend(AgentBackend):
 
         updates, _ = self._file_source.read_new_lines()
         for frame in updates:
+            self._last_activity_ts = time.time()
+
             meta = frame.get("params", {}).get("_meta", {})
             if meta.get("totalTokens"):
                 self._total_tokens = meta["totalTokens"]
@@ -664,6 +672,10 @@ class GrokBackend(AgentBackend):
     @property
     def model_id(self) -> str:
         return self._model_id
+
+    @property
+    def last_activity_ts(self) -> float:
+        return self._last_activity_ts
 
     @property
     def total_tokens(self) -> int:

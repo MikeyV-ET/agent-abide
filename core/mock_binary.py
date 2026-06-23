@@ -101,11 +101,13 @@ class MockBinary(AgentBackend):
         self._compaction_event: Optional[dict] = None
         self._compaction_tokens_before: int = 0
         self._compaction_tokens_after: int = 0
+        self._last_activity_ts: float = 0.0
 
     # -- Event writing helpers --
 
     def _write_update(self, update: dict):
         """Append a session update event to updates.jsonl."""
+        self._last_activity_ts = time.time()
         if not self._session_dir:
             return
         frame = {
@@ -122,6 +124,7 @@ class MockBinary(AgentBackend):
 
     def _write_update_with_meta(self, update: dict, tokens: int):
         """Append a session update with _meta.totalTokens."""
+        self._last_activity_ts = time.time()
         if not self._session_dir:
             return
         frame = {
@@ -407,6 +410,10 @@ class MockBinary(AgentBackend):
             self._compaction_tokens_after = 0
             return True, after, before
         return False, None, 0
+
+    @property
+    def last_activity_ts(self) -> float:
+        return self._last_activity_ts
 
     @property
     def total_tokens(self) -> int:

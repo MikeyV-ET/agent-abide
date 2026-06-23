@@ -609,17 +609,24 @@ def format_background_doorbell(msg, agent_name=None):
 
 MIDTURN_GRACE_SECONDS = 30  # grace window after doorbell/background work
 
-def _is_midturn_message(msg, last_response_ts, last_was_foreground=True):
+def _is_midturn_message(msg, last_response_ts, last_was_foreground=True, last_activity_ts=0.0):
     """Check if a message was sent while the agent was busy with other work.
 
-    Returns True if the message timestamp predates last_response_ts,
-    meaning the sender wrote it during the agent's previous turn and
-    is NOT responding to what the agent just said.
+    Returns True if the message timestamp predates the effective "agent was
+    working until" time, meaning the sender wrote it during the agent's
+    previous turn and is NOT responding to what the agent just said.
 
-    When the most recent activity was non-foreground (doorbells, background),
-    a grace period is added: messages sent shortly after a doorbell response
-    are still flagged because the user wasn't interacting with the agent
-    directly -- the agent was busy processing notifications.
+    The effective timestamp is max(last_response_ts, last_activity_ts).
+    last_activity_ts comes from updates.jsonl frame activity — when
+    collect_response hits wall_clock_timeout and resets last_response_ts,
+    last_activity_ts still reflects ongoing tool calls / speech chunks.
+
+    Grace periods:
+    - When last_activity_ts > last_response_ts, the agent was still working
+      after collect_response returned (wall clock timeout). Apply grace to
+      catch messages arriving during ongoing work.
+    - When last activity was non-foreground (doorbells, background), apply
+      grace because the user wasn't interacting directly.
 
     Both timestamps are epoch floats."""
     if last_response_ts is None:
@@ -627,8 +634,13 @@ def _is_midturn_message(msg, last_response_ts, last_was_foreground=True):
     msg_ts = msg.get("_received_ts") or msg.get("ts")
     if not isinstance(msg_ts, (int, float)):
         return False
-    grace = 0 if last_was_foreground else MIDTURN_GRACE_SECONDS
-    return msg_ts < last_response_ts + grace
+    effective_ts = max(last_response_ts, last_activity_ts or 0.0)
+    # Agent active after collect_response returned = wall clock timeout case.
+    if last_activity_ts and last_activity_ts > last_response_ts:
+        grace = MIDTURN_GRACE_SECONDS
+    else:
+        grace = 0 if last_was_foreground else MIDTURN_GRACE_SECONDS
+    return msg_ts < effective_ts + grace
 
 
 def _midturn_flag(msg):
@@ -2650,7 +2662,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     sender = msg.get("from", "unknown")
                     adapter = msg.get("adapter", "unknown")
                     text = msg.get("text", "").strip()
-                    midturn = _is_midturn_message(msg, last_response_ts, last_was_foreground)
+                    midturn = _is_midturn_message(msg, last_response_ts, last_was_foreground, backend.last_activity_ts)
                     flag = _midturn_flag(msg) if midturn else ""
                     prompt_parts.append(f"<{sender} (via {adapter}){flag}> {text}")
 
@@ -2695,7 +2707,6 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                 total_tokens = backend.total_tokens
                 turns_since_compaction += 1
-                last_response_ts = time.time()
                 # Clean up continue doorbells after every response. Prevents
                 # re-delivery cascade: without this, a persistent continue bell
                 # gets re-delivered with delivery+1 on each loop iteration,
@@ -2707,6 +2718,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 gaze = read_gaze(agent_name)
 
                 if result.speech.strip():
+                    # Only update last_response_ts when the agent actually spoke.
+                    # Empty responses (wall clock timeout, no_visible_content)
+                    # should NOT reset this — the agent hasn't addressed the user.
+                    last_response_ts = time.time()
                     consecutive_empty_doorbell = 0
                     write_conversation(agent_name, "assistant", result.speech)
                     if result.thoughts.strip():

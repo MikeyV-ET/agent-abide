@@ -154,6 +154,16 @@ class AgentBackend(ABC):
         return False, None, 0
 
     @property
+    def last_activity_ts(self) -> float:
+        """Epoch timestamp of the most recent updates.jsonl frame.
+
+        Used by _is_midturn_message to detect ongoing agent work even
+        when collect_response has returned (e.g. wall clock timeout).
+        Default 0.0 — backends override by tracking frame timestamps.
+        """
+        return 0.0
+
+    @property
     @abstractmethod
     def total_tokens(self) -> int:
         """Cumulative token count for the session."""

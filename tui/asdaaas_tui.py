@@ -264,6 +264,8 @@ class AgentHeader(Static):
     turn_physical = reactive(0)
     turn_logical = reactive(0)
     delay_pattern = reactive("")
+    code_version = reactive("")
+    code_version_stale = reactive(False)
 
     def render(self) -> Text:
         text = Text()
@@ -355,6 +357,14 @@ class AgentHeader(Static):
         if self.model_name:
             text.append("  ")
             text.append(self.model_name, style=Gruvbox.DARK4)
+
+        # Code version
+        if self.code_version:
+            text.append("  ")
+            if self.code_version_stale:
+                text.append(f"⚠ {self.code_version}", style=f"bold {Gruvbox.BR_YELLOW}")
+            else:
+                text.append(self.code_version, style=Gruvbox.DARK4)
 
         return text
 
@@ -1631,11 +1641,26 @@ class AsdaaasTUI(App):
                 "logical_turn": 0,  # Logical turn counter (user_message_chunk events)
             }
         # Shared state
+        self._abide_head = self._get_abide_head()
         self._replay_mode: bool = False
         self._replay_done: bool = False
         self._tail_count: Optional[int] = None
         self._show_thinking: bool = True
         self._available_commands: list[dict] = []
+
+    @staticmethod
+    def _get_abide_head() -> str:
+        """Get current git HEAD of agent-abide repo. Returns short hash or ''."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(Path.home() / "projects" / "agent-abide"),
+                capture_output=True, text=True, timeout=5,
+            )
+            return result.stdout.strip() if result.returncode == 0 else ""
+        except Exception:
+            return ""
 
     @property
     def _tool_panels(self) -> dict:
@@ -2661,6 +2686,13 @@ Type anything else to send a message to the agent.
                     health_pct = int(tokens / window * 100)
                     self.call_from_thread(setattr, header, "context_pct", health_pct)
 
+            # Code version
+            cv = health.get("code_version", "")
+            if cv:
+                self.call_from_thread(setattr, header, "code_version", cv)
+                stale = bool(self._abide_head and cv != self._abide_head)
+                self.call_from_thread(setattr, header, "code_version_stale", stale)
+
             # Gaze
             gaze = data.get("gaze", {})
             if gaze:
@@ -2695,6 +2727,11 @@ Type anything else to send a message to the agent.
             if isinstance(tokens, int) and isinstance(window, int) and window > 0:
                 health_pct = int(tokens / window * 100)
                 self.call_from_thread(setattr, header, "context_pct", health_pct)
+            cv = health.get("code_version", "")
+            if cv:
+                self.call_from_thread(setattr, header, "code_version", cv)
+                stale = bool(self._abide_head and cv != self._abide_head)
+                self.call_from_thread(setattr, header, "code_version_stale", stale)
         except Exception:
             pass
         return health_pct
@@ -2720,12 +2757,19 @@ Type anything else to send a message to the agent.
         Falls back to direct filesystem reads otherwise.
         """
         worker = get_current_worker()
+        _head_refresh_counter = 0
         while not worker.is_cancelled:
             try:
                 header = self.query_one("#agent-header", AgentHeader)
                 active = self._active_agent
                 agent_dir = Path(Config.AGENTS_HOME) / active
                 asdaaas_dir = agent_dir / "asdaaas"
+
+                # Refresh git HEAD every ~30 polls (~60s)
+                _head_refresh_counter += 1
+                if _head_refresh_counter >= 30:
+                    self._abide_head = self._get_abide_head()
+                    _head_refresh_counter = 0
 
                 health_pct = None
 

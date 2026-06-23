@@ -1017,3 +1017,172 @@ async def test_compact_command_survives_post_response_drain():
         state = json.loads(state_path.read_text())
         assert state["phase"] == "complete", \
             f"Compaction did not complete: phase={state['phase']}"
+
+
+@pytest.mark.asyncio
+async def test_compaction_includes_default_instructions():
+    """Agent-initiated compaction sends /compact with DEFAULT_COMPACTION_INSTRUCTIONS.
+
+    When no per-agent compaction_instructions.txt exists, asdaaas should
+    append the default instructions to the /compact prompt.
+    """
+    from asdaaas import DEFAULT_COMPACTION_INSTRUCTIONS
+
+    # Make sure no per-agent file exists
+    instructions_file = AGENT_HOME / "asdaaas" / "compaction_instructions.txt"
+    if instructions_file.exists():
+        instructions_file.unlink()
+
+    scenario = [
+        CommandWriter(
+            speech="Compacting.",
+            tokens=150000,
+            commands=[{"action": "compact"}],
+        ),
+        Compaction(tokens_before=150000, tokens_after=30000),
+        NormalResponse(speech="Done.", tokens=31000),
+        EmptyResponse(tokens=31100),
+        EmptyResponse(tokens=31200),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("Compact")
+
+    async def stop_after():
+        await asyncio.sleep(10)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after())
+
+    try:
+        await asyncio.wait_for(task, timeout=25)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # Find the /compact prompt and verify it includes instructions
+    compact_prompts = [p for p in mock.all_prompts if p.startswith("/compact")]
+    assert len(compact_prompts) >= 1, \
+        f"No /compact prompt found. Prompts: {[p[:80] for p in mock.all_prompts]}"
+    assert DEFAULT_COMPACTION_INSTRUCTIONS in compact_prompts[0], \
+        f"/compact prompt missing default instructions. Got: {compact_prompts[0][:200]}"
+
+
+@pytest.mark.asyncio
+async def test_compaction_uses_per_agent_instructions():
+    """Per-agent compaction_instructions.txt overrides default in /compact prompt."""
+    custom_instructions = "Preserve: Trip's corrections log, TUI paste fix details, test backlog."
+
+    instructions_file = AGENT_HOME / "asdaaas" / "compaction_instructions.txt"
+    instructions_file.write_text(custom_instructions)
+
+    try:
+        scenario = [
+            CommandWriter(
+                speech="Compacting with custom instructions.",
+                tokens=150000,
+                commands=[{"action": "compact"}],
+            ),
+            Compaction(tokens_before=150000, tokens_after=30000),
+            NormalResponse(speech="Done.", tokens=31000),
+            EmptyResponse(tokens=31100),
+            EmptyResponse(tokens=31200),
+        ]
+        mock = MockBinary(scenario)
+
+        from asdaaas import main, DEFAULT_COMPACTION_INSTRUCTIONS
+        import asdaaas
+        asdaaas._shutdown_requested = False
+
+        inject_tui_message("Compact with custom")
+
+        async def stop_after():
+            await asyncio.sleep(10)
+            inject_shutdown_command()
+
+        task = asyncio.create_task(
+            main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+        )
+        stopper = asyncio.create_task(stop_after())
+
+        try:
+            await asyncio.wait_for(task, timeout=25)
+        except (asyncio.TimeoutError, SystemExit):
+            pass
+        finally:
+            asdaaas._shutdown_requested = True
+            stopper.cancel()
+
+        compact_prompts = [p for p in mock.all_prompts if p.startswith("/compact")]
+        assert len(compact_prompts) >= 1
+        assert custom_instructions in compact_prompts[0], \
+            f"/compact should use per-agent instructions. Got: {compact_prompts[0][:200]}"
+        assert DEFAULT_COMPACTION_INSTRUCTIONS not in compact_prompts[0], \
+            "Default instructions should NOT appear when per-agent file exists"
+    finally:
+        if instructions_file.exists():
+            instructions_file.unlink()
+
+
+@pytest.mark.asyncio
+async def test_compaction_per_request_override():
+    """{"action": "compact", "instructions": "..."} overrides both default and per-agent."""
+    per_request = "Just keep the last 3 notebook entries."
+
+    # Write a per-agent file too — per-request should override it
+    instructions_file = AGENT_HOME / "asdaaas" / "compaction_instructions.txt"
+    instructions_file.write_text("This should be overridden by per-request.")
+
+    try:
+        scenario = [
+            CommandWriter(
+                speech="Compacting with per-request override.",
+                tokens=150000,
+                commands=[{"action": "compact", "instructions": per_request}],
+            ),
+            Compaction(tokens_before=150000, tokens_after=30000),
+            NormalResponse(speech="Done.", tokens=31000),
+            EmptyResponse(tokens=31100),
+            EmptyResponse(tokens=31200),
+        ]
+        mock = MockBinary(scenario)
+
+        from asdaaas import main
+        import asdaaas
+        asdaaas._shutdown_requested = False
+
+        inject_tui_message("Compact with override")
+
+        async def stop_after():
+            await asyncio.sleep(10)
+            inject_shutdown_command()
+
+        task = asyncio.create_task(
+            main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+        )
+        stopper = asyncio.create_task(stop_after())
+
+        try:
+            await asyncio.wait_for(task, timeout=25)
+        except (asyncio.TimeoutError, SystemExit):
+            pass
+        finally:
+            asdaaas._shutdown_requested = True
+            stopper.cancel()
+
+        compact_prompts = [p for p in mock.all_prompts if p.startswith("/compact")]
+        assert len(compact_prompts) >= 1
+        assert per_request in compact_prompts[0], \
+            f"/compact should use per-request instructions. Got: {compact_prompts[0][:200]}"
+    finally:
+        if instructions_file.exists():
+            instructions_file.unlink()

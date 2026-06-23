@@ -21,3 +21,37 @@ Write JSON command files to `~/agents/<Name>/asdaaas/commands/cmd_{timestamp}_{r
 | Awareness TTL | `{"action": "awareness", "doorbell_ttl": {"irc": 3}}` | Set doorbell expiry |
 | Awareness attach | `{"action": "awareness", "attach": "arena"}` | Add adapter to direct_attach |
 | Awareness detach | `{"action": "awareness", "detach": "arena"}` | Remove adapter from direct_attach |
+
+## Compaction Instructions
+
+When asdaaas sends `/compact` to the binary, it appends instructions telling the binary what to preserve in the compacted summary. Three layers of configuration (highest priority first):
+
+1. **Per-request override:** `{"action": "compact", "instructions": "Just keep the last 3 entries."}` — overrides everything for this one compaction.
+2. **Per-agent file:** `~/agents/<Name>/asdaaas/compaction_instructions.txt` — plain text file, read on every compact. Overrides the default.
+3. **Default constant:** `DEFAULT_COMPACTION_INSTRUCTIONS` in asdaaas.py — preserves identity, corrections, pending work, file paths, recent commits, open issues, and active conversation context.
+
+### Setting per-agent instructions
+
+Create a text file at `~/agents/<Name>/asdaaas/compaction_instructions.txt`:
+
+```
+Preserve: my corrections log (all 7 entries), current test backlog table,
+active feature requests, MockBinary test infrastructure state, and any
+conversation context with Eric. Omit completed work older than 48 hours.
+```
+
+### Per-request override
+
+Pass `"instructions"` in the compact command to override for a single compaction:
+
+```python
+cmd = {"action": "compact", "instructions": "Emergency compact: keep only last 5 notebook entries and pending issues."}
+```
+
+### Which paths use instructions
+
+| Path | Triggered by | Uses instructions? |
+|------|-------------|-------------------|
+| Agent-initiated | `{"action": "compact"}` command | Yes — per-request > per-agent > default |
+| Force compact | `{"action": "force_compact"}` command | Yes — per-agent > default (no per-request) |
+| Auto-compaction | Binary hits 85% context | No — binary decides internally. Post-compaction orientation includes "Follow your boot protocol." |

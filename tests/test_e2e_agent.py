@@ -28,6 +28,8 @@ from asdaaas import (
     has_pending_doorbells,
     poll_doorbells,
     queue_continue_doorbell,
+    get_compaction_instructions,
+    DEFAULT_COMPACTION_INSTRUCTIONS,
 )
 import localmail
 from localmail import send_mail, read_mail, ring_doorbell
@@ -1085,3 +1087,50 @@ class TestPostResponseDrainRequeue:
         assert len(step1_cmds) == 0, (
             "Without requeue, compact command is lost — this was issue_0028"
         )
+
+
+# ============================================================================
+# E2E-11: Compaction instructions (d6f692b)
+# ============================================================================
+
+class TestCompactionInstructions:
+    """E2E-11: get_compaction_instructions returns default or per-agent override."""
+
+    def test_default_instructions_when_no_file(self, agent_env):
+        """No per-agent file -> returns DEFAULT_COMPACTION_INSTRUCTIONS."""
+        name = agent_env["agent_name"]
+        instructions_file = agent_env["asdaaas_dir"] / "compaction_instructions.txt"
+        if instructions_file.exists():
+            instructions_file.unlink()
+
+        result = get_compaction_instructions(name)
+        assert result == DEFAULT_COMPACTION_INSTRUCTIONS
+
+    def test_per_agent_file_overrides_default(self, agent_env):
+        """Per-agent compaction_instructions.txt overrides default."""
+        name = agent_env["agent_name"]
+        custom = "Preserve: my custom corrections and lab notebook state."
+        instructions_file = agent_env["asdaaas_dir"] / "compaction_instructions.txt"
+        instructions_file.write_text(custom)
+
+        result = get_compaction_instructions(name)
+        assert result == custom
+
+        instructions_file.unlink()
+
+    def test_empty_file_returns_empty_string(self, agent_env):
+        """Empty per-agent file returns empty string (strip removes whitespace)."""
+        name = agent_env["agent_name"]
+        instructions_file = agent_env["asdaaas_dir"] / "compaction_instructions.txt"
+        instructions_file.write_text("  \n  \n")
+
+        result = get_compaction_instructions(name)
+        assert result == ""
+
+        instructions_file.unlink()
+
+    def test_default_instructions_content(self, agent_env):
+        """Default instructions mention key preservation targets."""
+        assert "identity" in DEFAULT_COMPACTION_INSTRUCTIONS.lower()
+        assert "corrections" in DEFAULT_COMPACTION_INSTRUCTIONS.lower()
+        assert "pending" in DEFAULT_COMPACTION_INSTRUCTIONS.lower()

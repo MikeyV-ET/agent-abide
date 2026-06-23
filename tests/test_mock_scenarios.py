@@ -473,8 +473,8 @@ async def test_midturn_messages_flagged_during_long_turn():
     """Messages sent while agent is working must get [sent during your previous turn] flag.
 
     Scenario (from Eric's 2026-06-22 report on Jr):
-    1. User sends initial message, agent starts a long turn (~8s)
-    2. User sends 2 more messages while agent is working
+    1. User sends initial message, agent starts a long turn (~60s real time)
+    2. User sends 2 more messages 20s and 40s into the turn
     3. Agent's turn completes, last_response_ts is set
     4. Next loop iteration polls messages — their _received_ts < last_response_ts
     5. Messages should be delivered with [sent during your previous turn] flag
@@ -482,13 +482,16 @@ async def test_midturn_messages_flagged_during_long_turn():
     BUG: Both messages showed up as fresh new turns without the flag,
     triggering separate agent responses instead of being coalesced as
     midturn messages.
+
+    Uses real wall-clock time (60s turn) because asdaaas midturn detection
+    is based on real timestamps. Compressed tests can mask timing bugs.
     """
     scenario = [
-        # Step 1: long agent turn (simulates 5-10 min work, compressed to 8s)
-        SlowResponse(speech="Done with my long task.", delay=8.0, tokens=5000),
+        # Step 1: long agent turn — 60s real time
+        SlowResponse(speech="Done with my long task.", delay=60.0, tokens=5000),
         # Step 2: response to the midturn messages (should have flags)
         NormalResponse(speech="Got your messages.", tokens=6000),
-        # Steps 3-4: absorb continues
+        # Steps 3-5: absorb continues
         EmptyResponse(tokens=6100),
         EmptyResponse(tokens=6200),
         EmptyResponse(tokens=6300),
@@ -503,14 +506,14 @@ async def test_midturn_messages_flagged_during_long_turn():
     inject_tui_message("Start working on the big task")
 
     async def inject_midturn_messages():
-        # Wait for the long turn to start (agent is inside collect_response)
-        await asyncio.sleep(3)
-        # Send two messages while agent is busy
+        # Wait 20s into the turn, send first message
+        await asyncio.sleep(20)
         inject_tui_message("Hey, also check the config file")
-        await asyncio.sleep(1)
+        # Wait another 20s, send second message
+        await asyncio.sleep(20)
         inject_tui_message("And update the README when you're done")
         # Wait for agent to finish long turn + process midturn messages
-        await asyncio.sleep(12)
+        await asyncio.sleep(30)
         inject_shutdown_command()
 
     task = asyncio.create_task(
@@ -519,7 +522,7 @@ async def test_midturn_messages_flagged_during_long_turn():
     injector = asyncio.create_task(inject_midturn_messages())
 
     try:
-        await asyncio.wait_for(task, timeout=30)
+        await asyncio.wait_for(task, timeout=90)
     except (asyncio.TimeoutError, SystemExit):
         pass
     finally:

@@ -335,6 +335,56 @@ class TestLocalmailPipeline:
         assert len(bells_b) >= 1
         assert len(bells_a) >= 1
 
+    def test_localmail_doorbell_ack_via_polled_id(self, agent_env):
+        """Acking a localmail doorbell using the ID from poll_doorbells should remove it.
+
+        Regression: localmail ring_doorbell writes bells WITHOUT an "id" field
+        (only "msg_id"). poll_doorbells assigns bell["id"] = f.stem in memory.
+        format_doorbell shows this ID to the agent. Agent acks with that ID.
+        ack_doorbells must match it to the filename stem.
+
+        Bug observed: bell_xii9p2qu redelivered 3 times despite ack commands.
+        """
+        sender = agent_env["agent_name"]
+        receiver = agent_env["other_name"]
+
+        # Send localmail — creates a bell WITHOUT "id" field (only "msg_id")
+        send_mail(from_agent=sender, to_agent=receiver, text="Ack round-trip test")
+        self._deliver(agent_env, receiver)
+
+        bell_dir = agent_env["agents_home"] / receiver / "asdaaas" / "doorbells"
+        bells_on_disk = list(bell_dir.glob("bell_*.json"))
+        assert len(bells_on_disk) == 1
+
+        # Verify bell file has NO "id" key (localmail only writes "msg_id")
+        raw = json.loads(bells_on_disk[0].read_text())
+        assert "id" not in raw, f"Localmail bell should not have 'id' key, got: {raw.keys()}"
+        assert "msg_id" in raw
+
+        # Poll — this is what asdaaas does. Sets bell["id"] = f.stem in memory.
+        polled = poll_doorbells(receiver)
+        assert len(polled) == 1
+        polled_id = polled[0]["id"]
+
+        # Format — this is what the agent sees in the prompt
+        from asdaaas import format_doorbell
+        formatted = format_doorbell(polled[0])
+        assert f"id={polled_id}" in formatted, f"Formatted text should contain id={polled_id}"
+
+        # Agent acks with the ID from the prompt
+        ack_doorbells(receiver, [polled_id])
+
+        # Bell should be gone
+        remaining = list(bell_dir.glob("bell_*.json"))
+        assert len(remaining) == 0, (
+            f"Bell should be removed after ack. "
+            f"Polled ID: {polled_id}, files remaining: {[f.name for f in remaining]}"
+        )
+
+        # Verify re-poll returns nothing
+        polled2 = poll_doorbells(receiver)
+        assert len(polled2) == 0, "No doorbells should remain after ack"
+
 
 # ============================================================================
 # E2E-4: Gaze and awareness state management

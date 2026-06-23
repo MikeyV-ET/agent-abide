@@ -2707,6 +2707,28 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                 total_tokens = backend.total_tokens
                 turns_since_compaction += 1
+                # Process ack commands written during the response BEFORE
+                # the next iteration polls doorbells. Without this, the bell
+                # gets repolled and redelivered before the ack is processed.
+                post_cmds = poll_commands(agent_name)
+                for pc in post_cmds:
+                    pa = pc.get("action", "")
+                    if pa == "ack":
+                        ack_doorbells(agent_name, pc.get("handled", []))
+                    if pa == "delay":
+                        dv = pc.get("seconds", 0)
+                        delay_text = pc.get("text") or None
+                        if dv == "until_event":
+                            delay_until_event = True
+                            next_turn_delay = 0
+                        else:
+                            next_turn_delay = float(dv)
+                            delay_until_event = False
+                    piggy = pc.get("ack", [])
+                    if piggy:
+                        ack_doorbells(agent_name, piggy)
+                if post_cmds:
+                    print(f"[asdaaas] Post-response: drained {len(post_cmds)} command(s)")
                 # Clean up continue doorbells after every response. Prevents
                 # re-delivery cascade: without this, a persistent continue bell
                 # gets re-delivered with delivery+1 on each loop iteration,

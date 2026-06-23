@@ -67,6 +67,11 @@
       "home": "/home/eric/agents/MockTestAgent",
       "backend": "grok",
       "yolo": true
+    },
+    "RestartTestAgent": {
+      "home": "/home/eric/agents/RestartTestAgent",
+      "backend": "grok",
+      "yolo": true
     }
   },
   "adapters": {

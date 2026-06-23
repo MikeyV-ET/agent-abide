@@ -60,6 +60,20 @@ class DoomLoop:
 
 
 @dataclass
+class CommandWriter:
+    """Turn where the agent writes command queue files during its response.
+
+    Simulates what a real agent does when it uses tool calls to write
+    commands like {"action": "compact"}, {"action": "gaze", ...}, etc.
+    The commands list is written to the agent's command queue directory
+    during collect_response, before the speech is returned.
+    """
+    speech: str = "OK."
+    tokens: int = 5000
+    commands: list = field(default_factory=list)
+
+
+@dataclass
 class Compaction:
     """Simulate auto-compaction."""
     tokens_before: int = 150000
@@ -104,6 +118,7 @@ class MockBinary(AgentBackend):
         self._compaction_tokens_after: int = 0
         self._last_activity_ts: float = 0.0
         self._startup_delay: float = startup_delay
+        self._agent_cwd: Optional[str] = None
 
     # -- Event writing helpers --
 
@@ -165,6 +180,7 @@ class MockBinary(AgentBackend):
     async def start(self, agent_cwd: str, model: Optional[str] = None,
                     session_id: Optional[str] = None, **kwargs) -> str:
         self._session_id = session_id or str(uuid.uuid4())
+        self._agent_cwd = agent_cwd
 
         # Simulate slow session load (large sessions take >30s in real grok)
         if self._startup_delay > 0:
@@ -224,6 +240,8 @@ class MockBinary(AgentBackend):
 
         if isinstance(step, NormalResponse):
             return await self._do_normal(step, on_speech_chunk, on_meta, cancel_event)
+        elif isinstance(step, CommandWriter):
+            return await self._do_command_writer(step, on_speech_chunk, on_meta, cancel_event)
         elif isinstance(step, ToolCallOnly):
             return await self._do_tool_call_only(step, on_speech_chunk, on_meta, cancel_event, on_tool_call)
         elif isinstance(step, DoomLoop):
@@ -240,6 +258,38 @@ class MockBinary(AgentBackend):
     async def _do_normal(self, step: NormalResponse, on_speech_chunk, on_meta, cancel_event):
         if cancel_event and cancel_event.is_set():
             raise TurnCancelled("cancel_event set")
+
+        self._write_speech(step.speech, step.tokens)
+
+        if on_speech_chunk and step.speech:
+            on_speech_chunk(step.speech)
+        if on_meta:
+            on_meta(step.tokens)
+
+        return ResponseResult(
+            speech=step.speech, thoughts="",
+            total_tokens=step.tokens,
+            model_id=self._model_id,
+            stop_reason="completed",
+        )
+
+    async def _do_command_writer(self, step: CommandWriter, on_speech_chunk, on_meta, cancel_event):
+        if cancel_event and cancel_event.is_set():
+            raise TurnCancelled("cancel_event set")
+
+        # Write command files to the agent's command queue (simulates tool calls)
+        if self._agent_cwd:
+            cmd_dir = Path(self._agent_cwd) / "asdaaas" / "commands"
+            cmd_dir.mkdir(parents=True, exist_ok=True)
+            import secrets
+            for cmd in step.commands:
+                ts = int(time.time() * 1000)
+                rand = secrets.token_hex(4)
+                path = cmd_dir / f"cmd_{ts}_{rand}.json"
+                with open(path, "w") as f:
+                    json.dump(cmd, f)
+                # Small delay so filenames sort correctly
+                await asyncio.sleep(0.005)
 
         self._write_speech(step.speech, step.tokens)
 

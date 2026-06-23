@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 
 import pytest
-from mock_binary import MockBinary, NormalResponse, ToolCallOnly, EmptyResponse, SlowResponse
+from mock_binary import MockBinary, NormalResponse, ToolCallOnly, EmptyResponse, SlowResponse, CommandWriter, Compaction
 
 
 AGENT_NAME = "MockTestAgent"
@@ -673,3 +673,347 @@ async def test_midturn_messages_flagged_after_wall_clock_timeout():
                             f"Messages sent during a long turn must be flagged even if " \
                             f"collect_response returned early due to wall clock timeout. " \
                             f"Line: {line}"
+
+
+# ============================================================================
+# Command processing tests -- CommandWriter scenarios
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_agent_initiated_compaction():
+    """Agent writes {"action": "compact"} during its turn.
+
+    asdaaas should:
+    1. Detect the compact command (via post-response drain + requeue, then step 1)
+    2. Send /compact to the backend
+    3. Update compaction_state.json to 'complete'
+    4. Send a post-compaction orientation turn
+    """
+    scenario = [
+        # Step 1: initial response to user message -- agent writes compact command
+        CommandWriter(
+            speech="I need to compact. Writing the command now.",
+            tokens=150000,
+            commands=[{"action": "compact"}],
+        ),
+        # Step 2: asdaaas sends /compact -- this is the compaction result
+        Compaction(tokens_before=150000, tokens_after=30000),
+        # Step 3: post-compaction orientation response
+        NormalResponse(speech="Boot protocol complete.", tokens=31000),
+        # Step 4+: absorb continues
+        EmptyResponse(tokens=31100),
+        EmptyResponse(tokens=31200),
+        EmptyResponse(tokens=31300),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("Please compact yourself")
+
+    async def stop_after_processing():
+        await asyncio.sleep(10)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after_processing())
+
+    try:
+        await asyncio.wait_for(task, timeout=25)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # 1. /compact was sent to the backend
+    assert any("/compact" in p for p in mock.all_prompts), \
+        f"asdaaas never sent /compact. Prompts: {[p[:80] for p in mock.all_prompts]}"
+
+    # 2. compaction_state.json shows complete
+    state_path = AGENT_HOME / "asdaaas" / "compaction_state.json"
+    assert state_path.exists(), "compaction_state.json not created"
+    state = json.loads(state_path.read_text())
+    assert state["phase"] == "complete", f"Expected phase=complete, got {state['phase']}"
+    assert state["tokens_after"] is not None and state["tokens_after"] < state["tokens_before"], \
+        f"Token reduction not recorded: before={state.get('tokens_before')}, after={state.get('tokens_after')}"
+
+    # 3. Post-compaction orientation was sent (contains "boot protocol" or "Compaction complete")
+    assert any("Compaction complete" in p for p in mock.all_prompts), \
+        f"No post-compaction orientation prompt. Prompts: {[p[:100] for p in mock.all_prompts]}"
+
+
+@pytest.mark.asyncio
+async def test_gaze_command_changes_gaze_file():
+    """Agent writes {"action": "gaze", "adapter": "irc", "room": "#standup"} during its turn.
+
+    asdaaas should update gaze.json to reflect the new target.
+    """
+    scenario = [
+        # Agent responds and sets gaze to IRC #standup
+        CommandWriter(
+            speech="Switching to standup channel.",
+            tokens=5000,
+            commands=[{"action": "gaze", "adapter": "irc", "room": "#standup"}],
+        ),
+        EmptyResponse(tokens=5100),
+        EmptyResponse(tokens=5200),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("Switch to standup")
+
+    async def stop_after_processing():
+        await asyncio.sleep(5)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after_processing())
+
+    try:
+        await asyncio.wait_for(task, timeout=15)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # Verify gaze.json was updated
+    gaze_path = AGENT_HOME / "asdaaas" / "gaze.json"
+    assert gaze_path.exists(), "gaze.json not found"
+    gaze = json.loads(gaze_path.read_text())
+    speech_target = gaze.get("speech", {})
+    assert speech_target.get("target") == "irc", \
+        f"Expected gaze target=irc, got {speech_target}"
+    params = speech_target.get("params", {})
+    assert params.get("room") == "#standup", \
+        f"Expected gaze room=#standup, got {params}"
+
+
+@pytest.mark.asyncio
+async def test_gaze_pm_command():
+    """Agent writes {"action": "gaze", "adapter": "irc", "pm": "eric"} during its turn.
+
+    asdaaas should update gaze.json to PM mode.
+    """
+    scenario = [
+        CommandWriter(
+            speech="Switching to PM with Eric.",
+            tokens=5000,
+            commands=[{"action": "gaze", "adapter": "irc", "pm": "eric"}],
+        ),
+        EmptyResponse(tokens=5100),
+        EmptyResponse(tokens=5200),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("PM eric")
+
+    async def stop_after():
+        await asyncio.sleep(5)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after())
+
+    try:
+        await asyncio.wait_for(task, timeout=15)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    gaze_path = AGENT_HOME / "asdaaas" / "gaze.json"
+    gaze = json.loads(gaze_path.read_text())
+    speech_target = gaze.get("speech", {})
+    assert speech_target.get("target") == "irc", \
+        f"Expected target=irc, got {speech_target}"
+    params = speech_target.get("params", {})
+    assert params.get("pm") == "eric", \
+        f"Expected pm=eric, got {params}"
+
+
+@pytest.mark.asyncio
+async def test_awareness_add_channel():
+    """Agent writes {"action": "awareness", "add": "#general", "mode": "doorbell"}.
+
+    asdaaas should update awareness.json to include the new channel.
+    """
+    scenario = [
+        CommandWriter(
+            speech="Adding #general to awareness.",
+            tokens=5000,
+            commands=[{"action": "awareness", "add": "#general", "mode": "doorbell"}],
+        ),
+        EmptyResponse(tokens=5100),
+        EmptyResponse(tokens=5200),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("Watch general")
+
+    async def stop_after():
+        await asyncio.sleep(5)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after())
+
+    try:
+        await asyncio.wait_for(task, timeout=15)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    awareness_path = AGENT_HOME / "asdaaas" / "awareness.json"
+    awareness = json.loads(awareness_path.read_text())
+    bg = awareness.get("background_channels", {})
+    assert "#general" in bg, \
+        f"#general not found in background_channels. Got: {bg}"
+    assert bg["#general"] == "doorbell", \
+        f"Expected mode=doorbell, got {bg['#general']}"
+
+
+@pytest.mark.asyncio
+async def test_piggybacked_ack_clears_doorbell():
+    """Agent writes {"action": "delay", "seconds": 0, "ack": ["<bell_id>"]}.
+
+    The piggybacked ack should clear the doorbell from disk.
+    """
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    # Pre-create a doorbell that the agent will ack
+    bell_dir = AGENT_HOME / "asdaaas" / "doorbells"
+    bell_dir.mkdir(parents=True, exist_ok=True)
+    bell = {
+        "adapter": "localmail",
+        "text": "Test message to ack",
+        "ts": time.time(),
+    }
+    bell_file = bell_dir / "bell_test_ack_me.json"
+    with open(bell_file, "w") as f:
+        json.dump(bell, f)
+
+    # The bell's id after poll_doorbells will be "bell_test_ack_me" (stem of filename)
+    scenario = [
+        # Agent responds to the doorbell + acks it with piggybacked delay
+        CommandWriter(
+            speech="Got it, acking.",
+            tokens=5000,
+            commands=[{"action": "delay", "seconds": 0, "ack": ["bell_test_ack_me"]}],
+        ),
+        EmptyResponse(tokens=5100),
+        EmptyResponse(tokens=5200),
+    ]
+    mock = MockBinary(scenario)
+
+    async def stop_after():
+        await asyncio.sleep(5)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after())
+
+    try:
+        await asyncio.wait_for(task, timeout=15)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # The doorbell file should be gone (acked)
+    remaining = list(bell_dir.glob("bell_test_ack_me*"))
+    assert len(remaining) == 0, \
+        f"Doorbell not cleared by piggybacked ack. Remaining: {[f.name for f in remaining]}"
+
+
+@pytest.mark.asyncio
+async def test_compact_command_survives_post_response_drain():
+    """issue_0028 regression: compact command written during response must survive
+    the post-response drain and be processed on the next iteration.
+
+    Before fix (87af75c), the drain consumed compact commands and dropped them.
+    """
+    scenario = [
+        # Agent writes compact + delay in same turn (common pattern)
+        CommandWriter(
+            speech="Compacting now.",
+            tokens=150000,
+            commands=[
+                {"action": "compact"},
+                {"action": "delay", "seconds": 0},
+            ],
+        ),
+        # asdaaas sends /compact
+        Compaction(tokens_before=150000, tokens_after=30000),
+        # Post-compaction orientation
+        NormalResponse(speech="Rebooted.", tokens=31000),
+        EmptyResponse(tokens=31100),
+        EmptyResponse(tokens=31200),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("Compact please")
+
+    async def stop_after():
+        await asyncio.sleep(10)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after())
+
+    try:
+        await asyncio.wait_for(task, timeout=25)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # The compact command must have been processed (not silently dropped)
+    assert any("/compact" in p for p in mock.all_prompts), \
+        f"BUG (issue_0028): compact command dropped by post-response drain. " \
+        f"Prompts: {[p[:80] for p in mock.all_prompts]}"
+
+    state_path = AGENT_HOME / "asdaaas" / "compaction_state.json"
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        assert state["phase"] == "complete", \
+            f"Compaction did not complete: phase={state['phase']}"

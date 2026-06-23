@@ -82,6 +82,11 @@ IDLE_POLL_INTERVAL = 0.25           # seconds between main loop iterations when 
 CONTINUE_DOOM_CHECK_AFTER = 5      # check chat_history for doom_loop corruption after this many empties
 CONTINUE_MAX_CONSECUTIVE = 20      # hard cap: stop all continues after this many empties
 DOORBELL_MAX_DELIVERIES = 10       # safety cap: auto-expire any doorbell after this many deliveries
+DEFAULT_COMPACTION_INSTRUCTIONS = (
+    "Preserve: agent identity, corrections log, all pending work items with status, "
+    "key file paths, recent commits with hashes, open issues, standing instructions, "
+    "and any active conversation context. Omit completed work details unless referenced by pending items."
+)
 # ============================================================================
 
 RUNNING_AGENTS_FILE = config.running_agents_file
@@ -351,6 +356,19 @@ def write_compaction_state(agent_name, phase, request_id=None, tokens_before=Non
     with open(tmp, "w") as f:
         json.dump(state, f)
     os.rename(tmp, str(state_path))
+
+
+def get_compaction_instructions(agent_name):
+    """Return compaction instructions for the given agent.
+
+    Priority: per-agent file > default constant.
+    Per-agent file: ~/agents/<Name>/asdaaas/compaction_instructions.txt
+    """
+    agent_file = agent_dir(agent_name) / "compaction_instructions.txt"
+    try:
+        return agent_file.read_text().strip()
+    except (FileNotFoundError, OSError):
+        return DEFAULT_COMPACTION_INSTRUCTIONS
 
 
 def context_left_tag(total_tokens, context_window, turns_since_compaction=None, gaze=None):
@@ -2278,7 +2296,9 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                         try:
                             tokens_before = total_tokens
                             write_compaction_state(agent_name, "in_flight", request_id=request_id, tokens_before=tokens_before)
-                            compact_handle = await backend.send_prompt("/compact")
+                            instructions = cmd.get("instructions") or get_compaction_instructions(agent_name)
+                            compact_prompt = f"/compact {instructions}"
+                            compact_handle = await backend.send_prompt(compact_prompt)
                             compact_result = await backend.collect_response(
                                 compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
                             total_tokens = backend.total_tokens
@@ -2376,7 +2396,9 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     try:
                         tokens_before = total_tokens
                         write_compaction_state(agent_name, "in_flight", tokens_before=tokens_before)
-                        compact_handle = await backend.send_prompt("/compact")
+                        instructions = cmd.get("instructions") or get_compaction_instructions(agent_name)
+                        compact_prompt = f"/compact {instructions}"
+                        compact_handle = await backend.send_prompt(compact_prompt)
                         compact_result = await backend.collect_response(
                             compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
                         total_tokens = backend.total_tokens

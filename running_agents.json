@@ -16,8 +16,5 @@
   },
   "Jr": {
     "home": "/home/eric/agents/Jr"
-  },
-  "MockTestAgent": {
-    "home": "/home/eric/agents/MockTestAgent"
   }
 }

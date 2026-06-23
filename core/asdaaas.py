@@ -2769,6 +2769,40 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 # gets re-delivered with delivery+1 on each loop iteration,
                 # burning turns on redundant prompts.
                 _cleanup_continue_doorbells(agent_name)
+                # Late command poll: the agent's delay command may not be on
+                # disk yet when the first post-response drain runs (tool call
+                # file write races with collect_response return). Brief wait
+                # then re-poll catches late-arriving commands.
+                if not delay_until_event and next_turn_delay == 0:
+                    await asyncio.sleep(0.5)
+                    late_cmds = poll_commands(agent_name)
+                    for lc in late_cmds:
+                        la = lc.get("action", "")
+                        lpiggy = lc.get("ack", [])
+                        if lpiggy:
+                            ack_doorbells(agent_name, lpiggy)
+                        if la == "delay":
+                            ldv = lc.get("seconds", 0)
+                            delay_text = lc.get("text") or None
+                            if ldv == "until_event":
+                                delay_until_event = True
+                                next_turn_delay = 0
+                            else:
+                                next_turn_delay = float(ldv)
+                                delay_until_event = False
+                        elif la == "ack":
+                            ack_doorbells(agent_name, lc.get("handled", []))
+                        elif la in ("compact", "gaze", "awareness"):
+                            requeue.append(lc)
+                    if late_cmds:
+                        print(f"[asdaaas] Late command poll: {len(late_cmds)} command(s)")
+                        if requeue:
+                            cmd_dir = agent_dir(agent_name) / "commands"
+                            cmd_dir.mkdir(parents=True, exist_ok=True)
+                            for rc in requeue:
+                                fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
+                                with os.fdopen(fd, "w") as f:
+                                    json.dump(rc, f)
                 # Foreground if any in-room messages included; doorbell-only = non-foreground
                 last_was_foreground = has_msgs
 

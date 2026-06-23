@@ -434,9 +434,9 @@ stage_session() {
         fi
         echo "  OK   Claude session (created on first prompt)"
     else
-        if ! wait_for_log "$AGENT_LOG" "Session:" 30; then
-            echo "  FAIL: 'Session:' not seen in log after 30s"
-            echo "        Possible causes: corrupted session, binary auth failure, network issue"
+        if ! wait_for_log "$AGENT_LOG" "Session:" 120; then
+            echo "  FAIL: 'Session:' not seen in log after 120s"
+            echo "        Possible causes: corrupted session, binary auth failure, network issue, large session load"
             show_log_tail "$AGENT_LOG"
             return 1
         fi

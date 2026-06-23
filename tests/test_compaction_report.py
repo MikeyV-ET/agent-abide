@@ -491,3 +491,213 @@ class TestDoubleFireIntegration:
         m = re.findall(r"from (\d+) to (\d+)", bell["text"])
         assert int(m[0][0]) == 150000
         assert int(m[0][1]) == 43000
+
+
+# ============================================================================
+# issue_0029: compaction reports wrong token counts
+# ============================================================================
+
+class TestCompactionTokenClobber:
+    """Reproduce issue_0029: compaction reports wrong before/after token counts.
+
+    Real-world scenario (Trip 2026-06-23):
+      - Binary in retry loop (no_visible_content), writing _meta frames
+      - Auto-compaction fires mid-retry
+      - auto_compact_completed event written to updates.jsonl
+      - Retry continues, writes more _meta frames with pre-compaction count
+      - asdaaas reads all frames in collect_response via _process_update_frames
+      - _meta processing (non-elif, runs on every frame) clobbers _total_tokens
+      - Compaction report says "reduced from 164641 to 164643" (both pre-compaction)
+
+    Two bugs identified:
+      1. _process_update_frames: _meta check is `if` not `elif`, so it runs
+         on the same frame as auto_compact_completed, clobbering _total_tokens
+      2. If auto_compact_completed lacks tokens_after, pop_compaction_event
+         returns 0, and `0 or total_tokens` falls back to clobbered value
+    """
+
+    def _make_backend_with_source(self, session_dir):
+        """Create a GrokBackend wired to a real FileEventSource."""
+        backend = GrokBackend.__new__(GrokBackend)
+        backend._total_tokens = 0
+        backend._compaction_event = None
+        backend._compaction_tokens_before = 0
+        backend._compaction_tokens_after = 0
+        backend._last_activity_ts = 0.0
+        backend._model_id = "test"
+        backend._permission_pending = False
+        backend._file_source = FileEventSource(session_dir)
+        backend._file_source._updates_path = session_dir / "updates.jsonl"
+        backend._file_source._updates_fp = open(session_dir / "updates.jsonl", "r")
+        (session_dir / "events.jsonl").touch()
+        backend._file_source._events_path = session_dir / "events.jsonl"
+        backend._file_source._events_fp = open(session_dir / "events.jsonl", "r")
+        return backend
+
+    def _write_frame(self, path, frame):
+        with open(path, "a") as f:
+            f.write(json.dumps(frame) + "\n")
+
+    def _meta_frame(self, total_tokens):
+        return {
+            "method": "_x.ai/session/update",
+            "params": {
+                "update": {"sessionUpdate": "agent_message_chunk",
+                           "content": {"text": "x"}},
+                "_meta": {"totalTokens": total_tokens}
+            }
+        }
+
+    def _compaction_event_frame(self, tokens_after, tokens_before=None):
+        update = {"sessionUpdate": "auto_compact_completed",
+                  "tokens_after": tokens_after}
+        if tokens_before is not None:
+            update["tokens_before"] = tokens_before
+        return {
+            "method": "_x.ai/session/update",
+            "params": {"update": update}
+        }
+
+    def test_meta_after_compaction_clobbers_total_tokens_in_refresh(self, tmp_path):
+        """Bug 1: _meta frame AFTER auto_compact_completed in refresh_tokens
+        clobbers _total_tokens back to pre-compaction value.
+
+        refresh_tokens processes _meta BEFORE compaction check (line order),
+        so if compaction event comes first and a _meta frame follows, the
+        _meta frame wins for _total_tokens.
+        """
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        (session_dir / "updates.jsonl").touch()
+        backend = self._make_backend_with_source(session_dir)
+        updates_path = session_dir / "updates.jsonl"
+
+        PRE_COMPACT = 164641
+        POST_COMPACT = 18746
+        STALE_META = 164643
+
+        # Simulate: compaction event followed by stale _meta frame
+        self._write_frame(updates_path, self._compaction_event_frame(POST_COMPACT, PRE_COMPACT))
+        self._write_frame(updates_path, self._meta_frame(STALE_META))
+
+        total = backend.refresh_tokens()
+
+        # BUG: refresh_tokens processes frames sequentially. The compaction
+        # event sets _total_tokens = 18746, then the _meta frame sets it
+        # back to 164643.
+        #
+        # EXPECTED (after fix): total should be POST_COMPACT (18746)
+        # ACTUAL (bug): total is STALE_META (164643)
+        assert total == STALE_META, \
+            f"Bug reproduced: refresh_tokens returned {total}, expected {STALE_META} (clobbered by _meta)"
+
+        # But _compaction_tokens_after should still be correct
+        found, event_tokens, event_before = backend.pop_compaction_event()
+        assert found is True
+        assert event_tokens == POST_COMPACT, \
+            f"_compaction_tokens_after should be {POST_COMPACT}, got {event_tokens}"
+
+    def test_meta_on_same_frame_clobbers_in_process_update(self, tmp_path):
+        """Bug 2: In _process_update_frames, _meta is `if` not `elif`.
+
+        If the auto_compact_completed frame itself carries _meta.totalTokens
+        (which it does when embedded in a response stream), the non-elif _meta
+        check runs on the same frame and clobbers _total_tokens.
+        """
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        (session_dir / "updates.jsonl").touch()
+        backend = self._make_backend_with_source(session_dir)
+        updates_path = session_dir / "updates.jsonl"
+
+        PRE_COMPACT = 164641
+        POST_COMPACT = 18746
+
+        # Single frame: auto_compact_completed WITH _meta.totalTokens
+        # This happens when the binary embeds the event in a response stream
+        combined_frame = {
+            "method": "_x.ai/session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "auto_compact_completed",
+                    "tokens_after": POST_COMPACT,
+                    "tokens_before": PRE_COMPACT
+                },
+                "_meta": {"totalTokens": PRE_COMPACT}
+            }
+        }
+        self._write_frame(updates_path, combined_frame)
+
+        # Process via _process_update_frames (same path as collect_response)
+        frames = [combined_frame]
+        backend._process_update_frames(
+            frames, [], [], set(), None, None, None
+        )
+
+        # BUG: _process_update_frames handles auto_compact_completed (elif),
+        # sets _total_tokens = POST_COMPACT. Then the non-elif _meta check
+        # runs on the SAME frame and sets _total_tokens = PRE_COMPACT.
+        #
+        # EXPECTED (after fix): _total_tokens should be POST_COMPACT
+        # ACTUAL (bug): _total_tokens is PRE_COMPACT
+        assert backend._total_tokens == PRE_COMPACT, \
+            f"Bug reproduced: _total_tokens={backend._total_tokens}, expected {PRE_COMPACT} (clobbered)"
+
+        # _compaction_tokens_after should still be correct
+        assert backend._compaction_tokens_after == POST_COMPACT
+
+    def test_compaction_without_tokens_after_falls_back_to_clobbered(self, tmp_path):
+        """Bug 3: If auto_compact_completed lacks tokens_after,
+        pop_compaction_event returns 0, and asdaaas falls back to
+        total_tokens which was clobbered by _meta.
+
+        This reproduces the exact "164641 to 164643" report.
+        """
+        session_dir = tmp_path / "session"
+        session_dir.mkdir()
+        (session_dir / "updates.jsonl").touch()
+        backend = self._make_backend_with_source(session_dir)
+        updates_path = session_dir / "updates.jsonl"
+
+        PRE_COMPACT = 164641
+        STALE_META = 164643
+
+        # Pre-compaction state
+        self._write_frame(updates_path, self._meta_frame(PRE_COMPACT))
+        backend.refresh_tokens()
+        _prev_tokens = backend._total_tokens
+        assert _prev_tokens == PRE_COMPACT
+
+        # Compaction event WITHOUT tokens_after (some binary versions omit it)
+        event_no_tokens = {
+            "method": "_x.ai/session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "auto_compact_completed"
+                    # no tokens_after field
+                }
+            }
+        }
+        self._write_frame(updates_path, event_no_tokens)
+        # Stale _meta from retry
+        self._write_frame(updates_path, self._meta_frame(STALE_META))
+
+        backend.refresh_tokens()
+
+        # pop_compaction_event returns event but with 0 tokens
+        found, event_tokens, event_before = backend.pop_compaction_event()
+        assert found is True
+        assert event_tokens == 0, f"Expected 0 (no tokens_after in event), got {event_tokens}"
+
+        # Simulate asdaaas line 2177-2178
+        tokens_before = event_before or _prev_tokens
+        tokens_after = event_tokens or backend._total_tokens
+
+        # BUG: tokens_after falls back to _total_tokens which is STALE_META
+        assert tokens_before == PRE_COMPACT
+        assert tokens_after == STALE_META, \
+            f"Bug reproduced: tokens_after={tokens_after}, expected {STALE_META} (fallback to clobbered total)"
+
+        # This is exactly what the agent saw: "reduced from 164641 to 164643"
+        assert abs(tokens_before - tokens_after) < 10, \
+            "Both values are pre-compaction — compaction report is meaningless"

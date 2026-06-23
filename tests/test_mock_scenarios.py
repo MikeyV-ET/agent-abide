@@ -48,6 +48,14 @@ def setup_mock_agent():
         target = AGENT_HOME / d
         for f in target.glob("*.json"):
             f.unlink()
+    # Clear conversation log to prevent stale state from prior runs
+    conv = AGENT_HOME / "asdaaas" / "conversation.jsonl"
+    if conv.exists():
+        conv.write_text("")
+    # Also clean legacy commands.json
+    legacy = AGENT_HOME / "asdaaas" / "commands.json"
+    if legacy.exists():
+        legacy.unlink()
 
     # Write awareness: direct_attach tui only, default_doorbell on
     awareness = {
@@ -107,7 +115,7 @@ def inject_shutdown_command():
     """Tell asdaaas to shut down gracefully."""
     cmd_dir = AGENT_HOME / "asdaaas" / "commands"
     cmd_dir.mkdir(parents=True, exist_ok=True)
-    cmd = {"action": "delay", "seconds": "until_event"}
+    cmd = {"action": "shutdown"}
     path = cmd_dir / f"cmd_shutdown_{int(time.time() * 1000)}.json"
     with open(path, "w") as f:
         json.dump(cmd, f)
@@ -395,8 +403,6 @@ async def test_stale_continues_purged_on_recovery():
     The stale continues are ghosts from the timeout cycle. After recovery
     delivers real user messages, those continues are meaningless and should
     be purged.
-
-    This test should FAIL until the stale-continue-purge fix lands.
     """
     scenario = [
         # Step 1: normal boot
@@ -408,10 +414,17 @@ async def test_stale_continues_purged_on_recovery():
         EmptyResponse(tokens=5300),
         # Step 5: recovery — user message arrives, agent responds with speech
         NormalResponse(speech="Got the message after recovery.", tokens=6000),
-        # Steps 6-8: absorb any stale continues that fire after recovery (the bug)
+        # Steps 6-13: absorb stale continues (need enough to avoid hanging
+        # if the bug fires — 8 absorbers for 3 potential stale continues
+        # plus margin for collection-window timing)
         EmptyResponse(tokens=6100),
         EmptyResponse(tokens=6200),
         EmptyResponse(tokens=6300),
+        EmptyResponse(tokens=6400),
+        EmptyResponse(tokens=6500),
+        EmptyResponse(tokens=6600),
+        EmptyResponse(tokens=6700),
+        EmptyResponse(tokens=6800),
     ]
     mock = MockBinary(scenario)
 
@@ -427,7 +440,7 @@ async def test_stale_continues_purged_on_recovery():
         # Inject user message (the recovery trigger)
         inject_tui_message("Recovery message")
         # Wait for processing
-        await asyncio.sleep(8)
+        await asyncio.sleep(12)
         inject_shutdown_command()
 
     task = asyncio.create_task(
@@ -436,7 +449,7 @@ async def test_stale_continues_purged_on_recovery():
     injector = asyncio.create_task(inject_after_timeout_cycle())
 
     try:
-        await asyncio.wait_for(task, timeout=25)
+        await asyncio.wait_for(task, timeout=30)
     except (asyncio.TimeoutError, SystemExit):
         pass
     finally:
@@ -466,6 +479,90 @@ async def test_stale_continues_purged_on_recovery():
         f"BUG (issue_0023v2): {len(continues_after_recovery)} stale continues delivered AFTER recovery. " \
         f"These are ghosts from the timeout cycle and should have been purged. " \
         f"Continues: {[c[:80] for c in continues_after_recovery]}"
+
+
+@pytest.mark.asyncio
+async def test_until_event_delay_suppresses_queued_continues():
+    """issue_0023 variant 3: until_event delay must suppress further continues.
+
+    After responding to a user message with speech, asdaaas sets
+    delay_until_event=True to wait for the agent's explicit delay command.
+    This test verifies that when a second message arrives and the agent
+    writes until_event, no further continues fire.
+
+    Scenario:
+    1. User sends msg1, agent responds
+    2. User sends msg2, agent responds with until_event command
+    3. Verify: no continues fire after until_event
+    """
+    scenario = [
+        # Step 1: respond to first user message
+        NormalResponse(speech="Got msg1.", tokens=5000),
+        # Step 2: respond to second user message, set until_event
+        CommandWriter(
+            speech="Sleeping until event.",
+            tokens=6000,
+            commands=[{"action": "delay", "seconds": "until_event"}],
+        ),
+        # Steps 3-7: absorbers — if continues leak through despite
+        # until_event, these catch them so the test doesn't hang
+        EmptyResponse(tokens=6100),
+        EmptyResponse(tokens=6200),
+        EmptyResponse(tokens=6300),
+        EmptyResponse(tokens=6400),
+        EmptyResponse(tokens=6500),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("msg1")
+
+    async def send_second_and_stop():
+        # Wait for first response, then send second message
+        await asyncio.sleep(3)
+        inject_tui_message("msg2")
+        # Wait for second response + time for any stale continues
+        await asyncio.sleep(15)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(send_second_and_stop())
+
+    try:
+        await asyncio.wait_for(task, timeout=25)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # === ASSERTIONS ===
+
+    # 1. Both messages were delivered to the agent
+    assert len(mock.all_prompts) >= 2, \
+        f"Expected at least 2 prompts (msg1 + msg2), got {len(mock.all_prompts)}: " \
+        f"{[p[:60] for p in mock.all_prompts]}"
+
+    # 2. The until_event speech was written to outbox
+    outbox = read_outbox_messages()
+    assert any("Sleeping until event" in m for m in outbox), \
+        f"until_event speech not found in outbox. Outbox: {outbox}"
+
+    # 3. No continues should fire AFTER until_event was set.
+    # The agent's until_event command was processed after prompt 2 (msg2).
+    # Any prompts beyond 2 are continues that leaked through.
+    extra_prompts = mock.all_prompts[2:]
+    continues_after_ue = [p for p in extra_prompts if "[continue" in p.lower()]
+
+    assert len(continues_after_ue) == 0, \
+        f"BUG (issue_0023v3): {len(continues_after_ue)} continues fired AFTER until_event. " \
+        f"Agent set delay until_event but continues kept coming. " \
+        f"Continues: {[c[:80] for c in continues_after_ue]}"
 
 
 @pytest.mark.asyncio

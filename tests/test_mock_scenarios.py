@@ -563,3 +563,113 @@ async def test_midturn_messages_flagged_during_long_turn():
     if not same_prompt:
         # Not a hard failure — the flag is what matters — but worth noting
         print("WARNING: midturn messages delivered in separate prompts instead of coalesced")
+
+
+@pytest.mark.asyncio
+async def test_midturn_messages_flagged_after_wall_clock_timeout():
+    """Messages during a >10min turn where collect_response hits wall clock must be flagged.
+
+    Scenario (from Eric's 2026-06-22 report on Jr):
+    1. User sends initial message, agent starts a long turn
+    2. Turn takes >600s, collect_response hits max_wall_clock, returns empty
+    3. last_response_ts is set to NOW (the wall clock timeout moment)
+    4. User had sent messages during the turn — they're in the inbox
+    5. BUG: messages may not get [sent during your previous turn] flag because
+       of continue doorbells or loop cycling between the timeout and the poll
+
+    MockBinary simulates this as:
+    - NormalResponse (initial speech, starts the "long turn")
+    - EmptyResponse (simulates wall clock timeout — collect_response returns empty)
+    - NormalResponse (handles whatever comes next — messages or continues)
+
+    MockBinary writes tool_call activity to updates.jsonl during the test to
+    prove the agent was working — updates.jsonl is the canonical activity signal.
+
+    Uses real wall-clock time. Total test: ~75s.
+    """
+    scenario = [
+        # Step 1: initial response, agent "starts working"
+        NormalResponse(speech="Starting the big refactor.", tokens=5000),
+        # Steps 2-4: empty returns simulating collect_response hitting
+        # wall clock timeout mid-turn. Each one resets last_response_ts.
+        # In reality these are 600s apart; here the loop cycles fast.
+        EmptyResponse(tokens=5100),
+        EmptyResponse(tokens=5200),
+        EmptyResponse(tokens=5300),
+        # Step 5: handle messages/continues after the "long turn"
+        NormalResponse(speech="Got your messages after recovery.", tokens=6000),
+        # Steps 6-8: absorb continues
+        EmptyResponse(tokens=6100),
+        EmptyResponse(tokens=6200),
+        EmptyResponse(tokens=6300),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("Start the big refactor")
+
+    async def inject_midturn_and_activity():
+        # Wait for initial response + a couple empty cycles
+        await asyncio.sleep(3)
+
+        # Simulate tool call activity in updates.jsonl during the "turn."
+        # This is what a real agent does — writes tool results while working.
+        # The activity proves the agent is still working even though
+        # collect_response has returned empty.
+        for i in range(4):
+            mock._write_update_with_meta({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": f"tool_{i}",
+                "title": f"Running command {i}",
+                "status": "completed",
+            }, 5100 + i * 10)
+            await asyncio.sleep(1)
+
+        # User sends messages while agent is "still working"
+        # (updates.jsonl has recent activity)
+        inject_tui_message("Hey when you're done check the tests too")
+        await asyncio.sleep(2)
+        inject_tui_message("Also the CI is failing on lint")
+
+        # Wait for processing
+        await asyncio.sleep(10)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    injector = asyncio.create_task(inject_midturn_and_activity())
+
+    try:
+        await asyncio.wait_for(task, timeout=30)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        injector.cancel()
+
+    # === ASSERTIONS ===
+
+    all_prompts_text = "\n".join(mock.all_prompts)
+
+    # 1. Both messages must have been delivered
+    assert "check the tests too" in all_prompts_text, \
+        f"First midturn message never delivered. Prompts: {[p[:100] for p in mock.all_prompts]}"
+    assert "CI is failing on lint" in all_prompts_text, \
+        f"Second midturn message never delivered. Prompts: {[p[:100] for p in mock.all_prompts]}"
+
+    # 2. Both messages must have the [sent during your previous turn] flag
+    for msg_text in ["check the tests too", "CI is failing on lint"]:
+        for prompt in mock.all_prompts:
+            if msg_text in prompt:
+                for line in prompt.split("\n"):
+                    if msg_text in line:
+                        assert "sent during your previous turn" in line, \
+                            f"BUG: Message '{msg_text}' delivered WITHOUT midturn flag. " \
+                            f"Agent was still working (updates.jsonl has tool activity). " \
+                            f"Messages sent during a long turn must be flagged even if " \
+                            f"collect_response returned early due to wall clock timeout. " \
+                            f"Line: {line}"

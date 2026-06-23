@@ -87,7 +87,8 @@ class SlowResponse:
 class MockBinary(AgentBackend):
     """Scriptable AgentBackend that executes scenario steps without a subprocess."""
 
-    def __init__(self, scenario: list, context_window: int = 200000):
+    def __init__(self, scenario: list, context_window: int = 200000,
+                 startup_delay: float = 0.0):
         self._scenario = list(scenario)
         self._step_index = 0
         self._session_id: Optional[str] = None
@@ -102,6 +103,7 @@ class MockBinary(AgentBackend):
         self._compaction_tokens_before: int = 0
         self._compaction_tokens_after: int = 0
         self._last_activity_ts: float = 0.0
+        self._startup_delay: float = startup_delay
 
     # -- Event writing helpers --
 
@@ -163,6 +165,10 @@ class MockBinary(AgentBackend):
     async def start(self, agent_cwd: str, model: Optional[str] = None,
                     session_id: Optional[str] = None, **kwargs) -> str:
         self._session_id = session_id or str(uuid.uuid4())
+
+        # Simulate slow session load (large sessions take >30s in real grok)
+        if self._startup_delay > 0:
+            await asyncio.sleep(self._startup_delay)
 
         # Create session dir with empty files
         encoded_cwd = agent_cwd.replace("/", "%2F")

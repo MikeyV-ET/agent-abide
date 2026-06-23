@@ -290,10 +290,40 @@ def get_asdaaas_agents():
 # WATCHER LOOP
 # ============================================================================
 
+PAYLOAD_MAX_AGE_SECONDS = 3600  # clean up payload files older than 1 hour
+
+
+def _cleanup_old_payloads(agents: list):
+    """Remove payload files older than PAYLOAD_MAX_AGE_SECONDS.
+
+    Payload files are created for long messages so the agent can cat the
+    full text.  Once the doorbell has been delivered and acked (or expired),
+    the payload is stale.  Without cleanup, payloads accumulate forever
+    (issue_0002).
+    """
+    cutoff = time.time() - PAYLOAD_MAX_AGE_SECONDS
+    removed = 0
+    for agent in agents:
+        payload_dir = AGENTS_HOME_DIR / agent / "asdaaas" / "adapters" / "localmail" / "payloads"
+        if not payload_dir.exists():
+            continue
+        for entry in payload_dir.iterdir():
+            if not entry.name.endswith(".json"):
+                continue
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    if removed:
+        print(f"[localmail] Cleaned up {removed} stale payload file(s)")
+
+
 def watch_loop(agents: list, poll_interval: float = 1.0):
     """Main loop: watch inboxes, ring doorbells for asdaaas agents.
     
-    For TUI agents, messages stay in inbox — they poll with read_mail().
+    For TUI agents, messages stays in inbox — they poll with read_mail().
     For asdaaas agents, we ring a doorbell AND delete the inbox file
     (the doorbell carries the content inline).
     """
@@ -313,6 +343,7 @@ def watch_loop(agents: list, poll_interval: float = 1.0):
     
     heartbeat_interval = 30
     last_heartbeat = time.time()
+    last_payload_cleanup = time.time()
     
     while True:
         try:
@@ -349,11 +380,14 @@ def watch_loop(agents: list, poll_interval: float = 1.0):
                         # They'll poll with read_mail()
                         print(f"[localmail] {sender} -> {agent} (inbox, TUI agent)")
             
-            # Heartbeat
+            # Heartbeat + periodic cleanup
             now = time.time()
             if now - last_heartbeat >= heartbeat_interval:
                 adapter_api.update_heartbeat("localmail")
                 last_heartbeat = now
+            if now - last_payload_cleanup >= PAYLOAD_MAX_AGE_SECONDS:
+                _cleanup_old_payloads(agents)
+                last_payload_cleanup = now
             
         except Exception as e:
             print(f"[localmail] Error: {e}")

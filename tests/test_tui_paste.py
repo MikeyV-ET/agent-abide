@@ -110,6 +110,32 @@ async def test_single_line_paste_inserts_text():
 
 
 @pytest.mark.asyncio
+async def test_paste_not_duplicated():
+    """Pasting text should insert it exactly once, not twice.
+
+    Bug: Textual's message dispatch walks the MRO and calls _on_paste
+    on each class. Without prevent_default(), both MessageInput._on_paste
+    AND TextArea._on_paste fire, doubling the pasted text.
+
+    This test uses post_message to send a Paste event through the real
+    dispatch chain (unlike the tests above that call _on_paste directly).
+    """
+    async with PasteTestApp().run_test() as pilot:
+        app = pilot.app
+        msg_input = app.query_one("#msg-input", MessageInput)
+
+        msg_input.post_message(Paste(SINGLE_LINE_TEXT))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert msg_input.text == SINGLE_LINE_TEXT, (
+            f"Paste should insert text exactly once. "
+            f"Got: {msg_input.text!r} (length {len(msg_input.text)}) "
+            f"Expected: {SINGLE_LINE_TEXT!r} (length {len(SINGLE_LINE_TEXT)})"
+        )
+
+
+@pytest.mark.asyncio
 async def test_normal_enter_still_sends():
     """In normal mode, pressing Enter should still send (regression guard)."""
     async with PasteTestApp().run_test() as pilot:

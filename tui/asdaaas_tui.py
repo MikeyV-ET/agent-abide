@@ -679,6 +679,7 @@ class MessageInput(TextArea):
         if result := self._replace_via_keyboard(text, *self.selection):
             self.move_cursor(result.end_location)
             self.focus()
+        event.prevent_default()
         event.stop()
 
     def _update_mode_label(self) -> None:

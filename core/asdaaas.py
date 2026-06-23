@@ -2734,6 +2734,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 # gets repolled and redelivered before the ack is processed.
                 post_cmds = poll_commands(agent_name)
                 requeue = []
+                agent_wrote_delay = False  # track if agent explicitly set delay
                 for pc in post_cmds:
                     pa = pc.get("action", "")
                     piggy = pc.get("ack", [])
@@ -2750,6 +2751,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                         else:
                             next_turn_delay = float(dv)
                             delay_until_event = False
+                        agent_wrote_delay = True
                     elif pa in ("compact", "gaze", "awareness"):
                         # Complex commands need full step 1 handling — put back.
                         requeue.append(pc)
@@ -2790,6 +2792,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                             else:
                                 next_turn_delay = float(ldv)
                                 delay_until_event = False
+                            agent_wrote_delay = True
                         elif la == "ack":
                             ack_doorbells(agent_name, lc.get("handled", []))
                         elif la in ("compact", "gaze", "awareness"):
@@ -2827,13 +2830,11 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     if has_bells and has_msgs:
                         detail = f"coalesced response ({len(bells)} bells + {len(in_room_msgs)} msgs), {len(result.speech)} chars"
                     write_health(agent_name, "active", detail, total_tokens, context_window)
-                    # After responding to a user message with speech, wait
-                    # for the agent's delay command before queueing continues.
-                    # The agent controls its own pacing via delay commands.
-                    # Without this, step 3 immediately queues continues after
-                    # recovery from a timeout cycle, flooding the agent with
-                    # stale-looking turns it didn't ask for.
-                    if has_msgs:
+                    # After responding to a user message with speech, default
+                    # to waiting for agent's next delay command — unless the
+                    # agent already wrote an explicit delay in the post-response
+                    # drain (issue_0030: unconditional override silenced agents).
+                    if has_msgs and not agent_wrote_delay:
                         delay_until_event = True
                 else:
                     # Empty response tracking (only for doorbell-only prompts)

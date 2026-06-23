@@ -1283,3 +1283,208 @@ async def test_compaction_per_request_override():
     finally:
         if instructions_file.exists():
             instructions_file.unlink()
+
+
+# ============================================================================
+# BASIC CONTRACT: Agent controls its own turn pacing
+# ============================================================================
+# These tests verify the fundamental contract: when an agent writes a delay
+# command, the system honors it. Without these, agents silently lose
+# self-governance — they respond, the system waits, nobody tells the agent
+# it needs to act, and the agent goes permanently silent.
+
+@pytest.mark.asyncio
+async def test_delay_zero_triggers_continue_after_doorbell():
+    """Basic contract: agent writes delay 0 after a doorbell → gets a continue.
+
+    This is the positive case for the most fundamental behavior:
+    agent responds to a continue doorbell, writes delay 0, and receives
+    another continue. Without this, agents cannot do multi-turn work.
+    """
+    scenario = [
+        # Step 1: respond to user message (has_msgs guard fires,
+        # but step 2 sends a second message to wake agent)
+        NormalResponse(speech="Got it.", tokens=5000),
+        # Step 2: respond to second message, write delay 0
+        CommandWriter(
+            speech="Working, need another turn.",
+            tokens=6000,
+            commands=[{"action": "delay", "seconds": 0}],
+        ),
+        # Step 3: this should be reached via continue doorbell
+        NormalResponse(speech="Continue received.", tokens=7000),
+        # Absorbers
+        EmptyResponse(tokens=7100),
+        EmptyResponse(tokens=7200),
+        EmptyResponse(tokens=7300),
+        EmptyResponse(tokens=7400),
+        EmptyResponse(tokens=7500),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("msg1")
+
+    async def send_second_and_stop():
+        await asyncio.sleep(3)
+        inject_tui_message("msg2")
+        await asyncio.sleep(15)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(send_second_and_stop())
+
+    try:
+        await asyncio.wait_for(task, timeout=25)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # The agent should have gotten at least 3 prompts:
+    # 1. msg1 (user message)
+    # 2. msg2 (user message)
+    # 3. continue (from delay 0)
+    outbox = read_outbox_messages()
+    assert any("Continue received" in m for m in outbox), \
+        f"Agent wrote delay 0 but never got a continue. " \
+        f"Outbox: {outbox}. Prompts: {[p[:60] for p in mock.all_prompts]}"
+
+
+@pytest.mark.asyncio
+async def test_agent_delay_honored_after_user_message():
+    """Critical contract: agent writes delay 0 after user message → gets continue.
+
+    This tests whether the agent's explicit delay command is honored even
+    when the prompt contained a user message. The has_msgs guard (line 2838)
+    currently overrides agent delay commands after user-message responses.
+    If this test fails, agents lose self-governance after every user message.
+    """
+    scenario = [
+        # Step 1: respond to user message, explicitly request continue
+        CommandWriter(
+            speech="Working on your request.",
+            tokens=5000,
+            commands=[{"action": "delay", "seconds": 0}],
+        ),
+        # Step 2: should arrive via continue — agent still working
+        CommandWriter(
+            speech="Still working.",
+            tokens=6000,
+            commands=[{"action": "delay", "seconds": 0}],
+        ),
+        # Step 3: done, set until_event
+        CommandWriter(
+            speech="Done. Standing by.",
+            tokens=7000,
+            commands=[{"action": "delay", "seconds": "until_event"}],
+        ),
+        # Absorbers
+        EmptyResponse(tokens=7100),
+        EmptyResponse(tokens=7200),
+        EmptyResponse(tokens=7300),
+        EmptyResponse(tokens=7400),
+        EmptyResponse(tokens=7500),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("Please do a multi-step task")
+
+    async def stop_after():
+        await asyncio.sleep(18)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after())
+
+    try:
+        await asyncio.wait_for(task, timeout=25)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    outbox = read_outbox_messages()
+
+    # Agent should have completed all 3 steps
+    assert any("Working on your request" in m for m in outbox), \
+        f"Step 1 never delivered. Outbox: {outbox}"
+    assert any("Still working" in m for m in outbox), \
+        f"Step 2 never reached — delay 0 after user message was not honored. " \
+        f"Agent lost self-governance. Outbox: {outbox}"
+    assert any("Done. Standing by" in m for m in outbox), \
+        f"Step 3 never reached. Outbox: {outbox}"
+
+
+@pytest.mark.asyncio
+async def test_delay_text_delivered_in_continue():
+    """Contract: delay command with text field delivers that text in the continue.
+
+    When an agent writes {"action": "delay", "seconds": 0, "text": "Continue: do X"},
+    the continue doorbell should contain that text instead of the default message.
+    """
+    scenario = [
+        # Step 1: respond to user message
+        NormalResponse(speech="Got it.", tokens=5000),
+        # Step 2: respond to second message, write delay 0 with text
+        CommandWriter(
+            speech="Starting work.",
+            tokens=6000,
+            commands=[{"action": "delay", "seconds": 0, "text": "Continue: finish items 7-10"}],
+        ),
+        # Step 3: should receive the directed text
+        NormalResponse(speech="Finishing items.", tokens=7000),
+        EmptyResponse(tokens=7100),
+        EmptyResponse(tokens=7200),
+        EmptyResponse(tokens=7300),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("msg1")
+
+    async def send_second_and_stop():
+        await asyncio.sleep(3)
+        inject_tui_message("msg2")
+        await asyncio.sleep(15)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(send_second_and_stop())
+
+    try:
+        await asyncio.wait_for(task, timeout=25)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # The continue doorbell text should contain the agent's directed text
+    outbox = read_outbox_messages()
+    assert any("Finishing items" in m for m in outbox), \
+        f"Directed continue never reached agent. Outbox: {outbox}. " \
+        f"Prompts: {[p[:80] for p in mock.all_prompts]}"
+    # Verify the directed text appeared in the prompt
+    continue_prompts = [p for p in mock.all_prompts if "items 7-10" in p]
+    assert len(continue_prompts) >= 1, \
+        f"Delay text 'items 7-10' not found in any prompt. " \
+        f"Prompts: {[p[:80] for p in mock.all_prompts]}"

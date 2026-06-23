@@ -918,3 +918,170 @@ class TestDelayDefaultDoorbellRace:
         # But then queue_continue_doorbell fires again (line 2496)
         queue_continue_doorbell(name)
         assert has_pending_doorbells(name), "New continue bell re-created after cleanup"
+
+
+# ============================================================================
+# E2E-10: Post-response drain preserves complex commands (issue_0028)
+# ============================================================================
+
+class TestPostResponseDrainRequeue:
+    """E2E-10: Commands written during agent response survive post-response drain.
+
+    Bug (issue_0028): After issue_0027 fix added post-response command drain,
+    poll_commands consumed ALL queued commands but only handled ack/delay.
+    Compact, gaze, and awareness commands were silently dropped.
+
+    Fix (87af75c): Unhandled commands are requeued back to disk so step 1
+    of the next main loop iteration processes them.
+    """
+
+    def _write_cmd(self, asdaaas_dir, cmd):
+        """Write a command file to the queue."""
+        import secrets
+        cmd_dir = asdaaas_dir / "commands"
+        ts = int(time.time() * 1000)
+        rand = secrets.token_hex(4)
+        path = cmd_dir / f"cmd_{ts}_{rand}.json"
+        with open(path, "w") as f:
+            json.dump(cmd, f)
+        return path
+
+    def test_compact_command_survives_drain(self, agent_env):
+        """Compact command written during response must survive post-response drain.
+
+        Simulates the post-response drain: poll_commands grabs everything,
+        process ack/delay only, requeue the rest. Then step 1 polls again
+        and the compact command should be there."""
+        name = agent_env["agent_name"]
+        cmd_dir = agent_env["asdaaas_dir"] / "commands"
+
+        # Agent writes compact + delay during its response
+        self._write_cmd(agent_env["asdaaas_dir"], {"action": "compact"})
+        self._write_cmd(agent_env["asdaaas_dir"], {"action": "delay", "seconds": 0})
+
+        # Post-response drain: poll everything
+        post_cmds = poll_commands(name)
+        assert len(post_cmds) == 2
+
+        # Process only ack/delay (what the main loop does)
+        requeue = []
+        for cmd in post_cmds:
+            action = cmd.get("action", "")
+            if action == "ack":
+                pass  # would process ack
+            elif action == "delay":
+                pass  # would process delay
+            elif action in ("compact", "gaze", "awareness"):
+                requeue.append(cmd)
+
+        assert len(requeue) == 1
+        assert requeue[0]["action"] == "compact"
+
+        # Requeue unhandled commands back to disk (the fix)
+        import secrets
+        for cmd in requeue:
+            ts = int(time.time() * 1000)
+            rand = secrets.token_hex(4)
+            path = cmd_dir / f"cmd_{ts}_{rand}.json"
+            with open(path, "w") as f:
+                json.dump(cmd, f)
+
+        # Step 1 of next iteration: poll again
+        step1_cmds = poll_commands(name)
+        assert len(step1_cmds) == 1
+        assert step1_cmds[0]["action"] == "compact"
+
+    def test_gaze_command_survives_drain(self, agent_env):
+        """Gaze command written during response must not be dropped by drain."""
+        name = agent_env["agent_name"]
+        cmd_dir = agent_env["asdaaas_dir"] / "commands"
+
+        self._write_cmd(agent_env["asdaaas_dir"],
+                        {"action": "gaze", "adapter": "irc", "room": "#standup"})
+        self._write_cmd(agent_env["asdaaas_dir"],
+                        {"action": "delay", "seconds": 600, "ack": ["bell_123"]})
+
+        post_cmds = poll_commands(name)
+        assert len(post_cmds) == 2
+
+        requeue = []
+        for cmd in post_cmds:
+            action = cmd.get("action", "")
+            if action in ("ack", "delay"):
+                pass
+            elif action in ("compact", "gaze", "awareness"):
+                requeue.append(cmd)
+
+        assert len(requeue) == 1
+        assert requeue[0]["action"] == "gaze"
+
+        import secrets
+        for cmd in requeue:
+            ts = int(time.time() * 1000)
+            rand = secrets.token_hex(4)
+            path = cmd_dir / f"cmd_{ts}_{rand}.json"
+            with open(path, "w") as f:
+                json.dump(cmd, f)
+
+        step1_cmds = poll_commands(name)
+        assert len(step1_cmds) == 1
+        assert step1_cmds[0]["action"] == "gaze"
+        assert step1_cmds[0]["room"] == "#standup"
+
+    def test_awareness_command_survives_drain(self, agent_env):
+        """Awareness command written during response must not be dropped by drain."""
+        name = agent_env["agent_name"]
+        cmd_dir = agent_env["asdaaas_dir"] / "commands"
+
+        self._write_cmd(agent_env["asdaaas_dir"],
+                        {"action": "awareness", "add": "#general", "mode": "doorbell"})
+
+        post_cmds = poll_commands(name)
+        assert len(post_cmds) == 1
+
+        requeue = []
+        for cmd in post_cmds:
+            action = cmd.get("action", "")
+            if action in ("ack", "delay"):
+                pass
+            elif action in ("compact", "gaze", "awareness"):
+                requeue.append(cmd)
+
+        assert len(requeue) == 1
+        assert requeue[0]["action"] == "awareness"
+
+        import secrets
+        for cmd in requeue:
+            ts = int(time.time() * 1000)
+            rand = secrets.token_hex(4)
+            path = cmd_dir / f"cmd_{ts}_{rand}.json"
+            with open(path, "w") as f:
+                json.dump(cmd, f)
+
+        step1_cmds = poll_commands(name)
+        assert len(step1_cmds) == 1
+        assert step1_cmds[0]["action"] == "awareness"
+        assert step1_cmds[0]["add"] == "#general"
+
+    def test_drain_without_requeue_loses_compact(self, agent_env):
+        """Without the fix, compact command is lost after drain.
+
+        This documents the bug: poll_commands consumed the compact command,
+        the drain loop didn't handle it, and it was never requeued."""
+        name = agent_env["agent_name"]
+
+        self._write_cmd(agent_env["asdaaas_dir"], {"action": "compact"})
+        self._write_cmd(agent_env["asdaaas_dir"], {"action": "delay", "seconds": 0})
+
+        # Drain polls everything
+        post_cmds = poll_commands(name)
+        assert len(post_cmds) == 2
+
+        # BUG: only process ack/delay, do NOT requeue anything
+        # (this is the pre-fix behavior)
+
+        # Step 1 polls again — compact is GONE
+        step1_cmds = poll_commands(name)
+        assert len(step1_cmds) == 0, (
+            "Without requeue, compact command is lost — this was issue_0028"
+        )

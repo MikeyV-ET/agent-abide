@@ -5,9 +5,6 @@
   "MockTestAgent": {
     "home": "/home/eric/agents/MockTestAgent"
   },
-  "Sr": {
-    "home": "/home/eric/agents/Sr"
-  },
   "Cinco": {
     "home": "/home/eric/agents/Cinco"
   },
@@ -16,6 +13,9 @@
   },
   "Trip": {
     "home": "/home/eric/agents/Trip"
+  },
+  "Sr": {
+    "home": "/home/eric/agents/Sr"
   },
   "Jr": {
     "home": "/home/eric/agents/Jr"

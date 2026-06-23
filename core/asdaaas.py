@@ -2711,11 +2711,15 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 # the next iteration polls doorbells. Without this, the bell
                 # gets repolled and redelivered before the ack is processed.
                 post_cmds = poll_commands(agent_name)
+                requeue = []
                 for pc in post_cmds:
                     pa = pc.get("action", "")
+                    piggy = pc.get("ack", [])
+                    if piggy:
+                        ack_doorbells(agent_name, piggy)
                     if pa == "ack":
                         ack_doorbells(agent_name, pc.get("handled", []))
-                    if pa == "delay":
+                    elif pa == "delay":
                         dv = pc.get("seconds", 0)
                         delay_text = pc.get("text") or None
                         if dv == "until_event":
@@ -2724,11 +2728,20 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                         else:
                             next_turn_delay = float(dv)
                             delay_until_event = False
-                    piggy = pc.get("ack", [])
-                    if piggy:
-                        ack_doorbells(agent_name, piggy)
-                if post_cmds:
-                    print(f"[asdaaas] Post-response: drained {len(post_cmds)} command(s)")
+                    elif pa in ("compact", "gaze", "awareness"):
+                        # Complex commands need full step 1 handling — put back.
+                        requeue.append(pc)
+                if requeue:
+                    cmd_dir = agent_dir(agent_name) / "commands"
+                    cmd_dir.mkdir(parents=True, exist_ok=True)
+                    for rc in requeue:
+                        fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
+                        with os.fdopen(fd, "w") as f:
+                            json.dump(rc, f)
+                handled_count = len(post_cmds) - len(requeue)
+                if handled_count:
+                    print(f"[asdaaas] Post-response: drained {handled_count} command(s)" +
+                          (f", requeued {len(requeue)}" if requeue else ""))
                 # Clean up continue doorbells after every response. Prevents
                 # re-delivery cascade: without this, a persistent continue bell
                 # gets re-delivered with delivery+1 on each loop iteration,

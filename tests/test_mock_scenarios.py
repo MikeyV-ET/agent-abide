@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 
 import pytest
-from mock_binary import MockBinary, NormalResponse, ToolCallOnly, EmptyResponse
+from mock_binary import MockBinary, NormalResponse, ToolCallOnly, EmptyResponse, SlowResponse
 
 
 AGENT_NAME = "MockTestAgent"
@@ -466,3 +466,97 @@ async def test_stale_continues_purged_on_recovery():
         f"BUG (issue_0023v2): {len(continues_after_recovery)} stale continues delivered AFTER recovery. " \
         f"These are ghosts from the timeout cycle and should have been purged. " \
         f"Continues: {[c[:80] for c in continues_after_recovery]}"
+
+
+@pytest.mark.asyncio
+async def test_midturn_messages_flagged_during_long_turn():
+    """Messages sent while agent is working must get [sent during your previous turn] flag.
+
+    Scenario (from Eric's 2026-06-22 report on Jr):
+    1. User sends initial message, agent starts a long turn (~8s)
+    2. User sends 2 more messages while agent is working
+    3. Agent's turn completes, last_response_ts is set
+    4. Next loop iteration polls messages — their _received_ts < last_response_ts
+    5. Messages should be delivered with [sent during your previous turn] flag
+
+    BUG: Both messages showed up as fresh new turns without the flag,
+    triggering separate agent responses instead of being coalesced as
+    midturn messages.
+    """
+    scenario = [
+        # Step 1: long agent turn (simulates 5-10 min work, compressed to 8s)
+        SlowResponse(speech="Done with my long task.", delay=8.0, tokens=5000),
+        # Step 2: response to the midturn messages (should have flags)
+        NormalResponse(speech="Got your messages.", tokens=6000),
+        # Steps 3-4: absorb continues
+        EmptyResponse(tokens=6100),
+        EmptyResponse(tokens=6200),
+        EmptyResponse(tokens=6300),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    # Initial message triggers the long turn
+    inject_tui_message("Start working on the big task")
+
+    async def inject_midturn_messages():
+        # Wait for the long turn to start (agent is inside collect_response)
+        await asyncio.sleep(3)
+        # Send two messages while agent is busy
+        inject_tui_message("Hey, also check the config file")
+        await asyncio.sleep(1)
+        inject_tui_message("And update the README when you're done")
+        # Wait for agent to finish long turn + process midturn messages
+        await asyncio.sleep(12)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    injector = asyncio.create_task(inject_midturn_messages())
+
+    try:
+        await asyncio.wait_for(task, timeout=30)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        injector.cancel()
+
+    # === ASSERTIONS ===
+
+    # 1. Both midturn messages must have been delivered
+    all_prompts_text = "\n".join(mock.all_prompts)
+    assert "also check the config file" in all_prompts_text, \
+        f"First midturn message never delivered. Prompts: {[p[:100] for p in mock.all_prompts]}"
+    assert "update the README" in all_prompts_text, \
+        f"Second midturn message never delivered. Prompts: {[p[:100] for p in mock.all_prompts]}"
+
+    # 2. Find the prompt(s) containing the midturn messages
+    midturn_prompts = [p for p in mock.all_prompts
+                       if "also check the config file" in p or "update the README" in p]
+
+    # 3. Both messages must have the [sent during your previous turn] flag
+    for prompt in midturn_prompts:
+        for msg_text in ["also check the config file", "update the README"]:
+            if msg_text in prompt:
+                # Find the line containing this message
+                for line in prompt.split("\n"):
+                    if msg_text in line:
+                        assert "sent during your previous turn" in line, \
+                            f"BUG: Message '{msg_text}' delivered WITHOUT midturn flag. " \
+                            f"Messages sent during a long agent turn must be flagged. " \
+                            f"Line: {line}"
+
+    # 4. Both messages should ideally be in the SAME prompt (coalesced),
+    #    not delivered as separate turns
+    same_prompt = any(
+        "also check the config file" in p and "update the README" in p
+        for p in mock.all_prompts
+    )
+    if not same_prompt:
+        # Not a hard failure — the flag is what matters — but worth noting
+        print("WARNING: midturn messages delivered in separate prompts instead of coalesced")

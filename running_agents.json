@@ -8,13 +8,16 @@
   "Q": {
     "home": "/home/eric/agents/Q"
   },
-  "Sr": {
-    "home": "/home/eric/agents/Sr"
-  },
   "Jr": {
     "home": "/home/eric/agents/Jr"
   },
   "Trip": {
     "home": "/home/eric/agents/Trip"
+  },
+  "Sr": {
+    "home": "/home/eric/agents/Sr"
+  },
+  "MockTestAgent": {
+    "home": "/home/eric/agents/MockTestAgent"
   }
 }

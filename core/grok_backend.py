@@ -505,9 +505,10 @@ class GrokBackend(AgentBackend):
                     self._total_tokens = tokens_after
                 self._compaction_event = frame
 
-            # Token tracking from _meta — skip if compaction event already
-            # set authoritative tokens_after (stale _meta clobber, issue_0029)
-            elif not self._compaction_event:
+            # Token tracking from _meta — independent of sessionUpdate dispatch
+            # (a frame can have BOTH a sessionUpdate AND _meta). Skip if
+            # compaction event already set authoritative tokens_after (issue_0029).
+            if not self._compaction_event:
                 meta = params.get("_meta", {})
                 if meta.get("totalTokens"):
                     self._total_tokens = meta["totalTokens"]
@@ -594,8 +595,9 @@ class GrokBackend(AgentBackend):
                     self._compaction_tokens_after = tokens_after
                     self._total_tokens = tokens_after
                 self._compaction_event = frame
-            # Skip _meta totalTokens after compaction (stale values, issue_0029)
-            elif not self._compaction_event:
+            # Token tracking from _meta — independent of sessionUpdate dispatch.
+            # Skip after compaction (stale values, issue_0029).
+            if not self._compaction_event:
                 meta = params.get("_meta", {})
                 if meta.get("totalTokens"):
                     self._total_tokens = meta["totalTokens"]

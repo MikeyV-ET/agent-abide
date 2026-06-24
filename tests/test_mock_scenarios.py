@@ -1488,3 +1488,108 @@ async def test_delay_text_delivered_in_continue():
     assert len(continue_prompts) >= 1, \
         f"Delay text 'items 7-10' not found in any prompt. " \
         f"Prompts: {[p[:80] for p in mock.all_prompts]}"
+
+
+# ============================================================================
+# BASIC CONTRACT: Token tracking
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_token_count_nonzero_after_response():
+    """Basic contract: after agent responds, health.json reports non-zero totalTokens.
+
+    The system must track token usage so context_left_tag shows accurate
+    remaining context. If totalTokens is 0, the agent has no context awareness.
+    """
+    scenario = [
+        NormalResponse(speech="Hello.", tokens=50000),
+        EmptyResponse(tokens=50100),
+        EmptyResponse(tokens=50200),
+        EmptyResponse(tokens=50300),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("Hi")
+
+    async def stop_after():
+        await asyncio.sleep(5)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after())
+
+    try:
+        await asyncio.wait_for(task, timeout=15)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # Health file should reflect non-zero tokens
+    health_file = AGENT_HOME / "asdaaas" / "health.json"
+    assert health_file.exists(), "health.json not written"
+    with open(health_file) as f:
+        health = json.load(f)
+    assert health["totalTokens"] > 0, \
+        f"totalTokens is 0 in health.json after agent responded with tokens=50000. " \
+        f"Token tracking is broken. Health: {health}"
+
+
+@pytest.mark.asyncio
+async def test_context_left_tag_reflects_tokens():
+    """Basic contract: context_left_tag in prompts shows accurate remaining context.
+
+    After the agent uses tokens, subsequent prompts should include a
+    context_left_tag that reflects the actual remaining context, not 0.
+    """
+    scenario = [
+        # Step 1: respond to first message, use 50k tokens
+        NormalResponse(speech="Got msg1.", tokens=50000),
+        # Step 2: respond to second message — prompt should have accurate context tag
+        NormalResponse(speech="Got msg2.", tokens=51000),
+        EmptyResponse(tokens=51100),
+        EmptyResponse(tokens=51200),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("msg1")
+
+    async def send_second_and_stop():
+        await asyncio.sleep(3)
+        inject_tui_message("msg2")
+        await asyncio.sleep(8)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(send_second_and_stop())
+
+    try:
+        await asyncio.wait_for(task, timeout=18)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # The second prompt should contain a context_left_tag with non-zero value
+    assert len(mock.all_prompts) >= 2, \
+        f"Expected at least 2 prompts, got {len(mock.all_prompts)}"
+    second_prompt = mock.all_prompts[1]
+    assert "Context left" in second_prompt, \
+        f"Second prompt missing context_left_tag. Prompt: {second_prompt[:200]}"
+    # Should NOT say "Context left 0" or be missing token info
+    assert "Context left 0k" not in second_prompt, \
+        f"context_left_tag shows 0 tokens — token tracking broken. Prompt: {second_prompt[:200]}"

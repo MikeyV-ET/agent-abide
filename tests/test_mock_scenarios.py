@@ -1572,6 +1572,149 @@ def test_token_ground_truth_reaches_system_state():
         fs.close()
 
 
+def test_process_update_frames_extracts_meta_tokens():
+    """Positive control: _process_update_frames must extract _meta.totalTokens.
+
+    Root cause of issue_0031: _meta.totalTokens extraction was in an elif
+    chain after sessionUpdate dispatch (agent_message_chunk, tool_call, etc).
+    Since every frame with _meta ALSO has a sessionUpdate type, the elif
+    was never reached. Token data was consumed (file pointer advanced) but
+    never processed.
+
+    This test verifies that _process_update_frames sets _total_tokens AND
+    calls the on_meta callback when processing frames with _meta.totalTokens.
+    """
+    import tempfile
+    from grok_backend import GrokBackend, FileEventSource
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_dir = Path(tmpdir)
+        updates_path = session_dir / "updates.jsonl"
+        events_path = session_dir / "events.jsonl"
+        updates_path.touch()
+        events_path.touch()
+
+        fs = FileEventSource(session_dir)
+        fs.open(timeout=1)
+
+        backend = GrokBackend()
+        backend._file_source = fs
+        backend._total_tokens = 0
+
+        # Write frames with _meta.totalTokens (like the real binary does)
+        _write_updates_jsonl_frame(updates_path, total_tokens=85000)
+
+        # Read the frames — this is what collect_response does
+        updates, _ = fs.read_new_lines()
+        assert len(updates) > 0, "No frames read from updates.jsonl"
+
+        # Process through _process_update_frames
+        speech_chunks = []
+        thought_chunks = []
+        pending_tool_calls = set()
+        meta_values = []
+
+        def on_meta(tokens):
+            meta_values.append(tokens)
+
+        backend._process_update_frames(
+            updates, speech_chunks, thought_chunks,
+            pending_tool_calls, None, None, on_meta,
+        )
+
+        # _total_tokens must be set from _meta.totalTokens
+        assert backend._total_tokens == 85000, (
+            f"_process_update_frames did not extract _meta.totalTokens. "
+            f"Expected _total_tokens=85000, got {backend._total_tokens}. "
+            f"This means collect_response consumes token frames without "
+            f"reading the token count — context tracking is permanently broken."
+        )
+
+        # on_meta callback must have fired
+        assert meta_values == [85000], (
+            f"on_meta callback not called. Expected [85000], got {meta_values}. "
+            f"The streaming health update (_on_streaming_meta) never fires, "
+            f"so TUI shows 0% context for the entire turn."
+        )
+
+        fs.close()
+
+
+def test_token_tracking_survives_full_turn_cycle():
+    """Positive control: token count persists across refresh → turn → refresh cycle.
+
+    Simulates the full production flow after a backend restart:
+    1. FileEventSource.open() seeks to end (no historical data)
+    2. refresh_tokens() finds no new frames → _total_tokens = 0
+    3. Binary writes response frames with _meta.totalTokens
+    4. collect_response/_process_update_frames reads them
+    5. Next refresh_tokens() should see correct value (from step 4)
+
+    If _process_update_frames doesn't extract _meta, step 4 fails and
+    the value stays 0 forever (file pointer advanced past the data).
+    """
+    import tempfile
+    from grok_backend import GrokBackend, FileEventSource
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        session_dir = Path(tmpdir)
+        updates_path = session_dir / "updates.jsonl"
+        events_path = session_dir / "events.jsonl"
+
+        # Pre-populate with old data (simulates existing session)
+        with open(updates_path, 'w') as f:
+            for i in range(20):
+                frame = {
+                    "timestamp": int(time.time()),
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "test-session",
+                        "update": {"sessionUpdate": "agent_message_chunk",
+                                   "content": {"type": "text", "text": f"old {i}"}},
+                        "_meta": {"totalTokens": 30000 + i * 1000},
+                    },
+                }
+                f.write(json.dumps(frame) + "\n")
+        events_path.touch()
+
+        # Step 1: open seeks to end (past old data)
+        fs = FileEventSource(session_dir)
+        fs.open(timeout=1)
+
+        backend = GrokBackend()
+        backend._file_source = fs
+        backend._total_tokens = 0
+
+        # Step 2: refresh_tokens finds no new frames
+        t1 = backend.refresh_tokens()
+        assert t1 == 0, f"Expected 0 after open (no new frames), got {t1}"
+
+        # Step 3: binary writes response frames (simulating a turn)
+        for tokens in [90000, 91000, 92000]:
+            _write_updates_jsonl_frame(updates_path, total_tokens=tokens)
+
+        # Step 4: _process_update_frames reads them (as collect_response would)
+        updates, _ = fs.read_new_lines()
+        backend._process_update_frames(
+            updates, [], [], set(), None, None, None,
+        )
+
+        assert backend._total_tokens == 92000, (
+            f"After processing turn frames, expected _total_tokens=92000, "
+            f"got {backend._total_tokens}. Token data consumed but not processed."
+        )
+
+        # Step 5: write more frames, refresh_tokens should see them
+        _write_updates_jsonl_frame(updates_path, total_tokens=95000)
+        t2 = backend.refresh_tokens()
+        assert t2 == 95000, (
+            f"refresh_tokens after turn: expected 95000, got {t2}. "
+            f"File pointer may be stuck."
+        )
+
+        fs.close()
+
+
 def test_context_left_banner_accurate():
     """E2E contract: given token state, context_left_tag produces correct banner.
 

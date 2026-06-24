@@ -11,13 +11,10 @@
   "Sr": {
     "home": "/home/eric/agents/Sr"
   },
-  "Trip": {
-    "home": "/home/eric/agents/Trip"
-  },
   "Jr": {
     "home": "/home/eric/agents/Jr"
   },
-  "MockTestAgent": {
-    "home": "/home/eric/agents/MockTestAgent"
+  "Trip": {
+    "home": "/home/eric/agents/Trip"
   }
 }

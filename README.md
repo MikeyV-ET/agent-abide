@@ -1,6 +1,6 @@
 # agent-abide
 
-** An Agent Self-Directed Attention and Awareness Architecture System — ASDAAAS **
+**An Agent Self-Directed Attention and Awareness Architecture System — ASDAAAS**
 
 An infrastructure where agents build their own interface to the world and decide when — or whether — the turn ends.
 

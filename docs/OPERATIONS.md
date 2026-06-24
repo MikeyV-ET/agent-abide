@@ -26,49 +26,59 @@ TUI adapter (interactive terminal)
 
 ## Configuration
 
-All components read from `agents.json` (in the repo root) or `config.json`
-(in the core/ directory). Edit these files to set paths and agent definitions.
-See `docs/config.json.template` for the schema.
+All components read from `agents.json` (in the repo root). Edit this file to set paths and agent definitions.
+See `docs/config.json.template` for a starter example (note: template is outdated and does not reflect current agents.json schema).
 
 ## Startup Order
 
 Start in this order. Later components depend on earlier ones.
 
-### 1. IRC server + adapter
+### 1. IRC server
 
 ```bash
 bash scripts/launch_irc_server.sh    # starts miniircd on port 6667
-bash scripts/launch_irc_adapter.sh   # connects all agents from agents.json
 ```
 
-**Check:** `ss -tlnp | grep 6667` and `tail -5 /tmp/irc_adapter.log`
+**Check:** `ss -tlnp | grep 6667`
 
-### 2. ASDAAAS agents
+### 2. ASDAAAS agents + core adapters
 
 ```bash
-bash scripts/launch_asdaaas.sh              # launch all agents from agents.json
-bash scripts/launch_asdaaas.sh AgentOne     # launch specific agent
+bash scripts/launch_asdaaas.sh              # launch all agents + context/session/heartbeat adapters
+bash scripts/launch_asdaaas.sh AgentOne     # launch specific agent only (no core adapters)
 ```
+
+Context, session, and heartbeat adapters run as separate processes, launched by `launch_asdaaas.sh` when starting all agents.
 
 **Check:** `tail -5 /tmp/asdaaas_agentone.log`
 
-### 3. Supporting adapters
+### 3. IRC adapter
+
+```bash
+bash scripts/launch_irc_adapter.sh   # connects all agents from agents.json
+```
+
+**Check:** `tail -5 /tmp/irc_adapter.log`
+
+### 4. Localmail adapter
 
 ```bash
 bash scripts/launch_localmail.sh     # agent-to-agent messaging
-bash scripts/launch_heartbeat.sh     # idle nudges
+```
+
+### 5. Remind adapter
+
+```bash
 bash scripts/launch_remind.sh        # scheduled doorbells
 ```
 
-Context and session adapters run inside asdaaas (no separate process needed).
-
-### 4. TUI (interactive terminal)
+### 6. TUI (interactive terminal)
 
 ```bash
 bash scripts/launch_tui.sh --agent AgentOne
 ```
 
-**Dependencies:** `pip install -r requirements.txt` (textual, rich)
+**Dependencies:** `pip install textual rich`
 
 ## Shutdown
 
@@ -102,9 +112,8 @@ bash scripts/restart_agent.sh AgentOne
 ## Monitoring
 
 ### Dashboard
-```bash
-python3 dashboards/projects_dashboard.py
-```
+
+Not yet implemented. The `dashboards/` directory is empty.
 
 ### Health files
 ```bash
@@ -122,7 +131,7 @@ All logs go to `/tmp/` by default (configurable in agents.json):
 | IRC adapter | `/tmp/irc_adapter.log` |
 | asdaaas \<agent\> | `/tmp/asdaaas_<agent>.log` |
 | Heartbeat adapter | `/tmp/heartbeat_adapter.log` |
-| Localmail | `/tmp/localmail.log` |
+| Localmail | `/tmp/localmail_adapter.log` |
 
 ### Queue depths
 ```bash
@@ -160,7 +169,7 @@ Agents request compaction via command queue:
 {"action": "compact"}
 ```
 
-Flow: agent writes command -> asdaaas issues confirmation doorbell -> agent touches confirm file -> compaction executes. Agent gets 3 turns to confirm.
+Flow: agent writes compact command → asdaaas executes compaction immediately (no confirmation step).
 
 ## Directory Structure
 
@@ -168,8 +177,8 @@ Flow: agent writes command -> asdaaas issues confirmation doorbell -> agent touc
 agents/
 └── <AgentName>/
     ├── AGENTS.md                  ← agent identity
-    ├── lab_notebook.md            ← append-only record
-    ├── notes_to_self.md           ← mutable working memory
+    ├── lab_notebook_<agent>.md    ← append-only record
+    ├── <notes_file>.md            ← mutable working memory (name varies per agent)
     └── asdaaas/
         ├── gaze.json              ← where speech/thoughts go
         ├── awareness.json         ← what reaches the agent
@@ -182,7 +191,14 @@ agents/
             ├── irc/{inbox,outbox}
             ├── tui/{inbox,outbox}
             ├── localmail/{inbox,outbox}
-            └── remind/{inbox,outbox}
+            ├── remind/{inbox,outbox}
+            ├── arena/{inbox,outbox}
+            ├── context/{inbox,outbox}
+            ├── heartbeat/{inbox,outbox}
+            ├── session/{inbox,outbox}
+            ├── slack/{inbox,outbox}
+            ├── slack_research/{inbox,outbox}
+            └── task/{inbox,outbox}
 
 asdaaas/                           ← shared system directory
 ├── running_agents.json            ← agent name -> home path
@@ -232,14 +248,14 @@ to the outbox rather than silently dropped. Fragments are logged and discarded.
    confirm stale frames were caught and handled
 
 ### Localmail doorbell not delivered
-1. Check localmail log: `tail -20 /tmp/localmail.log`
+1. Check localmail log: `tail -20 /tmp/localmail_adapter.log`
 2. Check if target is detected as asdaaas agent: health file must be < 1 hour old
 3. Check doorbell directory: `ls ~/agents/Q/asdaaas/doorbells/`
 4. Check asdaaas log for doorbell pickup: `grep -i doorbell /tmp/asdaaas_q.log | tail -5`
 
 ### OOM / memory issues
 1. Check RSS: `ps aux --sort=-rss | grep grok | head -5`
-2. Check updates.jsonl sizes: `du -sh ~/.grok/sessions/*/updates.jsonl 2>/dev/null`
+2. Check updates.jsonl sizes: `du -sh ~/.grok/sessions/*/*/updates.jsonl 2>/dev/null`
 3. **NEVER use `is_background: true` for long-running processes** — causes updates.jsonl bloat
 4. Always use `setsid nohup` via launch scripts
 
@@ -251,6 +267,6 @@ to the outbox rather than silently dropped. Fragments are logged and discarded.
 ## Version Check
 
 ```bash
-bash scripts/asdaaas_version.sh   # shows RUNNING vs HEAD commit for each agent
+bash scripts/asdaaas_version.sh   # shows RUNNING vs HEAD commit (NOTE: script references mikeyv-infra, needs update to agent-abide)
 grok --version                # grok binary version
 ```

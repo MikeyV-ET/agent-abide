@@ -203,7 +203,7 @@ These connect agents to tools and applications they control.
 
 ### Impress (control)
 
-**Status:** BUILT AND TESTED. Commit `6524ce1`. 905 lines. 14/14 integration tests pass.
+**Status:** BUILT AND TESTED. Commit `6524ce1`. 975 lines. 14/14 integration tests pass.
 **File:** `adapters/impress_control_adapter.py`
 **Author:** MikeyV-Jr (Session 16, 2026-03-26)
 
@@ -275,7 +275,7 @@ SAL_USE_VCLPLUGIN=gtk3 GDK_BACKEND=x11 soffice --impress --norestore \
 
 ### Meet (control)
 
-**Status:** BUILT AND TESTED. Commit `75172a7`. 1014 lines. 14/14 integration tests pass.
+**Status:** BUILT AND TESTED. Commit `75172a7`. 1249 lines. 14/14 integration tests pass.
 **File:** `adapters/meet_control_adapter.py`
 **Author:** MikeyV-Jr (Session 16, 2026-03-26)
 
@@ -376,6 +376,53 @@ Controls PulseAudio routing for voice I/O. Routes Chrome audio to virtual sinks,
 
 ---
 
+### Slack Research (control)
+
+**Status:** BUILT AND RUNNING. 387 lines.
+**File:** `adapters/slack_research_adapter.py`
+
+On-demand Slack exploration for agents. Control adapter that lets any agent search messages, read channel history, read threads, and list channels using Eric's Slack user token (`xoxp-`). The agent writes a command, the adapter calls the Slack API, and the result comes back as a doorbell.
+
+**Registration:**
+```json
+{
+  "name": "slack_research",
+  "type": "control",
+  "doorbell_payload": "inline",
+  "commands": ["search", "history", "thread", "channels", "status"]
+}
+```
+
+**Command examples:**
+```
+{"command": "search", "query": "hackathon", "count": 20}
+  -> search results with channel, user, text, permalink for each match
+
+{"command": "history", "channel": "#general", "limit": 50, "topic": "hackathon"}
+  -> channel messages in chronological order, optionally filtered by topic keyword
+
+{"command": "thread", "channel": "#general", "ts": "1774388146.705699"}
+  -> all replies in the thread
+
+{"command": "channels"}
+  -> list of channels with id, name, membership, member count, topic, purpose
+
+{"command": "status"}
+  -> adapter uptime, command count, token status
+```
+
+**Notes:**
+- Uses Eric's user token (`xoxp-`) from `~/.mikeyv_creds/slack_token` for full channel access
+- Channel names resolve automatically (`#general` → channel ID) with a 5-minute cache
+- Search limited to 100 results max per query; history limited to 200 messages max
+- Polls agent outboxes at 1.0s intervals (configurable via `--poll-interval`)
+- Slack API calls use `curl` with 15s timeout — transient failures don't crash the adapter
+
+**Launch:** `python3 slack_research_adapter.py`
+**Launch (selective):** `python3 slack_research_adapter.py --agents Cinco,Sr --poll-interval 2.0`
+
+---
+
 ## Introspection Adapters
 
 These give the agent awareness of its own process state. They don't connect to the outside world — they watch what ASDAAAS exposes about the agent's runtime.
@@ -404,17 +451,10 @@ The agent hears where it stands in its context window. What it does with that in
 
 **Doorbell format:**
 ```
-[context] 90000/200000 tokens (45%)
-[context] 130000/200000 tokens (65%) — you have room
-[context] 160000/200000 tokens (80%) — compaction approaching
-[context] 175000/200000 tokens (88%) — compaction imminent
+[context] 160000/200000 tokens (80%) — ensure current work is committed and documented (before/after). Keep working
 ```
 
-**Configuration:** Thresholds for when to notify. Suggested defaults:
-- 45%: first mention (informational)
-- 65%: "you have room" — space for reflection, writing, exploration
-- 80%: "compaction approaching" — wrap up current work, flush state
-- 88%: "compaction imminent" — auto-compaction fires at ~85%, this is the last warning
+**Configuration:** Single threshold at 80% (priority 3, level "reminder"). The agent gets one nudge to commit and document current work, then keeps working. No earlier informational thresholds, no "imminent" warnings — the agent is trusted to manage its own pacing.
 
 **Notes:**
 - Does NOT trigger compaction. Just informs.
@@ -488,7 +528,7 @@ Periodic awareness notification. Tells the agent how long it's been idle, gives 
 {
   "name": "heartbeat",
   "type": "notify",
-  "doorbell_priority": 8
+  "doorbell_priority": 5
 }
 ```
 
@@ -507,9 +547,125 @@ Periodic awareness notification. Tells the agent how long it's been idle, gives 
 - The agent can update its awareness file to change heartbeat priority or suppress it entirely
 
 **Notes:**
-- Low priority (8) — heartbeats should not interrupt active work
+- Medium priority (5) — heartbeats should not interrupt active work
 - The agent can respond or ignore. "idle" or no response = stay quiet until next interval
 - Distinct from asdaaas health heartbeat: asdaaas writes its own pulse for the dashboard and dead adapter safety net. The heartbeat *adapter* reads that pulse and decides when to nudge the agent.
+
+---
+
+### Remind (control)
+
+**Status:** BUILT AND RUNNING. 270 lines.
+**File:** `adapters/remind_adapter.py`
+
+Self-nudge timer for agent turn planning. The agent writes a remind command, the adapter delivers the text back as a doorbell after a delay. Enables agents to plan their next turn before the current one ends, or schedule future reminders.
+
+**Registration:**
+```json
+{
+  "name": "remind",
+  "type": "control",
+  "doorbell_payload": "inline",
+  "doorbell_priority": 1,
+  "commands": ["remind"]
+}
+```
+
+**Command examples:**
+```
+{"command": "remind", "delay": 0, "text": "Redirect gaze to pm:eric"}
+  -> [remind] Redirect gaze to pm:eric
+  (immediate delivery — next turn self-nudge)
+
+{"command": "remind", "delay": 300, "text": "Check Trip's response"}
+  -> [remind] Check Trip's response
+  (delivered after 5 minutes)
+
+{"command": "remind", "delay": 0.5, "text": "Continue writing tests", "priority": 2}
+  -> [remind] Continue writing tests
+  (near-immediate, custom priority)
+```
+
+**Error examples:**
+```
+[remind] error: 'text' field required
+[remind] error: unknown command 'foo'. Use: remind
+[remind] error: invalid delay 'abc', must be a number
+```
+
+**Notes:**
+- `delay=0` delivers immediately — the primary use case for "wake me up next turn"
+- Negative delays are clamped to 0
+- Delayed deliveries use background threads (daemon, cleaned up on exit)
+- Polls agent inboxes at 0.25s intervals
+- Replaces raw doorbell file manipulation with a clean command interface
+
+**Launch:** `python3 remind_adapter.py`
+
+---
+
+### Task (control)
+
+**Status:** BUILT AND RUNNING. 573 lines.
+**File:** `adapters/task_adapter.py`
+
+General-purpose process runner. Spawns scripts as isolated subprocesses on behalf of agents. The agent writes a run command, gets an immediate ack with a job ID, then gets the result as a doorbell when the script finishes. Errors, hangs, and crashes in the script never propagate to the agent.
+
+**Registration:**
+```json
+{
+  "name": "task",
+  "type": "control",
+  "doorbell_payload": "inline",
+  "doorbell_priority": 1,
+  "commands": ["run", "status", "kill", "list"],
+  "max_concurrent_per_agent": 5,
+  "default_timeout": 120
+}
+```
+
+**Command examples:**
+```
+{"command": "run", "script": "grok_interactor.py", "args": ["--send", "hi"], "timeout": 120}
+  -> [task:grok_interactor.py] ack: job_id=abc123
+  ... later ...
+  -> [task:grok_interactor.py (job=abc123)] ok: <stdout>
+
+{"command": "status", "job_id": "abc123"}
+  -> [task:status] {"job_id": "abc123", "script": "grok_interactor.py", "status": "completed", ...}
+
+{"command": "kill", "job_id": "abc123"}
+  -> (kills running job, delivers error doorbell)
+
+{"command": "list"}
+  -> [task:list] [{"job_id": "abc123", "script": "...", "status": "completed"}, ...]
+```
+
+**Error examples:**
+```
+[task:myscript.py] error: script not found: myscript.py
+[task:myscript.py (job=abc123)] error: exit_code=1 <stderr>
+[task:myscript.py (job=abc123)] timeout: killed after 120s
+[task:myscript.py] error: concurrent limit (5) reached
+```
+
+**Script resolution order:**
+1. Absolute path — used as-is
+2. `~/agents/<agent>/tools/<script>` — agent's tools dir
+3. `~/agents/<agent>/<script>` — agent's home dir
+4. As-is (might be on PATH)
+
+**Notes:**
+- Immediate ack on job submission so the agent doesn't block waiting
+- Max 5 concurrent jobs per agent (configurable via `--max-concurrent`)
+- Default 120s timeout per job (configurable via `--default-timeout`)
+- Large output (>4096 bytes) written to payload file, doorbell includes truncated preview with path
+- Subprocesses run in their own session (`start_new_session=True`) — kill signals don't leak
+- Optional `--allowed-dirs` whitelist restricts which scripts can be run
+- Old completed jobs cleaned up after 1 hour
+
+**Launch:** `python3 task_adapter.py`
+**Launch (restricted):** `python3 task_adapter.py --max-concurrent 3 --default-timeout 60 --allowed-dirs ~/agents/Trip/tools`
 
 ---
 
@@ -577,9 +733,9 @@ Three levels, most specific wins:
 
 ### Checklist
 
-- [ ] Write registration JSON to `~/asdaaas/adapters/<name>.json`
+- [ ] Write registration JSON to `~/projects/agent-abide/adapters/<name>.json`
 - [ ] Per-agent queues are created automatically under `~/agents/<agent>/asdaaas/adapters/<name>/inbox/` and `outbox/`
-- [ ] Write health heartbeat to `~/asdaaas/adapters/<name>/health.json`
+- [ ] Write health heartbeat to `~/agents/<agent>/asdaaas/adapters/<name>/health.json`
 - [ ] Handle all errors internally — return error doorbells, don't crash silently
 - [ ] For control adapters: declare commands in registration file
 - [ ] For control adapters: keep doorbell payloads under 256 bytes

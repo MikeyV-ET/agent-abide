@@ -276,7 +276,7 @@ Adapters register by writing to `~/asdaaas/adapters/<name>.json`:
 
 Adapter registrations no longer contain `inbox`/`outbox` paths. Per-agent queues live inside each agent's directory (see "Agent Directory Structure" below). Adapters discover agent locations via `~/asdaaas/running_agents.json`.
 
-The `type` field tells ASDAAAS how to interact: `direct` means attach and pipe, `notify` means watch and ring the bell, `control` means dispatch commands and deliver inline doorbell results.
+The `type` field is informational — it documents what kind of adapter this is (`direct`, `notify`, or `control`), but ASDAAAS does not use it for routing decisions. Routing is controlled by the agent's awareness declarations in `awareness.json`: `direct_attach` determines which adapters get piped, `notify_watch` determines which ring the bell, and `control_watch` determines which deliver inline doorbell results. The adapter's self-declared type is documentary, not functional.
 
 ## Architecture
 
@@ -334,7 +334,10 @@ The agent directory IS the agent. Everything about an agent -- identity, memory,
 │   ├── gaze.json
 │   ├── awareness.json
 │   ├── health.json
-│   ├── commands.json
+│   ├── commands/                      <- per-command JSON files (cmd_<ts>_<rand>.json)
+│   ├── conversation.jsonl             <- conversation history log
+│   ├── compaction_state.json          <- compaction tracking state
+│   ├── startup_history.jsonl          <- record of agent startups
 │   ├── doorbells/
 │   ├── attention/
 │   ├── profile/
@@ -615,13 +618,15 @@ Eric sees speech in #standup and can watch reasoning in #trip-thoughts.
 
 ASDAAAS reads `~/agents/<agent>/asdaaas/gaze.json` on each response. Speech and thoughts are routed independently to their respective targets. Either can be null (output discarded).
 
-Default gaze:
+Default gaze (new agents start with TUI):
 ```json
 {
-  "speech": {"target": "irc", "params": {"room": "#standup"}},
+  "speech": {"target": "tui", "params": {}},
   "thoughts": null
 }
 ```
+
+When no `gaze.json` exists at all, ASDAAAS falls back to `{"target": "irc", "params": {"room": "#standup"}}`.
 
 **Implemented:** Inbound gaze filtering (messages matching gaze room are piped through, everything else is background per `background_channels` config). **Not yet implemented:** Split gaze routing (currently only speech is routed; thoughts routing is designed but not built).
 
@@ -692,7 +697,7 @@ write_attention(
 
 ## Dimension 3: Awareness (Inbound -- What Can Interrupt Me)
 
-**Status: BUILT (core).** Awareness file hot-reloaded every loop. `background_channels` with per-room doorbell/pending/drop modes deployed. `direct_attach`, `control_watch`, `notify_watch`, `accept_from`, `priority_threshold` designed but not yet enforced in main loop.
+**Status: BUILT (core).** Awareness file hot-reloaded every loop. `background_channels` with per-room doorbell/pending/drop modes deployed. `direct_attach`, `control_watch`, `notify_watch` are enforced. **`accept_from` and `priority_threshold` are designed but NOT yet enforced in the main loop** — they appear in examples below but have no runtime effect currently.
 
 The agent declares which adapter inboxes ASDAAAS should watch and which doorbells it wants to hear.
 
@@ -700,7 +705,7 @@ Path: `~/agents/<agent>/asdaaas/awareness.json`
 
 ```json
 {
-  "direct_attach": ["irc", "mesh"],
+  "direct_attach": ["tui", "irc"],
   "background_channels": {
     "#standup": "doorbell",
     "#sr-thoughts": "drop"
@@ -711,8 +716,8 @@ Path: `~/agents/<agent>/asdaaas/awareness.json`
     "meet": {"timeout": 30}
   },
   "notify_watch": ["localmail"],
-  "accept_from": ["eric", "Jr"],
-  "priority_threshold": 5,
+  "accept_from": ["eric", "Jr"],           // (not yet enforced)
+  "priority_threshold": 5,                 // (not yet enforced)
   "heartbeat": {
     "idle_threshold": 1800,
     "nudge_interval": 3600
@@ -730,8 +735,8 @@ Path: `~/agents/<agent>/asdaaas/awareness.json`
 - `background_default`: Policy for channels not listed in `background_channels`. One of `"doorbell"`, `"pending"`, or `"drop"`. Default: `"pending"`.
 - `control_watch`: Which control adapter doorbells ASDAAAS delivers, with per-adapter timeout overrides. Object form -- keys are adapter names, values contain config (at minimum `timeout`). An adapter listed here without a timeout uses the global default (10s).
 - `notify_watch`: Which notify adapter inboxes ASDAAAS watches for doorbells
-- `accept_from`: Filter by sender (for both direct and notify)
-- `priority_threshold`: Only ring the bell for notifications at or above this priority (lower number = higher priority)
+- `accept_from`: **(Not yet enforced.)** Filter by sender (for both direct and notify). Designed but not wired into the main loop.
+- `priority_threshold`: **(Not yet enforced.)** Only ring the bell for notifications at or above this priority (lower number = higher priority). Designed but not wired into the main loop.
 - `heartbeat`: Per-agent heartbeat timing preferences. Object with optional keys:
   - `idle_threshold`: Seconds of inactivity before first nudge (default: 900 / 15 min)
   - `nudge_interval`: Seconds between subsequent nudges (default: 600 / 10 min)
@@ -769,10 +774,10 @@ Message with meta.room="pm:eric" arrives:
 Note: `"pm:eric": "doorbell"` in background_channels has no effect while gaze is on `pm:eric`. But when the agent shifts gaze to `#standup`, Eric's PMs will ring through as doorbells instead of going to the pending queue. The standing list protects the agent from missing important rooms when it moves.
 
 **Use cases:**
-- Deep work: `{"direct_attach": ["mesh"], "accept_from": ["eric"], "priority_threshold": 2}` -- only mesh from Eric, only urgent
-- Standup: `{"direct_attach": ["irc", "mesh"], "background_default": "doorbell", "accept_from": ["*"]}` -- hear everything, background as doorbells
+- Deep work: `{"direct_attach": ["mesh"], "accept_from": ["eric"], "priority_threshold": 2}` -- only mesh from Eric, only urgent (`accept_from`/`priority_threshold` not yet enforced)
+- Standup: `{"direct_attach": ["irc", "mesh"], "background_default": "doorbell", "accept_from": ["*"]}` -- hear everything, background as doorbells (`accept_from` not yet enforced)
 - Private conversation: `{"direct_attach": ["irc"], "background_channels": {"#standup": "doorbell", "pm:eric": "doorbell"}, "background_default": "pending"}` -- gaze on PM, #standup rings through, Eric's PMs ring through even when looking elsewhere, everything else queued
-- Presenting: `{"direct_attach": ["mesh"], "control_watch": {"impress": {"timeout": 10}, "meet": {"timeout": 30}}, "accept_from": ["Jr"], "background_default": "drop", "priority_threshold": 1}` -- Jr commands + control receipts only, drop everything else
+- Presenting: `{"direct_attach": ["mesh"], "control_watch": {"impress": {"timeout": 10}, "meet": {"timeout": 30}}, "accept_from": ["Jr"], "background_default": "drop", "priority_threshold": 1}` -- Jr commands + control receipts only, drop everything else (`accept_from`/`priority_threshold` not yet enforced)
 - Idle: `{"direct_attach": ["irc", "mesh"], "notify_watch": ["localmail"], "background_default": "doorbell", "accept_from": ["*"]}` -- everything, all background as doorbells
 
 ## Profiling
@@ -813,7 +818,13 @@ One instance per agent. **Must be launched detached** (setsid nohup) to avoid po
 Writes to `~/agents/<agent>/asdaaas/health.json` with status (ready/active/error), PID, timestamp, `totalTokens`, and `contextWindow`. The token data is extracted from the result `_meta` after each prompt completion. This is the data source for the context introspection adapter.
 
 ### Command file watcher
-ASDAAAS watches `~/agents/<agent>/asdaaas/commands.json` for commands from adapters that need to act through the pipe (e.g., session adapter sending `/compact`). ASDAAAS owns the pipe exclusively — no adapter can write to stdin directly. The command file is the interface.
+ASDAAAS watches `~/agents/<agent>/asdaaas/commands/` for command files written by adapters or the agent itself (e.g., session adapter sending `/compact`). Commands are individual JSON files named `cmd_<timestamp>_<rand>.json`, created via `write_command()`. ASDAAAS owns the pipe exclusively — no adapter can write to stdin directly. The commands directory is the interface. (Legacy `commands.json` is still read for backward compatibility but `commands/` is the primary mechanism.)
+
+### Agent backend
+The system supports multiple agent backends, configured via the `agent_backend` setting in agent config. The default is `grok` (launches `grok agent stdio` as the subprocess). An alternative `claude` backend (`ClaudeBackend`) uses the Claude API directly. Both backends present the same interface to ASDAAAS — exclusive stdin/stdout pipes with JSON-RPC framing. The backend choice is transparent to adapters and the rest of the system.
+
+### Permission system
+`permission_handler.py` provides tool-call permission enforcement. It supports sandbox mode (restrict dangerous operations), configurable allow/deny rules per tool, and mentor approval (commands that require Eric's explicit approval before execution). Permission checks run inline during tool-call processing — the agent's tool call is intercepted, checked against the rules, and either allowed, denied, or held for mentor approval.
 
 ## Outbox Format
 
@@ -849,7 +860,7 @@ ASDAAAS does not filter, suppress, or modify content. It routes and passes throu
 
 ## Dashboard
 
-Path: `~/projects/agent-abide/dashboards/projects_dashboard.py`
+~~Path: `~/projects/agent-abide/dashboards/projects_dashboard.py`~~ **(Deprecated — file no longer exists. Dashboard functionality has moved.)**
 
 - **Memory line:** System RAM usage, color-coded
 - **RSS column:** Per-agent grok process memory (early warning for bloat)
@@ -912,7 +923,7 @@ The agent controls the gap between physical turns by writing a delay command:
 {"action": "delay", "seconds": 300}
 ```
 
-Written to `~/agents/<agent>/asdaaas/commands.json`. This replaces the default doorbell's delay=0 with delay=300. The agent won't get another turn for 5 minutes (unless an external event -- IRC message, attention match -- interrupts sooner).
+Written to `~/agents/<agent>/asdaaas/commands/` (via `write_command()`). This replaces the default doorbell's delay=0 with delay=300. The agent won't get another turn for 5 minutes (unless an external event -- IRC message, attention match -- interrupts sooner).
 
 **Delay values:**
 - `0` (default): immediate continuation. The simulation runs at full speed.
@@ -987,7 +998,7 @@ This follows from the Gillespie analogy: a reaction that fires but can't complet
 {"action": "ack", "handled": ["doorbell_abc123", "doorbell_def456"]}
 ```
 
-Written to `~/agents/<agent>/asdaaas/commands.json`.
+Written to `~/agents/<agent>/asdaaas/commands/` (via `write_command()`).
 
 Everything not in the `handled` list persists.
 

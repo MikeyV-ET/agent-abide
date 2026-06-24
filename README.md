@@ -82,7 +82,7 @@ agent-abide/
 │   ├── check_agent.sh       # Health check
 │   └── backup_agents.sh     # Backup agent state
 │
-├── tests/                   # Test suite (128 tests, pytest)
+├── tests/                   # Test suite (253 tests, pytest)
 ├── utils/                   # Utilities (bug reports, session repair)
 ├── docs/                    # Documentation
 │   └── howto/               # Reference guides
@@ -161,12 +161,21 @@ cd ~/projects/agent-abide
 python3 -m pytest tests/ -v
 ```
 
-128 tests covering: config loading, gaze matching, localmail, TUI gaze routing, API endpoints, health checks, cancel/restart, Claude backend, and behavioral tests.
+253 tests covering: config loading, gaze matching, localmail, TUI gaze/paste, API endpoints, MockBinary E2E scenarios (commands, compaction, gaze, awareness, delay contracts), compaction report token tracking, smoke tests, and Claude backend.
 
 ## Docs
 
+- `docs/ARCHITECTURE.md` — Full system design: philosophy, three functions, gaze/awareness/attention, adapter types, doorbells
+- `docs/ADAPTER_CATALOG.md` — Complete catalog of all adapters with commands, capabilities, status
+- `docs/OPERATIONS.md` — Startup order, shutdown, monitoring, troubleshooting
 - `docs/howto/comms.md` — Localmail, remind, issues, doorbells, delay patterns
+- `docs/howto/commands.md` — Command queue reference (delay, gaze, awareness, compact)
+- `docs/howto/gaze.md` — Gaze and awareness overview
+- `docs/howto/infrastructure.md` — Systems table, config files, context awareness
 - `docs/howto/intern_mentor.md` — Sandbox + PR workflow for new agents
+- `docs/howto/backup.md` — Backup and recovery procedures
+- `docs/howto/slack_research.md` — Slack channel reading
+- `docs/howto/subagents.md` — Subagent delegation patterns
 - `adapters/ADAPTER_PATTERN.md` — How to write a new adapter
 - `~/agents/AGENTS.md` — Agent operating manual (auto-injected every turn)
 - `~/agents/PRINCIPLES.md` — Operating principles earned through correction

@@ -2187,6 +2187,14 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                 # Immediate orientation — send orientation turn BEFORE any
                 # pending doorbells or messages. Agent needs clean state first.
+                # Drain any pending adapter messages into the pending queue so
+                # they're delivered AFTER orientation, not before (issue_0033).
+                held_msgs = poll_adapter_inboxes(agent_name, awareness)
+                held_msgs.extend(poll_inbox(agent_name))
+                if held_msgs:
+                    print(f"[asdaaas] Holding {len(held_msgs)} message(s) until after orientation")
+                    for hm in held_msgs:
+                        pending_queue.enqueue(hm)
                 gaze = read_gaze(agent_name)
                 orientation_text = (
                     f"[Compaction complete. Context reduced from {tokens_before} to {tokens_after} tokens. "

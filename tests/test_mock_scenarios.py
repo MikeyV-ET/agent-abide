@@ -1056,6 +1056,145 @@ async def test_piggybacked_ack_clears_doorbell():
 
 
 @pytest.mark.asyncio
+async def test_acked_doorbell_not_redelivered():
+    """Bell delivered on turn 1, agent acks it — must NOT appear in turn 2's prompt.
+
+    Reproduces the delivery=2 bug: agent receives a localmail bell, writes an
+    ack command (piggybacked on delay), but the bell gets redelivered on the
+    next turn despite the ack. The ack should delete the bell file before the
+    next poll_doorbells runs.
+    """
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    # Pre-create a doorbell
+    bell_dir = AGENT_HOME / "asdaaas" / "doorbells"
+    bell_dir.mkdir(parents=True, exist_ok=True)
+    bell = {
+        "adapter": "localmail",
+        "text": "UNIQUE_BELL_TEXT_no_redeliver_test",
+        "ts": time.time(),
+    }
+    bell_file = bell_dir / "bell_no_redeliver.json"
+    with open(bell_file, "w") as f:
+        json.dump(bell, f)
+
+    scenario = [
+        # Turn 1: agent receives bell, acks it
+        CommandWriter(
+            speech="Got the bell, acking it now.",
+            tokens=5000,
+            commands=[{"action": "delay", "seconds": 0, "ack": ["bell_no_redeliver"]}],
+        ),
+        # Turn 2: if bell was properly acked, this turn should NOT contain the bell text
+        CommandWriter(
+            speech="Second turn, no bell expected.",
+            tokens=5100,
+            commands=[{"action": "shutdown"}],
+        ),
+    ]
+    mock = MockBinary(scenario)
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+
+    try:
+        await asyncio.wait_for(task, timeout=30)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+
+    # Check how many prompts contained the bell text
+    bell_prompts = [p for p in mock.all_prompts if "UNIQUE_BELL_TEXT_no_redeliver_test" in p]
+    assert len(bell_prompts) == 1, (
+        f"Bell should appear in exactly 1 prompt (no redelivery), "
+        f"but appeared in {len(bell_prompts)}. "
+        f"Prompts with bell text:\n" +
+        "\n---\n".join(p[:200] for p in bell_prompts)
+    )
+
+    # Bell file should also be gone
+    remaining = list(bell_dir.glob("bell_no_redeliver*"))
+    assert len(remaining) == 0, (
+        f"Bell file should be deleted after ack. Remaining: {[f.name for f in remaining]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_late_ack_doorbell_not_redelivered():
+    """Bell delivered on turn 1, agent acks it LATE — must NOT appear in turn 2.
+
+    Uses SplitCommandWriter to simulate the real-world race: the ack command
+    arrives late (after a delay), simulating a long tool-call turn where the
+    ack is written near the end. The post-response drain must still process
+    the late ack before the next poll_doorbells.
+    """
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    # Pre-create a doorbell
+    bell_dir = AGENT_HOME / "asdaaas" / "doorbells"
+    bell_dir.mkdir(parents=True, exist_ok=True)
+    bell = {
+        "adapter": "localmail",
+        "text": "LATE_ACK_BELL_TEXT_redeliver_test",
+        "ts": time.time(),
+    }
+    bell_file = bell_dir / "bell_late_ack.json"
+    with open(bell_file, "w") as f:
+        json.dump(bell, f)
+
+    scenario = [
+        # Turn 1: agent writes delay:0 early, then ack arrives late
+        # This simulates tool calls writing delay first, ack later
+        SplitCommandWriter(
+            speech="Got the bell, will ack late.",
+            tokens=5000,
+            early_commands=[{"action": "delay", "seconds": 0}],
+            delay_between=1.5,
+            late_commands=[{"action": "ack", "handled": ["bell_late_ack"]}],
+        ),
+        # Turn 2: bell should NOT be here
+        CommandWriter(
+            speech="Second turn after late ack.",
+            tokens=5100,
+            commands=[{"action": "shutdown"}],
+        ),
+    ]
+    mock = MockBinary(scenario)
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+
+    try:
+        await asyncio.wait_for(task, timeout=30)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+
+    # Check how many prompts contained the bell text
+    bell_prompts = [p for p in mock.all_prompts if "LATE_ACK_BELL_TEXT_redeliver_test" in p]
+    assert len(bell_prompts) == 1, (
+        f"Bell should appear in exactly 1 prompt even with late ack, "
+        f"but appeared in {len(bell_prompts)}. "
+        f"Prompts with bell text:\n" +
+        "\n---\n".join(p[:200] for p in bell_prompts)
+    )
+
+    # Bell file should be gone
+    remaining = list(bell_dir.glob("bell_late_ack*"))
+    assert len(remaining) == 0, (
+        f"Bell file should be deleted after late ack. Remaining: {[f.name for f in remaining]}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_compact_command_survives_post_response_drain():
     """issue_0028 regression: compact command written during response must survive
     the post-response drain and be processed on the next iteration.

@@ -2810,6 +2810,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 if handled_count:
                     print(f"[asdaaas] Post-response: drained {handled_count} command(s)" +
                           (f", requeued {len(requeue)}" if requeue else ""))
+                requeue = []  # reset so late poll doesn't re-write already-queued items
                 # Clean up continue doorbells after every response. Prevents
                 # re-delivery cascade: without this, a persistent continue bell
                 # gets re-delivered with delivery+1 on each loop iteration,

@@ -179,12 +179,11 @@ class TestMidturnDetection:
         msg = {"_received_ts": now + 5}
         assert _is_midturn_message(msg, now) is False
 
-    def test_grace_period_on_non_foreground(self):
-        """Non-foreground turn adds grace: msg within grace is midturn."""
+    def test_no_grace_on_non_foreground(self):
+        """Non-foreground turn: no grace period (issue_0035 fix)."""
         now = time.time()
         msg = {"_received_ts": now + 10}  # 10s after response
-        assert _is_midturn_message(msg, now, last_was_foreground=False) is True
-        assert 10 < MIDTURN_GRACE_SECONDS  # confirm test is within grace
+        assert _is_midturn_message(msg, now, last_was_foreground=False) is False
 
     def test_no_grace_on_foreground(self):
         """Foreground turn: msg after response is not midturn (no grace)."""
@@ -192,19 +191,14 @@ class TestMidturnDetection:
         msg = {"_received_ts": now + 10}
         assert _is_midturn_message(msg, now, last_was_foreground=True) is False
 
-    def test_after_idle_foreground_reset_prevents_false_flag(self):
-        """Simulates the fix: after idle, last_was_foreground=True prevents
-        false midturn on messages arriving shortly after a non-foreground turn.
-
-        This is the Eric scenario: agent processes doorbell (non-foreground),
-        goes idle, user sends message within 30s. Without the fix,
-        last_was_foreground=False → grace period → false midturn.
-        With the fix, idle resets last_was_foreground=True → no grace."""
+    def test_no_false_flag_between_turns(self):
+        """Messages arriving between turns are never flagged midturn (issue_0035).
+        
+        Eric scenario: agent processes doorbell (non-foreground), goes idle,
+        user sends message within 30s. Should NOT be flagged as midturn."""
         response_ts = time.time()
-        msg = {"_received_ts": response_ts + 5}  # 5s after response (within grace)
+        msg = {"_received_ts": response_ts + 5}  # 5s after response
 
-        # Before fix: non-foreground → midturn (false positive)
-        assert _is_midturn_message(msg, response_ts, last_was_foreground=False) is True
-
-        # After fix: idle resets to foreground → not midturn (correct)
+        # Neither foreground nor non-foreground should flag this
+        assert _is_midturn_message(msg, response_ts, last_was_foreground=False) is False
         assert _is_midturn_message(msg, response_ts, last_was_foreground=True) is False

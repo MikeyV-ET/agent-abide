@@ -2666,6 +2666,39 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     if collected:
                         print(f"[asdaaas] Message arrived during collection window — skipping continue")
                         continue  # loop back to step 2 which will poll everything
+                    # Final command poll before queueing continue (issue_0034).
+                    # Agent may have written a late delay command (e.g. delay:600
+                    # after long tool calls) that wasn't on disk during post-response
+                    # drain. The 3s collection window gives filesystem time to sync.
+                    final_cmds = poll_commands(agent_name)
+                    for fc in final_cmds:
+                        fa = fc.get("action", "")
+                        fpiggy = fc.get("ack", [])
+                        if fpiggy:
+                            ack_doorbells(agent_name, fpiggy)
+                        if fa == "delay":
+                            fdv = fc.get("seconds", 0)
+                            delay_text = fc.get("text") or None
+                            if fdv == "until_event":
+                                delay_until_event = True
+                                next_turn_delay = 0
+                            else:
+                                next_turn_delay = float(fdv)
+                                delay_until_event = False
+                            agent_wrote_delay = True
+                        elif fa == "ack":
+                            ack_doorbells(agent_name, fc.get("handled", []))
+                        elif fa in ("compact", "gaze", "awareness"):
+                            cmd_dir = agent_dir(agent_name) / "commands"
+                            cmd_dir.mkdir(parents=True, exist_ok=True)
+                            fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
+                            with os.fdopen(fd, "w") as f:
+                                json.dump(fc, f)
+                    if final_cmds:
+                        print(f"[asdaaas] Pre-continue poll: {len(final_cmds)} command(s)")
+                        if delay_until_event or next_turn_delay > 0:
+                            print(f"[asdaaas] Late delay command found — skipping continue")
+                            continue
                     if queue_continue_doorbell(agent_name, text=delay_text):
                         print(f"[asdaaas] Default doorbell queued for {agent_name}")
                     delay_text = None

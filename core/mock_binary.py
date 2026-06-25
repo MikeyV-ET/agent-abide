@@ -94,6 +94,21 @@ class SlowResponse:
     tokens: int = 5000
 
 
+@dataclass
+class SplitCommandWriter:
+    """Turn that writes commands at two different times during the response.
+
+    Simulates a real agent that writes delay:0 early (first tool call), then
+    does long work (subagents/tool calls), then writes delay:600 late. Tests
+    whether the post-response drain picks up both commands or races.
+    """
+    speech: str = "Done with split work."
+    tokens: int = 5000
+    early_commands: list = field(default_factory=list)
+    delay_between: float = 2.0  # seconds between early and late commands
+    late_commands: list = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # MockBinary
 # ---------------------------------------------------------------------------
@@ -252,6 +267,8 @@ class MockBinary(AgentBackend):
             return await self._do_empty(step, on_meta)
         elif isinstance(step, SlowResponse):
             return await self._do_slow(step, on_speech_chunk, on_meta, cancel_event)
+        elif isinstance(step, SplitCommandWriter):
+            return await self._do_split_command(step, on_speech_chunk, on_meta, cancel_event)
         else:
             raise ValueError(f"Unknown scenario step type: {type(step)}")
 
@@ -411,6 +428,54 @@ class MockBinary(AgentBackend):
 
         if cancel_event and cancel_event.is_set():
             raise TurnCancelled("cancel_event set during slow response")
+
+        self._write_speech(step.speech, step.tokens)
+
+        if on_speech_chunk and step.speech:
+            on_speech_chunk(step.speech)
+        if on_meta:
+            on_meta(step.tokens)
+
+        return ResponseResult(
+            speech=step.speech, thoughts="",
+            total_tokens=step.tokens,
+            model_id=self._model_id,
+            stop_reason="completed",
+        )
+
+    async def _do_split_command(self, step: SplitCommandWriter, on_speech_chunk, on_meta, cancel_event):
+        if cancel_event and cancel_event.is_set():
+            raise TurnCancelled("cancel_event set")
+
+        if self._agent_cwd:
+            cmd_dir = Path(self._agent_cwd) / "asdaaas" / "commands"
+            cmd_dir.mkdir(parents=True, exist_ok=True)
+            import secrets
+
+            # Write early commands (e.g. delay:0) — these arrive before collect_response returns
+            for cmd in step.early_commands:
+                ts = int(time.time() * 1000)
+                rand = secrets.token_hex(4)
+                path = cmd_dir / f"cmd_{ts}_{rand}.json"
+                with open(path, "w") as f:
+                    json.dump(cmd, f)
+                await asyncio.sleep(0.005)
+
+            # Schedule late commands to arrive AFTER collect_response returns.
+            # This reproduces the real race: agent's last delay command isn't on
+            # disk when post-response drain runs.
+            async def write_late_commands():
+                await asyncio.sleep(step.delay_between)
+                for cmd in step.late_commands:
+                    ts = int(time.time() * 1000)
+                    rand = secrets.token_hex(4)
+                    path = cmd_dir / f"cmd_{ts}_{rand}.json"
+                    with open(path, "w") as f:
+                        json.dump(cmd, f)
+                    await asyncio.sleep(0.005)
+
+            # Fire-and-forget: late commands arrive after we return
+            asyncio.create_task(write_late_commands())
 
         self._write_speech(step.speech, step.tokens)
 

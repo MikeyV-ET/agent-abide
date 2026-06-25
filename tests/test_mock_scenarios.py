@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 
 import pytest
-from mock_binary import MockBinary, NormalResponse, ToolCallOnly, EmptyResponse, SlowResponse, CommandWriter, Compaction
+from mock_binary import MockBinary, NormalResponse, ToolCallOnly, EmptyResponse, SlowResponse, CommandWriter, Compaction, SplitCommandWriter
 
 
 AGENT_NAME = "MockTestAgent"
@@ -1769,3 +1769,93 @@ def test_context_left_banner_accurate():
             f"Banner shows 0k — token tracking pipeline broken. Tag: {tag}"
 
         fs.close()
+
+
+@pytest.mark.asyncio
+async def test_late_delay_wins_over_early_delay_zero():
+    """Bug: agent writes delay:0 early in turn, delay:600 late — early wins race.
+
+    Real-world scenario: agent receives a continue, writes delay:0 (ack+continue),
+    then does long work (subagents, tool calls), then writes delay:600 at turn end.
+    Post-response drain runs once and may only find delay:0 if delay:600 isn't on
+    disk yet. With delay:0, step 3 immediately queues a continue — but the agent
+    is done and wanted to sleep for 600s.
+
+    This cascade burns turns: each stale continue → empty response → new continue.
+    Trip experienced 5 wasted turns from this on 2026-06-24 (cont_7beq1lby cascade).
+
+    The last delay command written during a turn MUST be the one that takes effect.
+    """
+    scenario = [
+        # Step 1: respond to user message, request immediate continuation
+        CommandWriter(
+            speech="Starting work.",
+            tokens=5000,
+            commands=[{"action": "delay", "seconds": 0}],
+        ),
+        # Step 2: respond to the continue with split delays
+        # Early: delay:0 (agent wants to keep working)
+        # Late: delay:600 (after work is done, agent wants to sleep)
+        SplitCommandWriter(
+            speech="Work complete, sleeping.",
+            tokens=6000,
+            early_commands=[{"action": "delay", "seconds": 0}],
+            delay_between=1.5,  # simulate time between early and late commands
+            late_commands=[{"action": "delay", "seconds": 600}],
+        ),
+        # Steps 3-6: absorbers — if stale continues leak, these catch them
+        EmptyResponse(tokens=6100),
+        EmptyResponse(tokens=6200),
+        EmptyResponse(tokens=6300),
+        EmptyResponse(tokens=6400),
+    ]
+    mock = MockBinary(scenario)
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    inject_tui_message("start work")
+
+    async def stop_after_work():
+        # Wait for:
+        # - msg delivery + response (~3s)
+        # - continue creation + delivery + split response (~5s)
+        # - enough time for stale continues to cascade if bug exists (~10s)
+        await asyncio.sleep(20)
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after_work())
+
+    try:
+        await asyncio.wait_for(task, timeout=30)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # === ASSERTIONS ===
+
+    # 1. Both turns ran (user message + continue)
+    assert len(mock.all_prompts) >= 2, \
+        f"Expected at least 2 prompts, got {len(mock.all_prompts)}"
+
+    # 2. The split-command speech was delivered
+    outbox = read_outbox_messages()
+    assert any("Work complete" in m for m in outbox), \
+        f"Split command response not in outbox: {outbox}"
+
+    # 3. No stale continues should fire after the split-command turn.
+    # The agent wrote delay:600 as its last command — that should stick.
+    # Any prompts beyond the first 2 (user msg + continue) are stale continues.
+    extra_prompts = mock.all_prompts[2:]
+    stale_continues = [p for p in extra_prompts if "[continue" in p.lower()]
+
+    assert len(stale_continues) == 0, \
+        f"BUG: {len(stale_continues)} stale continue(s) fired after agent wrote delay:600. " \
+        f"Post-response drain likely only found delay:0 (race). " \
+        f"Continues: {[c[:80] for c in stale_continues]}"

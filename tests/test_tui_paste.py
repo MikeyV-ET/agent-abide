@@ -150,3 +150,76 @@ async def test_normal_enter_still_sends():
 
         assert len(app.submitted_messages) == 1
         assert app.submitted_messages[0] == "hello world"
+
+
+BORING_COMPANY_TEXT = (
+    "The Boring Company is an American infrastructure and tunnel construction\n"
+    "services company founded by Elon Musk in December 2016.\n"
+    "The company has constructed an underground transportation system."
+)
+
+
+@pytest.mark.asyncio
+async def test_paste_undo_does_not_trigger_submit():
+    """Bug: Paste 3x multiline, ctrl-z 3x to undo. First 2 undos work,
+    3rd undo triggers original paste bug (send-per-line fault).
+
+    Issues 0021/0025. Undo may replay individual events bypassing
+    the paste detection in _on_paste.
+    """
+    async with PasteTestApp().run_test() as pilot:
+        app = pilot.app
+        msg_input = app.query_one("#msg-input", MessageInput)
+
+        # Paste 3x
+        for _ in range(3):
+            await msg_input._on_paste(Paste(BORING_COMPANY_TEXT))
+            await pilot.pause()
+
+        # Should have text but no submits
+        assert len(app.submitted_messages) == 0
+        assert len(msg_input.text) > 0
+
+        # Undo 3x — none should trigger Submitted
+        for i in range(3):
+            await pilot.press("ctrl+z")
+            await pilot.pause()
+            assert len(app.submitted_messages) == 0, (
+                f"Undo #{i+1} triggered {len(app.submitted_messages)} "
+                f"Submitted event(s): {app.submitted_messages}"
+            )
+
+        # After 3 undos, text should be empty (all pastes reversed)
+        assert msg_input.text == "", (
+            f"After 3 undos, text should be empty but got: {msg_input.text!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_paste_undo_redo_cycle():
+    """Paste, undo, paste again — no submits should fire at any point."""
+    async with PasteTestApp().run_test() as pilot:
+        app = pilot.app
+        msg_input = app.query_one("#msg-input", MessageInput)
+
+        # Paste
+        await msg_input._on_paste(Paste(BORING_COMPANY_TEXT))
+        await pilot.pause()
+        assert len(app.submitted_messages) == 0
+
+        # Undo
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert len(app.submitted_messages) == 0
+
+        # Paste again
+        await msg_input._on_paste(Paste(BORING_COMPANY_TEXT))
+        await pilot.pause()
+        assert len(app.submitted_messages) == 0
+
+        # Undo again
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert len(app.submitted_messages) == 0, (
+            f"Paste-undo-paste-undo cycle triggered submit: {app.submitted_messages}"
+        )

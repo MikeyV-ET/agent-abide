@@ -653,11 +653,14 @@ def _is_midturn_message(msg, last_response_ts, last_was_foreground=True, last_ac
     if not isinstance(msg_ts, (int, float)):
         return False
     effective_ts = max(last_response_ts, last_activity_ts or 0.0)
-    # Agent active after collect_response returned = wall clock timeout case.
+    # Grace only in wall clock timeout case: agent was still actively working
+    # (tool calls / speech) after collect_response returned. Non-foreground
+    # turns (doorbells) no longer get grace — caused false positives on
+    # between-turns messages (issue_0035).
     if last_activity_ts and last_activity_ts > last_response_ts:
         grace = MIDTURN_GRACE_SECONDS
     else:
-        grace = 0 if last_was_foreground else MIDTURN_GRACE_SECONDS
+        grace = 0
     return msg_ts < effective_ts + grace
 
 

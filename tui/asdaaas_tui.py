@@ -686,9 +686,8 @@ class MessageInput(TextArea):
         text = event.text
         if "\n" in text:
             self.multiline_mode = True
-        if result := self._replace_via_keyboard(text, *self.selection):
-            self.move_cursor(result.end_location)
-            self.focus()
+        self.insert(text)
+        self.focus()
         event.prevent_default()
         event.stop()
 
@@ -717,6 +716,26 @@ class MessageInput(TextArea):
         if "\n" in self.text:
             return True
         return len(self.text) > self._get_wrap_width()
+
+    def undo(self) -> None:
+        """Override undo to handle Textual cursor desync bug.
+
+        Textual's _undo_batch calls _refresh_size() before updating the cursor.
+        With auto-height, the scrollbar refresh tries to scroll to a cursor
+        position that references lines removed by the undo.
+        """
+        try:
+            super().undo()
+        except ValueError:
+            line_count = self.document.line_count
+            row = min(self.cursor_location[0], max(0, line_count - 1))
+            last_line = self.document.get_line(row)
+            col = min(self.cursor_location[1], len(last_line))
+            self.move_cursor((row, col))
+            try:
+                self._refresh_size()
+            except ValueError:
+                pass
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Recalculate height when text changes, using TextArea's own virtual size."""

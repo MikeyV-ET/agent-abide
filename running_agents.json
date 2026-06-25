@@ -1,7 +1,4 @@
 {
-  "TestAgent": {
-    "home": "/home/eric/agents/TestAgent"
-  },
   "Cinco": {
     "home": "/home/eric/agents/Cinco"
   },
@@ -19,5 +16,8 @@
   },
   "MockTestAgent": {
     "home": "/home/eric/agents/MockTestAgent"
+  },
+  "TestAgent": {
+    "home": "/home/eric/agents/TestAgent"
   }
 }

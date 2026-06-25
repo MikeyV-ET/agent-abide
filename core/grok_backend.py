@@ -342,11 +342,74 @@ class GrokBackend(AgentBackend):
         return self._session_id
 
     async def send_prompt(self, text: str) -> Any:
+        """Send a prompt and confirm binary receipt via updates.jsonl.
+
+        Writes the JSON-RPC session/prompt to stdin, then waits for the
+        binary to echo it as user_message_chunk in updates.jsonl.  This
+        closed-loop confirmation prevents duplicate deliveries — the binary
+        processes prompts sequentially, so receipt confirmation naturally
+        serializes sends even if a previous turn is still in progress.
+        """
         await self._send(self._rpc_request("session/prompt", {
             "sessionId": self._session_id,
             "prompt": [{"type": "text", "text": text}],
         }))
+        await self._wait_for_receipt()
         return self._rpc_id
+
+    async def _wait_for_receipt(self, timeout: float = 300.0):
+        """Wait for user_message_chunk in updates.jsonl confirming receipt.
+
+        The binary writes user_message_chunk when it dequeues a prompt from
+        stdin.  Waiting for this frame ensures the binary has received and
+        started processing the prompt before we return to the caller.
+
+        Any frames consumed while waiting (leftover speech from a previous
+        turn, _meta updates, compaction events) are processed for metadata
+        tracking; speech content is discarded as it belongs to a prior turn.
+        """
+        if not self._file_source:
+            return
+
+        start = time.monotonic()
+        deadline = start + timeout
+        while time.monotonic() < deadline:
+            updates, events = self._file_source.read_new_lines()
+
+            for frame in updates:
+                self._last_activity_ts = time.time()
+                params = frame.get("params", {})
+                update = params.get("update", {})
+                su = update.get("sessionUpdate", "")
+
+                if su == "user_message_chunk":
+                    elapsed = time.monotonic() - start
+                    if elapsed > 1.0:
+                        print(f"[grok_backend] Receipt confirmed after {elapsed:.1f}s"
+                              " (previous turn was still in progress)")
+                    return  # Receipt confirmed
+
+                # Track compaction events while waiting
+                if su == "auto_compact_completed":
+                    tokens_after = update.get("tokens_after")
+                    tokens_before = update.get("tokens_before")
+                    if tokens_before:
+                        self._compaction_tokens_before = tokens_before
+                    if tokens_after:
+                        self._compaction_tokens_after = tokens_after
+                        self._total_tokens = tokens_after
+                    self._compaction_event = frame
+
+                # Track tokens from _meta (skip after compaction, issue_0029)
+                if not self._compaction_event:
+                    meta = params.get("_meta", {})
+                    if meta.get("totalTokens"):
+                        self._total_tokens = meta["totalTokens"]
+
+            # turn_ended from a prior turn may appear — just consume it
+            await asyncio.sleep(0.05)
+
+        print(f"[grok_backend] WARNING: receipt confirmation timed out after {timeout}s")
 
     async def collect_response(
         self,

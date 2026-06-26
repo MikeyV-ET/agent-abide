@@ -2147,6 +2147,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     delay_text = None           # optional text payload from delay command, delivered on next continue
     did_work_this_iteration = False  # track if any work was done this loop iteration
     consecutive_empty_doorbell = 0  # count consecutive empty doorbell responses (for backoff)
+    last_delivered_bell_ids = set()  # bells delivered on previous iteration — skip on next poll (issue_0039)
 
     # ---- Main loop ----
     while True:
@@ -2531,8 +2532,19 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             gaze = read_gaze(agent_name)
             did_work_this_iteration = False
 
-            # 2a. Poll doorbells
-            bells = poll_doorbells(agent_name, awareness)
+            # 2a. Poll doorbells, skipping any that were just delivered on the
+            # previous iteration.  The agent's ack may still be in-flight
+            # (issue_0039: late ack misses poll window → redelivery).
+            all_bells = poll_doorbells(agent_name, awareness)
+            if last_delivered_bell_ids:
+                skipped = [b for b in all_bells if b.get("id") in last_delivered_bell_ids]
+                bells = [b for b in all_bells if b.get("id") not in last_delivered_bell_ids]
+                if skipped:
+                    print(f"[asdaaas] Skipped {len(skipped)} just-delivered bell(s): "
+                          f"{[b.get('id') for b in skipped]}")
+            else:
+                bells = all_bells
+            last_delivered_bell_ids = set()
             if bells:
                 for bell in bells:
                     bell_req_id = bell.get("request_id", "")
@@ -2773,6 +2785,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                 total_tokens = backend.total_tokens
                 turns_since_compaction += 1
+                # Track which bells were just delivered so the next iteration
+                # skips them (issue_0039: agent's ack may still be in-flight).
+                if bells:
+                    last_delivered_bell_ids = {b.get("id") for b in bells if b.get("id")}
                 # Process ack commands written during the response BEFORE
                 # the next iteration polls doorbells. Without this, the bell
                 # gets repolled and redelivered before the ack is processed.

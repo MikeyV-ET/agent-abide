@@ -2532,19 +2532,25 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             gaze = read_gaze(agent_name)
             did_work_this_iteration = False
 
-            # 2a. Poll doorbells, skipping any that were just delivered on the
-            # previous iteration.  The agent's ack may still be in-flight
+            # 2a. Poll doorbells, filtering out bells already delivered but
+            # not yet acked.  Suppression persists across iterations until
+            # the agent acks (bell removed from disk) or new bells arrive
+            # and get delivered (which replaces the suppression set).
             # (issue_0039: late ack misses poll window → redelivery).
             all_bells = poll_doorbells(agent_name, awareness)
             if last_delivered_bell_ids:
-                skipped = [b for b in all_bells if b.get("id") in last_delivered_bell_ids]
+                # Only keep suppressing bells that are still on disk (un-acked).
+                # Bells already acked won't appear in all_bells, so the set
+                # naturally shrinks as acks land.
+                still_pending = {b.get("id") for b in all_bells} & last_delivered_bell_ids
                 bells = [b for b in all_bells if b.get("id") not in last_delivered_bell_ids]
-                if skipped:
-                    print(f"[asdaaas] Skipped {len(skipped)} just-delivered bell(s): "
-                          f"{[b.get('id') for b in skipped]}")
+                if still_pending:
+                    print(f"[asdaaas] Suppressed {len(still_pending)} un-acked bell(s): "
+                          f"{list(still_pending)}")
+                # Keep suppressing only the bells that are still un-acked
+                last_delivered_bell_ids = still_pending
             else:
                 bells = all_bells
-            last_delivered_bell_ids = set()
             if bells:
                 for bell in bells:
                     bell_req_id = bell.get("request_id", "")

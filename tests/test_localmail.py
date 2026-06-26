@@ -158,6 +158,74 @@ class TestReplyAll:
         assert not trip_inbox.exists() or len(list(trip_inbox.glob("*.json"))) == 0
 
 
+class TestSenderSideDuplicateWrite:
+    """Reproduce sender-side duplicate bell write.
+
+    Scenario: ring_doorbell dedup check scans doorbells dir for existing
+    bell with same msg_id. If agent acks (deletes) the bell before a
+    second ring_doorbell call, the dedup finds nothing and writes a
+    duplicate. This happens when watch_loop processes the inbox file
+    twice (race between ring_doorbell and inbox unlink).
+    """
+
+    def test_ring_doorbell_after_ack_creates_duplicate(self, tmp_agents):
+        """Bell acked then re-rung should NOT create a new bell."""
+        from localmail import ring_doorbell
+
+        agent = "Trip"
+        bell_dir = tmp_agents / agent / "asdaaas" / "doorbells"
+        bell_dir.mkdir(parents=True)
+
+        msg = {
+            "id": "test-msg-001",
+            "from": "Cinco",
+            "to": "Trip",
+            "text": "status_and_plan.md removed",
+            "priority": 3,
+            "ts": 1782400000.0,
+        }
+
+        # First ring — bell created
+        ring_doorbell(agent, msg)
+        bells = list(bell_dir.glob("bell_*.json"))
+        assert len(bells) == 1, f"Expected 1 bell, got {len(bells)}"
+
+        # Agent acks — bell deleted
+        bells[0].unlink()
+        assert len(list(bell_dir.glob("bell_*.json"))) == 0
+
+        # Second ring (same msg) — dedup should prevent this
+        ring_doorbell(agent, msg)
+        bells_after = list(bell_dir.glob("bell_*.json"))
+        assert len(bells_after) == 0, (
+            f"Duplicate bell written after ack! Got {len(bells_after)} bell(s). "
+            "ring_doorbell dedup only checks existing bells on disk — "
+            "if agent acked (deleted) the bell, dedup finds nothing and re-writes."
+        )
+
+    def test_ring_doorbell_dedup_prevents_unacked_duplicate(self, tmp_agents):
+        """Bell NOT acked, second ring should be skipped (dedup works)."""
+        from localmail import ring_doorbell
+
+        agent = "Trip"
+        bell_dir = tmp_agents / agent / "asdaaas" / "doorbells"
+        bell_dir.mkdir(parents=True)
+
+        msg = {
+            "id": "test-msg-002",
+            "from": "Q",
+            "to": "Trip",
+            "text": "zoom fix deployed",
+            "priority": 3,
+            "ts": 1782400001.0,
+        }
+
+        ring_doorbell(agent, msg)
+        ring_doorbell(agent, msg)  # should be deduped
+        bells = list(bell_dir.glob("bell_*.json"))
+        assert len(bells) == 1, f"Dedup failed: {len(bells)} bells for same msg"
+
+
 class TestGetAsdaaasAgents:
     def test_detects_agents_with_doorbells_dir(self, tmp_agents):
         from localmail import get_asdaaas_agents

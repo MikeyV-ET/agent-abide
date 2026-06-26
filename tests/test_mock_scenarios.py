@@ -1124,6 +1124,78 @@ async def test_acked_doorbell_not_redelivered():
 
 
 @pytest.mark.asyncio
+async def test_long_turn_ack_doorbell_not_redelivered():
+    """Bell delivered at start of turn, agent acks 5s later — must NOT redeliver.
+
+    Models the real scenario: agent receives a localmail bell, does several
+    minutes of work (tool calls, git, tests), then writes the ack near the
+    end of the turn. The bell sits on disk unacked for the entire turn
+    duration. After collect_response returns, the ack should be processed
+    before the next poll_doorbells.
+
+    Reproduces the actual production bug: bell_b0bhr535 delivered at 15:09,
+    Trip acked at ~15:15 (5 min of work), redelivered at 15:16 (delivery=2).
+    """
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    bell_dir = AGENT_HOME / "asdaaas" / "doorbells"
+    bell_dir.mkdir(parents=True, exist_ok=True)
+    bell = {
+        "adapter": "localmail",
+        "text": "LONG_TURN_BELL_TEXT_redeliver_test",
+        "ts": time.time(),
+    }
+    bell_file = bell_dir / "bell_long_turn.json"
+    with open(bell_file, "w") as f:
+        json.dump(bell, f)
+
+    scenario = [
+        # Turn 1: agent receives bell, does long work, acks at the end.
+        # No early commands — the ack + delay come together after 5s of "work"
+        SplitCommandWriter(
+            speech="Done with long turn, acking bell.",
+            tokens=5000,
+            early_commands=[],
+            delay_between=5.0,  # simulate 5 min of tool calls (compressed)
+            late_commands=[{"action": "delay", "seconds": 600, "ack": ["bell_long_turn"]}],
+        ),
+        # Turn 2: bell should NOT be here
+        CommandWriter(
+            speech="Second turn after long turn ack.",
+            tokens=5100,
+            commands=[{"action": "shutdown"}],
+        ),
+    ]
+    mock = MockBinary(scenario)
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+
+    try:
+        await asyncio.wait_for(task, timeout=45)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+
+    bell_prompts = [p for p in mock.all_prompts if "LONG_TURN_BELL_TEXT_redeliver_test" in p]
+    assert len(bell_prompts) == 1, (
+        f"Bell should appear in exactly 1 prompt after long-turn ack, "
+        f"but appeared in {len(bell_prompts)}. "
+        f"Prompts with bell text:\n" +
+        "\n---\n".join(p[:200] for p in bell_prompts)
+    )
+
+    remaining = list(bell_dir.glob("bell_long_turn*"))
+    assert len(remaining) == 0, (
+        f"Bell file should be deleted after ack. Remaining: {[f.name for f in remaining]}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_late_ack_doorbell_not_redelivered():
     """Bell delivered on turn 1, agent acks it LATE — must NOT appear in turn 2.
 

@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 
 import pytest
-from mock_binary import MockBinary, NormalResponse, ToolCallOnly, EmptyResponse, SlowResponse, CommandWriter, Compaction, SplitCommandWriter
+from mock_binary import MockBinary, NormalResponse, ToolCallOnly, EmptyResponse, SlowResponse, CommandWriter, Compaction, SplitCommandWriter, LongToolCallResponse
 
 
 AGENT_NAME = "MockTestAgent"
@@ -2070,3 +2070,113 @@ async def test_late_delay_wins_over_early_delay_zero():
         f"BUG: {len(stale_continues)} stale continue(s) fired after agent wrote delay:600. " \
         f"Post-response drain likely only found delay:0 (race). " \
         f"Continues: {[c[:80] for c in stale_continues]}"
+
+
+# ---------------------------------------------------------------------------
+# Test: stale continues during long tool call (Jr bug reproduction)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_no_stale_continues_during_long_tool_call():
+    """Reproduce Jr's stale-continue bug: binary is busy with a long tool call
+    (wait_commands_or_subagents blocking on subagents for minutes), but asdaaas
+    queues continues because the receipt timeout fires.
+
+    Jr's T87 (2026-06-26): Eric said "let's give it a go" at 14:53. Jr spawned
+    3 worktree subagents and called wait_commands_or_subagents with 10-minute
+    timeouts. The binary was clearly active (tool_call entries in updates.jsonl)
+    but asdaaas hit the 300s receipt timeout on each new continue it tried to
+    pipe, treated Jr as unresponsive, and queued 5 stale continues that were
+    delivered back-to-back after T87 finished — 30+ minutes after creation.
+
+    Expected: asdaaas should NOT queue continues while the binary has an open
+    tool call visible in updates.jsonl. The binary is not unresponsive — it's
+    busy. The receipt timeout means "binary can't accept new prompts right now,"
+    not "agent is dead."
+    """
+    setup_mock_agent()
+    ensure_agent_in_config()
+
+    from asdaaas import main
+    import asdaaas
+    asdaaas._shutdown_requested = False
+
+    # Scenario:
+    # Step 1: Normal response to the initial TUI message (Eric's "let's give it a go")
+    # Step 2: LongToolCallResponse — simulates Jr blocking on subagents for 12s
+    #         (scaled down from Jr's real 37 minutes). Writes tool_call activity
+    #         to updates.jsonl every 2s so binary is clearly busy.
+    # Step 3: Normal response to whatever comes next (should be clean, not stale)
+    scenario = [
+        CommandWriter(
+            speech="Starting subagent work.",
+            tokens=50000,
+            commands=[{"action": "delay", "seconds": 0, "text": "Continue: check subagent status"}],
+        ),
+        LongToolCallResponse(
+            speech="Subagents done. Merging worktrees.",
+            tokens=120000,
+            duration=12.0,
+            activity_interval=2.0,
+        ),
+        NormalResponse(speech="Merge complete.", tokens=130000),
+    ]
+    mock = MockBinary(scenario)
+
+    inject_tui_message("let's give it a go")
+
+    async def stop_after_work():
+        # Wait for the long tool call to finish (12s) + aftermath.
+        # Poll mock.prompt_count — once the long turn is done, wait a bit
+        # for any stale continues to materialize, then shut down.
+        for _ in range(80):  # up to 40s
+            await asyncio.sleep(0.5)
+            if mock.prompt_count >= 2 and mock.steps_remaining <= 1:
+                # Long tool call turn consumed. Wait a few more seconds
+                # to see if stale continues appear.
+                await asyncio.sleep(8)
+                break
+        inject_shutdown_command()
+
+    task = asyncio.create_task(
+        main(AGENT_NAME, backend=mock, agent_cwd=str(AGENT_HOME))
+    )
+    stopper = asyncio.create_task(stop_after_work())
+
+    try:
+        await asyncio.wait_for(task, timeout=90)
+    except (asyncio.TimeoutError, SystemExit):
+        pass
+    finally:
+        asdaaas._shutdown_requested = True
+        stopper.cancel()
+
+    # === ASSERTIONS ===
+
+    # 1. The initial message and at least one continue were delivered
+    assert mock.prompt_count >= 2, \
+        f"Expected at least 2 prompts (user msg + continue), got {mock.prompt_count}"
+
+    # 2. The long tool call response was delivered (step 2 ran)
+    outbox = read_outbox_messages()
+    assert any("Subagents done" in m for m in outbox), \
+        f"Long tool call response not in outbox: {outbox}"
+
+    # 3. KEY ASSERTION: No stale continues should have been queued while the
+    #    binary was busy with the long tool call. Any continue created during
+    #    the 12s tool call window is stale — the binary was clearly active
+    #    (tool_call_update entries every 2s in updates.jsonl).
+    #
+    #    In Jr's real case, asdaaas created 5 stale continues over 30 minutes
+    #    that were all delivered back-to-back after the turn finished, causing
+    #    Jr to re-do work that was already done.
+    #
+    #    We expect at most: prompt 1 (user msg) + prompt 2 (continue triggering
+    #    the long tool call) + prompt 3 (clean continue after long turn).
+    #    Anything beyond 3 is a stale continue created during the long turn.
+    if mock.prompt_count > 3:
+        stale = [p[:100] for p in mock.all_prompts[3:] if "[continue" in p.lower()]
+        assert len(stale) == 0, \
+            f"BUG: {len(stale)} stale continue(s) created while binary was busy with " \
+            f"long tool call. asdaaas should check updates.jsonl for active tool_call " \
+            f"entries before queueing continues. Stale continues: {stale}"

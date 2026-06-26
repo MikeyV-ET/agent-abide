@@ -95,6 +95,25 @@ class SlowResponse:
 
 
 @dataclass
+class LongToolCallResponse:
+    """Turn that blocks for a long time with visible tool_call activity.
+
+    Simulates a real agent doing wait_commands_or_subagents or other long
+    blocking tool calls. The binary writes tool_call (Pending) to
+    updates.jsonl, blocks for `duration` seconds (writing periodic
+    tool_call_update entries to show activity), then returns speech.
+
+    This reproduces the Jr stale-continue bug: asdaaas should not queue
+    continues while the binary has an open tool call, but it does because
+    it only checks the receipt timeout.
+    """
+    speech: str = "Done with long work."
+    tokens: int = 5000
+    duration: float = 10.0
+    activity_interval: float = 2.0  # write a tool_call_update every N seconds
+
+
+@dataclass
 class SplitCommandWriter:
     """Turn that writes commands at two different times during the response.
 
@@ -265,6 +284,8 @@ class MockBinary(AgentBackend):
             return await self._do_compaction(step, on_meta)
         elif isinstance(step, EmptyResponse):
             return await self._do_empty(step, on_meta)
+        elif isinstance(step, LongToolCallResponse):
+            return await self._do_long_tool_call(step, on_speech_chunk, on_meta, cancel_event, on_tool_call)
         elif isinstance(step, SlowResponse):
             return await self._do_slow(step, on_speech_chunk, on_meta, cancel_event)
         elif isinstance(step, SplitCommandWriter):
@@ -414,6 +435,72 @@ class MockBinary(AgentBackend):
 
         return ResponseResult(
             speech="", thoughts="",
+            total_tokens=step.tokens,
+            model_id=self._model_id,
+            stop_reason="completed",
+        )
+
+    async def _do_long_tool_call(self, step: LongToolCallResponse, on_speech_chunk, on_meta, cancel_event, on_tool_call=None):
+        """Simulate a long-running tool call with periodic activity updates.
+
+        Writes tool_call (Pending) → periodic tool_call_updates → tool_call (Completed) → speech.
+        The binary is clearly busy the entire time (updates.jsonl has activity).
+        """
+        if cancel_event and cancel_event.is_set():
+            raise TurnCancelled("cancel_event set")
+
+        tool_id = f"long_tool_{uuid.uuid4().hex[:8]}"
+
+        # Write initial tool_call (Pending)
+        self._write_update_with_meta({
+            "sessionUpdate": "tool_call",
+            "toolCallId": tool_id,
+            "title": "wait_commands_or_subagents",
+            "rawInput": {"task_ids": ["mock-subagent-001"], "mode": "wait_all", "timeout_ms": 600000},
+        }, step.tokens)
+
+        if on_tool_call:
+            on_tool_call("wait_commands_or_subagents")
+
+        # Block for duration, writing periodic activity updates
+        elapsed = 0.0
+        while elapsed < step.duration:
+            sleep_time = min(step.activity_interval, step.duration - elapsed)
+            try:
+                await asyncio.sleep(sleep_time)
+            except asyncio.CancelledError:
+                raise TurnCancelled("cancelled during long tool call")
+            elapsed += sleep_time
+
+            if cancel_event and cancel_event.is_set():
+                raise TurnCancelled("cancel_event set during long tool call")
+
+            # Write activity update (subagent still running)
+            self._write_update_with_meta({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": tool_id,
+                "status": "in_progress",
+                "title": f"Subagent still running ({elapsed:.0f}s elapsed)",
+            }, step.tokens)
+
+        # Tool completes
+        self._write_update_with_meta({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": tool_id,
+            "status": "completed",
+            "title": "wait_commands_or_subagents completed",
+        }, step.tokens)
+
+        # Write speech
+        self._write_speech(step.speech, step.tokens)
+
+        if on_speech_chunk and step.speech:
+            on_speech_chunk(step.speech)
+        if on_meta:
+            on_meta(step.tokens)
+
+        return ResponseResult(
+            speech=step.speech, thoughts="",
             total_tokens=step.tokens,
             model_id=self._model_id,
             stop_reason="completed",

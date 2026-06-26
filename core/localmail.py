@@ -186,14 +186,22 @@ def peek_mail(agent_name: str) -> list:
 # DOORBELL WRITING
 # ============================================================================
 
+_delivered_msg_ids: set[str] = set()  # track delivered msg_ids across ack cycles
+
 def ring_doorbell(agent_name: str, msg: dict):
     """Write a doorbell notification for an asdaaas-managed agent."""
     bell_dir = AGENTS_HOME_DIR / agent_name / "asdaaas" / "doorbells"
     bell_dir.mkdir(parents=True, exist_ok=True)
     
-    # Deduplicate: skip if a doorbell for this msg_id already exists
+    # Deduplicate: skip if already delivered (in-memory) or bell exists on disk.
+    # The in-memory set catches re-rings after the agent acks (deletes) the bell
+    # (issue_0040: disk-only dedup fails when bell is acked between rings).
     msg_id = msg.get("id", "")
     if msg_id:
+        dedup_key = f"{agent_name}:{msg_id}"
+        if dedup_key in _delivered_msg_ids:
+            print(f"[localmail] Duplicate skipped (already delivered): {msg_id} for {agent_name}")
+            return
         for existing in bell_dir.glob("bell_*.json"):
             try:
                 with open(existing) as f:
@@ -249,6 +257,8 @@ def ring_doorbell(agent_name: str, msg: dict):
             json.dump(bell, f)
         final = tmp_path.replace(".tmp", ".json")
         os.rename(tmp_path, final)
+        if msg_id:
+            _delivered_msg_ids.add(f"{agent_name}:{msg_id}")
         print(f"[localmail] Doorbell: {sender} -> {agent_name} ({len(text)} chars, priority {priority})")
     except Exception:
         try:

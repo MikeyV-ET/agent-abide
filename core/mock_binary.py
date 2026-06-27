@@ -111,6 +111,7 @@ class LongToolCallResponse:
     tokens: int = 5000
     duration: float = 10.0
     activity_interval: float = 2.0  # write a tool_call_update every N seconds
+    early_return_after: float = 0.0  # if > 0, collect_response returns early (simulates wall_clock_timeout)
 
 
 @dataclass
@@ -151,6 +152,7 @@ class MockBinary(AgentBackend):
         self._compaction_tokens_before: int = 0
         self._compaction_tokens_after: int = 0
         self._last_activity_ts: float = 0.0
+        self._pending_tool_calls: set[str] = set()
         self._startup_delay: float = startup_delay
         self._agent_cwd: Optional[str] = None
 
@@ -240,6 +242,7 @@ class MockBinary(AgentBackend):
         self._prompt_count += 1
         self._last_prompt = text
         self._all_prompts.append(text)
+        self._pending_tool_calls.clear()  # new turn — prior tools done
 
         # Write the prompt as a user_message_chunk so audit tools can see it
         self._write_update({
@@ -445,6 +448,11 @@ class MockBinary(AgentBackend):
 
         Writes tool_call (Pending) → periodic tool_call_updates → tool_call (Completed) → speech.
         The binary is clearly busy the entire time (updates.jsonl has activity).
+
+        When early_return_after > 0, simulates GrokBackend's wall_clock_timeout:
+        collect_response returns early with tool calls still pending. The tool
+        completes asynchronously after `duration` seconds. This reproduces the
+        real Jr stale-continue bug where asdaaas iterates while tools are running.
         """
         if cancel_event and cancel_event.is_set():
             raise TurnCancelled("cancel_event set")
@@ -452,6 +460,7 @@ class MockBinary(AgentBackend):
         tool_id = f"long_tool_{uuid.uuid4().hex[:8]}"
 
         # Write initial tool_call (Pending)
+        self._pending_tool_calls.add(tool_id)
         self._write_update_with_meta({
             "sessionUpdate": "tool_call",
             "toolCallId": tool_id,
@@ -462,7 +471,43 @@ class MockBinary(AgentBackend):
         if on_tool_call:
             on_tool_call("wait_commands_or_subagents")
 
-        # Block for duration, writing periodic activity updates
+        if step.early_return_after > 0:
+            # Simulate wall_clock_timeout: return early, tool still pending.
+            # Schedule async completion after remaining duration.
+            async def _complete_later():
+                remaining = step.duration - step.early_return_after
+                elapsed = 0.0
+                while elapsed < remaining:
+                    sleep_time = min(step.activity_interval, remaining - elapsed)
+                    await asyncio.sleep(sleep_time)
+                    elapsed += sleep_time
+                    self._write_update_with_meta({
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": tool_id,
+                        "status": "in_progress",
+                        "title": f"Subagent still running ({step.early_return_after + elapsed:.0f}s elapsed)",
+                    }, step.tokens)
+                # Tool completes
+                self._pending_tool_calls.discard(tool_id)
+                self._write_update_with_meta({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": tool_id,
+                    "status": "completed",
+                    "title": "wait_commands_or_subagents completed",
+                }, step.tokens)
+                self._write_speech(step.speech, step.tokens)
+
+            # Wait for early_return_after period, then return
+            await asyncio.sleep(step.early_return_after)
+            asyncio.get_event_loop().create_task(_complete_later())
+            return ResponseResult(
+                speech="", thoughts="",
+                total_tokens=step.tokens,
+                model_id=self._model_id,
+                stop_reason="wall_clock_timeout",
+            )
+
+        # Original synchronous path: block for full duration
         elapsed = 0.0
         while elapsed < step.duration:
             sleep_time = min(step.activity_interval, step.duration - elapsed)
@@ -475,7 +520,6 @@ class MockBinary(AgentBackend):
             if cancel_event and cancel_event.is_set():
                 raise TurnCancelled("cancel_event set during long tool call")
 
-            # Write activity update (subagent still running)
             self._write_update_with_meta({
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": tool_id,
@@ -484,6 +528,7 @@ class MockBinary(AgentBackend):
             }, step.tokens)
 
         # Tool completes
+        self._pending_tool_calls.discard(tool_id)
         self._write_update_with_meta({
             "sessionUpdate": "tool_call_update",
             "toolCallId": tool_id,
@@ -491,7 +536,6 @@ class MockBinary(AgentBackend):
             "title": "wait_commands_or_subagents completed",
         }, step.tokens)
 
-        # Write speech
         self._write_speech(step.speech, step.tokens)
 
         if on_speech_chunk and step.speech:
@@ -618,6 +662,10 @@ class MockBinary(AgentBackend):
             self._compaction_tokens_after = 0
             return True, after, before
         return False, None, 0
+
+    @property
+    def has_pending_tool_calls(self) -> bool:
+        return bool(self._pending_tool_calls)
 
     @property
     def last_activity_ts(self) -> float:

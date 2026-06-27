@@ -2720,6 +2720,12 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                         if delay_until_event or next_turn_delay > 0:
                             print(f"[asdaaas] Late delay command found — skipping continue")
                             continue
+                    # Don't queue continues while binary has open tool calls
+                    # (issue_0041: stale continues during long tool calls).
+                    if backend.has_pending_tool_calls:
+                        print(f"[asdaaas] Binary has pending tool calls — skipping continue")
+                        await asyncio.sleep(2.0)
+                        continue
                     if queue_continue_doorbell(agent_name, text=delay_text):
                         print(f"[asdaaas] Default doorbell queued for {agent_name}")
                     delay_text = None

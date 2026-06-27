@@ -109,6 +109,7 @@ class GrokBackend(AgentBackend):
         self._compaction_tokens_after: int = 0   # from event's tokens_after field
         self._context_window: int = 200000
         self._last_activity_ts: float = 0.0  # epoch ts of most recent updates.jsonl frame
+        self._pending_tool_calls: set[str] = set()  # toolCallIds with no completed update yet
         self._rpc_id: int = 0
         self._grok_sessions_dir = grok_sessions_dir or Path.home() / ".grok" / "sessions"
         self._grok_binary = grok_binary or "grok"
@@ -387,7 +388,18 @@ class GrokBackend(AgentBackend):
                     if elapsed > 1.0:
                         print(f"[grok_backend] Receipt confirmed after {elapsed:.1f}s"
                               " (previous turn was still in progress)")
+                    self._pending_tool_calls.clear()  # new turn — prior tools done
                     return  # Receipt confirmed
+
+                # Track tool calls from prior turn still visible in updates
+                if su == "tool_call":
+                    tool_id = update.get("toolCallId")
+                    if tool_id:
+                        self._pending_tool_calls.add(tool_id)
+                elif su == "tool_call_update":
+                    tool_id = update.get("toolCallId")
+                    if tool_id and update.get("status") == "completed":
+                        self._pending_tool_calls.discard(tool_id)
 
                 # Track compaction events while waiting
                 if su == "auto_compact_completed":
@@ -544,6 +556,7 @@ class GrokBackend(AgentBackend):
                 tool_id = update.get("toolCallId")
                 if tool_id:
                     pending_tool_calls.add(tool_id)
+                    self._pending_tool_calls.add(tool_id)
                 if speech_chunks and not speech_chunks[-1].endswith("\n\n"):
                     speech_chunks.append("\n\n")
                 if on_tool_call:
@@ -553,6 +566,7 @@ class GrokBackend(AgentBackend):
                 tool_id = update.get("toolCallId")
                 if tool_id and update.get("status") == "completed":
                     pending_tool_calls.discard(tool_id)
+                    self._pending_tool_calls.discard(tool_id)
 
             # Preserve compaction events — collect_response reads from the
             # same FileEventSource as refresh_tokens.  If the compaction event
@@ -744,6 +758,28 @@ class GrokBackend(AgentBackend):
     @property
     def model_id(self) -> str:
         return self._model_id
+
+    @property
+    def has_pending_tool_calls(self) -> bool:
+        """Check updates.jsonl for open tool calls (turn still in progress)."""
+        if self._file_source:
+            updates, _ = self._file_source.read_new_lines()
+            for frame in updates:
+                self._last_activity_ts = time.time()
+                params = frame.get("params", {})
+                update = params.get("update", {})
+                su = update.get("sessionUpdate", "")
+                if su == "tool_call":
+                    tool_id = update.get("toolCallId")
+                    if tool_id:
+                        self._pending_tool_calls.add(tool_id)
+                elif su == "tool_call_update":
+                    tool_id = update.get("toolCallId")
+                    if tool_id and update.get("status") == "completed":
+                        self._pending_tool_calls.discard(tool_id)
+                elif su == "user_message_chunk":
+                    self._pending_tool_calls.clear()
+        return bool(self._pending_tool_calls)
 
     @property
     def last_activity_ts(self) -> float:

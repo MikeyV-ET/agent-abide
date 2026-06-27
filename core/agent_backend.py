@@ -154,6 +154,16 @@ class AgentBackend(ABC):
         return False, None, 0
 
     @property
+    def has_pending_tool_calls(self) -> bool:
+        """True if the binary has open tool calls (turn still in progress).
+
+        Backends that can read updates.jsonl (GrokBackend) check for
+        tool_call entries without a matching completed tool_call_update.
+        Default False — backends override to enable stale-continue prevention.
+        """
+        return False
+
+    @property
     def last_activity_ts(self) -> float:
         """Epoch timestamp of the most recent updates.jsonl frame.
 

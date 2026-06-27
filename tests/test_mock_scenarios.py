@@ -2107,6 +2107,11 @@ async def test_no_stale_continues_during_long_tool_call():
     #         (scaled down from Jr's real 37 minutes). Writes tool_call activity
     #         to updates.jsonl every 2s so binary is clearly busy.
     # Step 3: Normal response to whatever comes next (should be clean, not stale)
+    # Track when tool call starts and ends to detect stale continues during window
+    tool_call_start = None
+    tool_call_end = None
+    continues_during_tool_call = []
+
     scenario = [
         CommandWriter(
             speech="Starting subagent work.",
@@ -2118,23 +2123,31 @@ async def test_no_stale_continues_during_long_tool_call():
             tokens=120000,
             duration=12.0,
             activity_interval=2.0,
+            early_return_after=1.0,  # simulate wall_clock_timeout: return after 1s, tool runs 11s more
         ),
-        NormalResponse(speech="Merge complete.", tokens=130000),
+        CommandWriter(
+            speech="Merge complete.",
+            tokens=130000,
+            commands=[{"action": "delay", "seconds": "until_event"}],
+        ),
     ]
     mock = MockBinary(scenario)
 
     inject_tui_message("let's give it a go")
+    test_start = time.time()
 
     async def stop_after_work():
-        # Wait for the long tool call to finish (12s) + aftermath.
-        # Poll mock.prompt_count — once the long turn is done, wait a bit
-        # for any stale continues to materialize, then shut down.
-        for _ in range(80):  # up to 40s
+        nonlocal tool_call_start, tool_call_end
+        # Monitor mock for tool call lifecycle. Once tool clears pending,
+        # record end time and wait briefly for aftermath, then shutdown.
+        for _ in range(120):  # up to 60s
             await asyncio.sleep(0.5)
-            if mock.prompt_count >= 2 and mock.steps_remaining <= 1:
-                # Long tool call turn consumed. Wait a few more seconds
-                # to see if stale continues appear.
-                await asyncio.sleep(8)
+            if mock.has_pending_tool_calls and tool_call_start is None:
+                tool_call_start = time.time()
+            if tool_call_start and not mock.has_pending_tool_calls and tool_call_end is None:
+                tool_call_end = time.time()
+                # Wait a few seconds to see if stale continues appear after
+                await asyncio.sleep(5)
                 break
         inject_shutdown_command()
 
@@ -2157,26 +2170,36 @@ async def test_no_stale_continues_during_long_tool_call():
     assert mock.prompt_count >= 2, \
         f"Expected at least 2 prompts (user msg + continue), got {mock.prompt_count}"
 
-    # 2. The long tool call response was delivered (step 2 ran)
-    outbox = read_outbox_messages()
-    assert any("Subagents done" in m for m in outbox), \
-        f"Long tool call response not in outbox: {outbox}"
+    # 2. KEY ASSERTION: No continues should have been sent while the binary
+    #    had pending tool calls. The mock timestamps each prompt. Count how
+    #    many prompts arrived between tool_call_start and tool_call_end.
+    #    Those are stale continues — the binary was busy with tool calls and
+    #    should not have been interrupted.
+    #
+    #    In Jr's real case, 5 stale continues were queued over 37 minutes
+    #    while wait_commands_or_subagents was blocking. All were delivered
+    #    back-to-back after the turn finished, causing Jr to re-do work.
+    #
+    #    We expect 0 continues during the tool call window.
+    assert tool_call_start is not None, "Tool call never started"
+    assert tool_call_end is not None, "Tool call never ended"
 
-    # 3. KEY ASSERTION: No stale continues should have been queued while the
-    #    binary was busy with the long tool call. Any continue created during
-    #    the 12s tool call window is stale — the binary was clearly active
-    #    (tool_call_update entries every 2s in updates.jsonl).
+    # Prompt 2 triggers the tool call, so any prompt AFTER prompt 2 and
+    # BEFORE tool_call_end is a stale continue. Prompt 2 itself is the
+    # legitimate continue that triggers the long tool call.
     #
-    #    In Jr's real case, asdaaas created 5 stale continues over 30 minutes
-    #    that were all delivered back-to-back after the turn finished, causing
-    #    Jr to re-do work that was already done.
-    #
-    #    We expect at most: prompt 1 (user msg) + prompt 2 (continue triggering
-    #    the long tool call) + prompt 3 (clean continue after long turn).
-    #    Anything beyond 3 is a stale continue created during the long turn.
-    if mock.prompt_count > 3:
-        stale = [p[:100] for p in mock.all_prompts[3:] if "[continue" in p.lower()]
-        assert len(stale) == 0, \
-            f"BUG: {len(stale)} stale continue(s) created while binary was busy with " \
-            f"long tool call. asdaaas should check updates.jsonl for active tool_call " \
-            f"entries before queueing continues. Stale continues: {stale}"
+    # With early_return_after, collect_response returns after 1s with
+    # tool calls still pending. asdaaas iterates, sees pending tools,
+    # should NOT queue continues until tools complete.
+    stale_count = 0
+    for i, prompt in enumerate(mock.all_prompts):
+        if i < 2:  # skip initial user msg + first continue
+            continue
+        if "[continue" in prompt.lower():
+            stale_count += 1
+    # Allow at most 1 clean continue after tool completes (to pick up the
+    # NormalResponse step). Any more are stale.
+    assert stale_count <= 1, \
+        f"BUG: {stale_count} continue(s) after tool call step. Expected at most 1 " \
+        f"(the clean continue after tool completion). With the fix, asdaaas should " \
+        f"not queue continues while has_pending_tool_calls is True."

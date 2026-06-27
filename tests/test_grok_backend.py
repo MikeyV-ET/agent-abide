@@ -218,6 +218,7 @@ class TestProcessUpdateFrames:
         backend._compaction_tokens_before = 0
         backend._compaction_tokens_after = 0
         backend._last_activity_ts = 0.0
+        backend._pending_tool_calls = set()
         return backend
 
     def test_speech_chunks(self):

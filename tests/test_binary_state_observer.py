@@ -15,6 +15,7 @@ Run: cd ~/projects/agent-abide && python3 -m pytest tests/test_binary_state_obse
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -24,7 +25,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 
-from binary_state_observer import BinaryStateObserver, ObserverState
+from binary_state_observer import (
+    BinaryStateObserver, ObserverState, UpdatesJSONLTailer,
+    ObserverService, load_known_types, load_silence_windows,
+    STATE_TTL,
+)
 
 
 # ============================================================================
@@ -582,3 +587,277 @@ class TestRetrySequence:
 
         observer.process_event(turn_completed())
         assert observer.state == ObserverState.IDLE
+
+
+# ============================================================================
+# 13. UpdatesJSONLTailer
+# ============================================================================
+
+class TestTailer:
+    """File tailing for updates.jsonl: reads new lines, handles truncation."""
+
+    def test_read_new_lines_from_file(self, tmp_path):
+        f = tmp_path / "updates.jsonl"
+        f.write_text(json.dumps(user_message()) + "\n")
+
+        tailer = UpdatesJSONLTailer(str(f))
+        lines = tailer.read_new_lines()
+        assert len(lines) == 1
+        assert "user_message_chunk" in lines[0]
+        tailer.close()
+
+    def test_incremental_reads(self, tmp_path):
+        f = tmp_path / "updates.jsonl"
+        f.write_text(json.dumps(user_message()) + "\n")
+
+        tailer = UpdatesJSONLTailer(str(f))
+        lines1 = tailer.read_new_lines()
+        assert len(lines1) == 1
+
+        # Append more
+        with open(f, "a") as fh:
+            fh.write(json.dumps(agent_message()) + "\n")
+            fh.write(json.dumps(turn_completed()) + "\n")
+
+        lines2 = tailer.read_new_lines()
+        assert len(lines2) == 2
+        tailer.close()
+
+    def test_no_file_returns_empty(self, tmp_path):
+        tailer = UpdatesJSONLTailer(str(tmp_path / "nonexistent.jsonl"))
+        assert tailer.read_new_lines() == []
+        tailer.close()
+
+    def test_partial_line_not_returned(self, tmp_path):
+        """Incomplete line (no trailing newline) waits for completion."""
+        f = tmp_path / "updates.jsonl"
+        f.write_text('{"partial": true')  # no newline
+
+        tailer = UpdatesJSONLTailer(str(f))
+        lines = tailer.read_new_lines()
+        assert len(lines) == 0  # not returned yet
+
+        # Complete the line
+        with open(f, "a") as fh:
+            fh.write('}\n')
+
+        lines = tailer.read_new_lines()
+        assert len(lines) == 1
+        tailer.close()
+
+    def test_read_tail_lines(self, tmp_path):
+        f = tmp_path / "updates.jsonl"
+        with open(f, "w") as fh:
+            for i in range(100):
+                fh.write(json.dumps({"line": i}) + "\n")
+
+        tailer = UpdatesJSONLTailer(str(f))
+        tail = tailer.read_tail_lines(5)
+        assert len(tail) == 5
+        assert json.loads(tail[-1])["line"] == 99
+        tailer.close()
+
+    def test_seek_to_end(self, tmp_path):
+        f = tmp_path / "updates.jsonl"
+        f.write_text(json.dumps(user_message()) + "\n")
+
+        tailer = UpdatesJSONLTailer(str(f))
+        tailer.seek_to_end()
+
+        # Old content not returned
+        assert tailer.read_new_lines() == []
+
+        # New content is
+        with open(f, "a") as fh:
+            fh.write(json.dumps(agent_message()) + "\n")
+        lines = tailer.read_new_lines()
+        assert len(lines) == 1
+        tailer.close()
+
+    def test_file_truncation_detected(self, tmp_path):
+        """If the file is replaced/truncated, tailer resets."""
+        f = tmp_path / "updates.jsonl"
+        f.write_text(json.dumps(user_message()) + "\n" * 50)
+
+        tailer = UpdatesJSONLTailer(str(f))
+        tailer.read_new_lines()  # read all
+
+        # Truncate (new session)
+        f.write_text(json.dumps(agent_message()) + "\n")
+
+        lines = tailer.read_new_lines()
+        assert len(lines) == 1
+        assert "agent_message_chunk" in lines[0]
+        tailer.close()
+
+
+# ============================================================================
+# 14. State file TTL
+# ============================================================================
+
+class TestStateFileTTL:
+    """State file expires after STATE_TTL seconds."""
+
+    def test_read_fresh_state_file(self, tmp_path, observer):
+        path = str(tmp_path / "state.json")
+        observer.process_event(user_message())
+        observer.write_state_file(path)
+
+        state = BinaryStateObserver.read_state_file(path)
+        assert state is not None
+        assert state["state"] == "BUSY"
+
+    def test_expired_state_file_returns_none(self, tmp_path, observer):
+        path = str(tmp_path / "state.json")
+        observer.process_event(user_message())
+        observer.write_state_file(path)
+
+        # Backdate the expiration
+        with open(path) as f:
+            data = json.load(f)
+        data["expires_at"] = time.time() - 10  # expired 10s ago
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+        state = BinaryStateObserver.read_state_file(path)
+        assert state is None
+
+    def test_missing_state_file_returns_none(self, tmp_path):
+        state = BinaryStateObserver.read_state_file(str(tmp_path / "nope.json"))
+        assert state is None
+
+    def test_corrupt_state_file_returns_none(self, tmp_path):
+        path = str(tmp_path / "state.json")
+        with open(path, "w") as f:
+            f.write("{corrupt json")
+
+        state = BinaryStateObserver.read_state_file(path)
+        assert state is None
+
+    def test_state_dict_has_written_at_and_expires_at(self, observer):
+        observer.process_event(user_message())
+        d = observer.state_dict()
+        assert "written_at" in d
+        assert "expires_at" in d
+        assert d["expires_at"] > d["written_at"]
+        assert d["expires_at"] - d["written_at"] == pytest.approx(STATE_TTL, abs=0.01)
+
+
+# ============================================================================
+# 15. Data file loading
+# ============================================================================
+
+class TestDataLoading:
+    """Load known types and silence windows from data files."""
+
+    def test_load_known_types(self):
+        data_dir = str(Path(__file__).resolve().parent.parent / "core" / "observer_data")
+        types = load_known_types(data_dir)
+        assert "user_message_chunk" in types
+        assert "turn_completed" in types
+        assert "tool_call" in types
+        assert len(types) >= 51  # spec says 51+, Sr shipped 53
+
+    def test_load_silence_windows(self):
+        data_dir = str(Path(__file__).resolve().parent.parent / "core" / "observer_data")
+        by_tool, by_event, default, p95 = load_silence_windows(data_dir)
+        assert "read_file" in by_tool
+        assert by_tool["read_file"] > 0
+        assert "tool_call" in by_event
+        assert default > 0
+        assert p95 > 0
+
+    def test_silence_windows_tool_hierarchy(self):
+        """Fast tools should have shorter windows than slow tools."""
+        data_dir = str(Path(__file__).resolve().parent.parent / "core" / "observer_data")
+        by_tool, _, _, _ = load_silence_windows(data_dir)
+        assert by_tool.get("read_file", 10) < by_tool.get("run_terminal_command", 120)
+        assert by_tool.get("read_file", 10) < by_tool.get("spawn_subagent", 600)
+
+
+# ============================================================================
+# 16. Event silence windows (Sr's addition)
+# ============================================================================
+
+class TestEventSilenceWindows:
+    """Per-event-type silence windows update expected_silence on each event."""
+
+    def test_agent_message_sets_short_window(self):
+        obs = BinaryStateObserver(
+            pid=12345,
+            known_types=set(KNOWN_TYPES),
+            process_alive_fn=lambda pid: True,
+            event_silence_windows={"agent_message_chunk": 5.0},
+        )
+        obs.process_event(user_message())
+        obs.process_event(agent_message())
+        assert obs._expected_silence == 5.0
+
+    def test_tool_call_overrides_event_window(self):
+        """tool_call uses _compute_expected_silence, not event window."""
+        obs = BinaryStateObserver(
+            pid=12345,
+            known_types=set(KNOWN_TYPES),
+            process_alive_fn=lambda pid: True,
+            event_silence_windows={"tool_call": 5.0},
+            silence_windows={"read_file": 10.0},
+        )
+        obs.process_event(user_message())
+        obs.process_event(tool_call("t1", "read_file"))
+        assert obs._expected_silence == 10.0  # per-tool, not per-event
+
+
+# ============================================================================
+# 17. ObserverService orientation
+# ============================================================================
+
+class TestServiceOrientation:
+    """ObserverService orients from existing updates.jsonl tail."""
+
+    def test_orient_from_completed_session(self, tmp_path):
+        """Service orients to IDLE from a completed turn."""
+        session_dir = str(tmp_path / "session")
+        os.makedirs(session_dir)
+
+        # Write a complete turn
+        updates = tmp_path / "session" / "updates.jsonl"
+        with open(updates, "w") as f:
+            f.write(json.dumps(user_message()) + "\n")
+            f.write(json.dumps(agent_message()) + "\n")
+            f.write(json.dumps(turn_completed()) + "\n")
+
+        data_dir = str(Path(__file__).resolve().parent.parent / "core" / "observer_data")
+        state_file = str(tmp_path / "state.json")
+
+        service = ObserverService(
+            pid=os.getpid(),  # use our own PID (alive)
+            session_dir=session_dir,
+            state_file=state_file,
+            data_dir=data_dir,
+        )
+        service.orient()
+
+        assert service.observer.state == ObserverState.IDLE
+
+        # State file was written
+        state = BinaryStateObserver.read_state_file(state_file)
+        assert state is not None
+        assert state["state"] == "IDLE"
+
+    def test_orient_empty_session(self, tmp_path):
+        """No updates.jsonl → stays STARTING."""
+        session_dir = str(tmp_path / "session")
+        os.makedirs(session_dir)
+
+        data_dir = str(Path(__file__).resolve().parent.parent / "core" / "observer_data")
+        state_file = str(tmp_path / "state.json")
+
+        service = ObserverService(
+            pid=os.getpid(),
+            session_dir=session_dir,
+            state_file=state_file,
+            data_dir=data_dir,
+        )
+        service.orient()
+
+        assert service.observer.state == ObserverState.STARTING

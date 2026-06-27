@@ -43,6 +43,10 @@ DEFAULT_SILENCE_WINDOW = 60  # conservative: 2x P99
 # Buffer multiplier for explicit timeouts (account for overhead)
 TIMEOUT_BUFFER = 1.5
 
+# State file freshness: asdaaas should reject state older than this (seconds).
+# Observer writes at 0.25s intervals; 1.0s gives 4x margin for scheduling jitter.
+STATE_TTL = 1.0
+
 
 class BinaryStateObserver:
     """
@@ -324,6 +328,7 @@ class BinaryStateObserver:
 
     def state_dict(self) -> dict:
         """Return the state as a dict suitable for writing to JSON."""
+        now = time.time()
         return {
             "state": self._state.value,
             "since": self._since,
@@ -337,6 +342,8 @@ class BinaryStateObserver:
             "unknown_event": self._unknown_event,
             "doom_loop": self._doom_loop,
             "turn_event_count": self._turn_event_count,
+            "written_at": now,
+            "expires_at": now + STATE_TTL,
         }
 
     def write_state_file(self, path: str):
@@ -345,6 +352,23 @@ class BinaryStateObserver:
         with open(tmp, "w") as f:
             json.dump(self.state_dict(), f)
         os.rename(tmp, path)
+
+    @staticmethod
+    def read_state_file(path: str) -> Optional[dict]:
+        """Read state file. Returns None if missing, unreadable, or expired.
+
+        This is the consumer-side contract: asdaaas calls this and only trusts
+        a non-None result. If the observer is dead or stuck, the file expires
+        and this returns None — no separate liveness check needed.
+        """
+        try:
+            with open(path) as f:
+                state = json.load(f)
+            if time.time() > state.get("expires_at", 0):
+                return None  # stale — observer presumed dead/stuck
+            return state
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
 
 
 # ============================================================================

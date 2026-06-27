@@ -1,0 +1,44 @@
+{
+  "_comment": "Expected silence windows (seconds) by preceding event type. Source: ~/agents/Trip/AA-architecture-audit/intra_turn_timing_report.md (clean turns, P99 values with safety margin). Used by observer to determine STUCK threshold. Re-run grammar extractor to update.",
+  "by_preceding_event": {
+    "tool_call": 5.0,
+    "tool_call_update": 45.0,
+    "tool_call_update_completed": 60.0,
+    "tool_call_update_in_progress": 45.0,
+    "tool_call_update_failed": 45.0,
+    "agent_message_chunk": 45.0,
+    "agent_thought_chunk": 30.0,
+    "user_message_chunk": 60.0,
+    "plan": 300.0,
+    "retry_state": 45.0,
+    "hook_execution": 240.0,
+    "subagent_spawned": 5.0,
+    "subagent_finished": 300.0,
+    "auto_compact_started": 120.0,
+    "compaction_checkpoint": 5.0,
+    "auto_compact_completed": 60.0,
+    "doom_loop_detected": 60.0,
+    "task_backgrounded": 600.0,
+    "task_completed": 60.0
+  },
+  "by_tool_name": {
+    "read_file": 10.0,
+    "grep": 10.0,
+    "list_dir": 10.0,
+    "search_replace": 10.0,
+    "todo_write": 10.0,
+    "run_terminal_command": 120.0,
+    "spawn_subagent": 600.0,
+    "wait_commands_or_subagents": 600.0,
+    "get_command_or_subagent_output": 600.0,
+    "monitor": 30.0,
+    "web_search": 60.0,
+    "image_gen": 120.0,
+    "image_edit": 120.0
+  },
+  "default": 60.0,
+  "orientation": {
+    "_comment": "P95 events-per-turn from grammar report. Used for backward scan on startup.",
+    "p95_events_per_turn": 200
+  }
+}

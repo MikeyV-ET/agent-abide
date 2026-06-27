@@ -15,7 +15,7 @@
 #   2. ~/projects/mikeyv-infra/ - infrastructure code
 #   3. ~/projects/erics-notes/  - Eric's notes (if exists)
 #   4. ~/projects/socratic-arena/ - Socratic arena (if exists)
-#   5. ~/.grok/sessions/      - session data (chat history, signals)
+#   5. ~/.grok/sessions/      - agent sessions (full), non-agent (metadata only)
 #   6. Git bundles             - full commit history for all repos
 #
 # Backup locations:
@@ -144,17 +144,31 @@ do_backup() {
         log "  socratic-arena: $(du -sh "${target}/socratic-arena/" | cut -f1)"
     fi
 
-    # 5. Session data (only signals.json, summary.json, and chat_history.jsonl per session)
-    #    Skip updates.jsonl (large, reconstructable) and tool outputs
+    # 5. Session data — full backup of agent sessions (updates.jsonl is critical),
+    #    metadata-only for non-agent sessions (doppelgangers, benchmarks, etc.)
     log "Backing up sessions..."
+
+    # 5a. Agent sessions — full (updates.jsonl, compaction segments, everything)
+    for agent_session_dir in "${SESSIONS_DIR}"/%2Fhome%2Feric%2Fagents%2F*/; do
+        [[ -d "$agent_session_dir" ]] || continue
+        local rel_name
+        rel_name=$(basename "$agent_session_dir")
+        rsync -a --delete \
+            "${agent_session_dir}" "${target}/sessions/${rel_name}/" \
+            || err_track "rsync agent session ${rel_name} failed"
+    done
+
+    # 5b. Non-agent sessions — metadata only (signals, summary, chat history)
     rsync -a --delete \
         --include='*/' \
         --include='signals.json' \
         --include='summary.json' \
         --include='chat_history.jsonl' \
         --exclude='*' \
+        --exclude='%2Fhome%2Feric%2Fagents%2F*' \
         "${SESSIONS_DIR}/" "${target}/sessions/" \
-        || err_track "rsync sessions failed"
+        || err_track "rsync non-agent sessions failed"
+
     log "  sessions: $(du -sh "${target}/sessions/" | cut -f1)"
 
     # 6. Git bundles (preserves full commit history)

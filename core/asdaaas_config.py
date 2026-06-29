@@ -198,6 +198,14 @@ class AsdaaasConfig:
         """Directory for permission request/decision files."""
         return self.agent_asdaaas_dir(agent_name) / "permissions"
 
+    def agent_observer_enabled(self, agent_name: str) -> bool:
+        """Whether the binary state observer sidecar is enabled for this agent."""
+        return self._agents.get(agent_name, {}).get("observer_enabled", False)
+
+    def agent_observer_state_file(self, agent_name: str) -> Path:
+        """Path to the observer's state file for this agent."""
+        return self.agent_asdaaas_dir(agent_name) / "binary_state.json"
+
     def agent_doorbells_dir(self, agent_name: str) -> Path:
         return self.agent_asdaaas_dir(agent_name) / "doorbells"
 

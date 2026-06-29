@@ -323,6 +323,7 @@ class GrokBackend(AgentBackend):
         # Open file event source for output reading
         encoded_cwd = agent_cwd.replace("/", "%2F")
         session_dir = self._grok_sessions_dir / encoded_cwd / self._session_id
+        self._session_dir = session_dir
         self._file_source = FileEventSource(session_dir)
         self._file_source.open()
 
@@ -754,6 +755,10 @@ class GrokBackend(AgentBackend):
     @property
     def session_id(self) -> Optional[str]:
         return self._session_id
+
+    @property
+    def session_dir(self) -> Optional[Path]:
+        return getattr(self, '_session_dir', None)
 
     @property
     def model_id(self) -> str:

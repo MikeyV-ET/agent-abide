@@ -23,6 +23,7 @@ What changes per backend:
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 
@@ -130,6 +131,11 @@ class AgentBackend(ABC):
     @abstractmethod
     def session_id(self) -> Optional[str]:
         """Current session ID."""
+
+    @property
+    def session_dir(self) -> Optional[Path]:
+        """Session directory path (for observer, etc.). None before start()."""
+        return None
 
     @property
     @abstractmethod

@@ -275,7 +275,8 @@ _current_model_id = "unknown"
 _current_session_id = None
 _current_backend_type = "grok"
 
-def write_health(agent_name, status, detail="", total_tokens=0, context_window=CONTEXT_WINDOW):
+def write_health(agent_name, status, detail="", total_tokens=0, context_window=CONTEXT_WINDOW,
+                  observer_state=None):
     agent_dir(agent_name).mkdir(parents=True, exist_ok=True)
     health = {
         "agent": agent_name,
@@ -291,6 +292,12 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
         "session_id": _current_session_id,
         "backend": _current_backend_type,
     }
+    if observer_state is not None:
+        health["observer"] = {
+            "state": observer_state.get("state"),
+            "since": observer_state.get("since"),
+            "written_at": observer_state.get("written_at"),
+        }
     path = agent_dir(agent_name) / "health.json"
     tmp = str(path) + ".tmp"
     with open(tmp, "w") as f:
@@ -2120,6 +2127,43 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     except Exception as _e:
         print(f"[asdaaas] WARN: failed to update session registry: {_e}")
 
+    # ---- Observer sidecar (Phase 1 scaffold) ----
+    observer_process = None
+    observer_enabled = config.agent_observer_enabled(agent_name) if config else False
+    observer_state_file = str(config.agent_observer_state_file(agent_name)) if config else None
+
+    if observer_enabled and backend.proc and backend.session_dir:
+        try:
+            observer_script = os.path.join(os.path.dirname(__file__), "binary_state_observer.py")
+            observer_state_file = str(config.agent_observer_state_file(agent_name))
+            observer_cmd = [
+                sys.executable, observer_script,
+                "--pid", str(backend.proc.pid),
+                "--session-dir", str(backend.session_dir),
+                "--state-file", observer_state_file,
+            ]
+            observer_process = await asyncio.create_subprocess_exec(
+                *observer_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            print(f"[asdaaas] Observer started (PID {observer_process.pid})")
+        except Exception as e:
+            print(f"[asdaaas] WARN: Failed to start observer: {e}")
+            observer_process = None
+    elif observer_enabled:
+        print(f"[asdaaas] WARN: Observer enabled but backend not ready (no proc or session_dir)")
+
+    def read_observer_state():
+        """Read observer state file. Returns None if observer disabled/dead/stale."""
+        if not observer_enabled or not observer_state_file:
+            return None
+        try:
+            from binary_state_observer import BinaryStateObserver
+            return BinaryStateObserver.read_state_file(observer_state_file)
+        except Exception:
+            return None
+
     # Read awareness file — determines which adapter inboxes to watch
     awareness = read_awareness(agent_name)
     print(f"[asdaaas] Awareness: direct={awareness.get('direct_attach', [])}, notify={awareness.get('notify_watch', [])}")
@@ -3065,6 +3109,16 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             await asyncio.sleep(2.0)
 
     # ---- Cleanup ----
+    # Reap observer sidecar first (fast, no deps)
+    if observer_process and observer_process.returncode is None:
+        try:
+            observer_process.terminate()
+            await asyncio.wait_for(observer_process.wait(), timeout=3.0)
+            print(f"[asdaaas] Observer reaped (PID {observer_process.pid})")
+        except (asyncio.TimeoutError, ProcessLookupError):
+            observer_process.kill()
+            print(f"[asdaaas] Observer killed (PID {observer_process.pid})")
+
     # Unregister first -- if backend.shutdown() hangs and the process
     # gets killed, the agent should not appear as running.
     _unregister_running_agent(agent_name)

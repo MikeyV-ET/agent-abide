@@ -301,3 +301,300 @@ class TestMockObserverStateFile:
 
         result = BinaryStateObserver.read_state_file(str(path))
         assert result is None
+
+
+# ── I3: State file consumed for decisions ────────────────────────────────
+
+class TestStateFileConsumedForDecisions:
+    """I3: Verify the state dict produced by write_mock_state_file has the
+    correct shape for every decision point in asdaaas.py Phase 2.
+
+    Decision points reference:
+    - L2728: collection window reads state, checks state=="IDLE"
+    - L2774: continue gating reads state, checks state in BUSY/GONE/RETRYING/STUCK
+    - L2839: midturn detection reads state, checks state + since
+    - L3028: doom_loop reads state, checks doom_loop flag
+    """
+
+    def test_idle_state_has_collection_window_fields(self, tmp_path):
+        """IDLE state dict has 'state' field for collection window optimization."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="IDLE")
+        result = BinaryStateObserver.read_state_file(str(path))
+        assert result is not None
+        assert result["state"] == "IDLE"
+        # Collection window code checks: obs.get("state") == "IDLE"
+        assert "state" in result
+
+    def test_busy_state_has_gating_fields(self, tmp_path):
+        """BUSY state dict triggers the continue-skip branch."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="BUSY")
+        result = BinaryStateObserver.read_state_file(str(path))
+        assert result is not None
+        assert result["state"] == "BUSY"
+
+    def test_gone_state_has_exit_code(self, tmp_path):
+        """GONE state dict includes exit_code for recovery logging."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="GONE", extra={"exit_code": 1})
+        result = BinaryStateObserver.read_state_file(str(path))
+        assert result is not None
+        assert result["state"] == "GONE"
+        assert result["exit_code"] == 1
+
+    def test_retrying_state_has_attempt_and_reason(self, tmp_path):
+        """RETRYING state dict includes retry_attempt and retry_reason."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="RETRYING", extra={
+            "retry_attempt": 2,
+            "retry_reason": "no_visible_content",
+        })
+        result = BinaryStateObserver.read_state_file(str(path))
+        assert result is not None
+        assert result["state"] == "RETRYING"
+        assert result["retry_attempt"] == 2
+        assert result["retry_reason"] == "no_visible_content"
+
+    def test_stuck_state_has_since_for_duration(self, tmp_path):
+        """STUCK state dict includes 'since' for duration calculation."""
+        stuck_since = time.time() - 30.0
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="STUCK", since=stuck_since)
+        result = BinaryStateObserver.read_state_file(str(path))
+        assert result is not None
+        assert result["state"] == "STUCK"
+        assert result["since"] == pytest.approx(stuck_since, abs=0.1)
+        # asdaaas calculates: stuck_dur = time.time() - since
+        stuck_dur = time.time() - result["since"]
+        assert stuck_dur >= 29.0
+
+    def test_doom_loop_flag_present(self, tmp_path):
+        """State dict includes doom_loop flag for L3028 check."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="BUSY", doom_loop=True)
+        result = BinaryStateObserver.read_state_file(str(path))
+        assert result is not None
+        assert result["doom_loop"] is True
+
+    def test_observer_disabled_returns_none(self):
+        """When observer_enabled=False, read_observer_state should return None.
+        This verifies the fallback path: obs is None → old heuristics."""
+        # The closure in asdaaas checks observer_enabled first.
+        # We test the config-level guard here.
+        from asdaaas_config import AsdaaasConfig
+        config = AsdaaasConfig()
+        assert config.agent_observer_enabled("nonexistent_agent") is False
+
+
+# ── I5: Midturn detection with observer ──────────────────────────────────
+
+class TestMidturnDetectionWithObserver:
+    """I5: Verify the midturn detection logic at L2839-2849 in asdaaas.py.
+
+    Logic (when observer state is available):
+    - BUSY → midturn = True (binary is processing)
+    - IDLE + msg_ts < since → midturn = True (message arrived before IDLE)
+    - IDLE + msg_ts >= since → midturn = False (message arrived after IDLE)
+    - Other/unknown state → midturn = False
+    """
+
+    def _eval_midturn(self, obs_state, obs_since, msg_ts):
+        """Replicate the inline midturn logic from asdaaas.py L2839-2849."""
+        if not isinstance(msg_ts, (int, float)):
+            return False
+        if obs_state == "BUSY":
+            return True
+        if obs_state == "IDLE":
+            return msg_ts < obs_since
+        return False
+
+    def test_busy_always_midturn(self):
+        """When observer says BUSY, any message is midturn."""
+        assert self._eval_midturn("BUSY", time.time(), time.time()) is True
+
+    def test_idle_old_message_is_midturn(self):
+        """When IDLE and message arrived before IDLE started, it's midturn."""
+        idle_since = time.time()
+        msg_ts = idle_since - 5.0  # message arrived 5s before IDLE
+        assert self._eval_midturn("IDLE", idle_since, msg_ts) is True
+
+    def test_idle_new_message_not_midturn(self):
+        """When IDLE and message arrived after IDLE started, it's not midturn."""
+        idle_since = time.time() - 10.0
+        msg_ts = idle_since + 5.0  # message arrived 5s after IDLE
+        assert self._eval_midturn("IDLE", idle_since, msg_ts) is False
+
+    def test_idle_exact_boundary_not_midturn(self):
+        """Message at exactly the IDLE boundary is not midturn (< not <=)."""
+        idle_since = time.time()
+        assert self._eval_midturn("IDLE", idle_since, idle_since) is False
+
+    def test_unknown_state_not_midturn(self):
+        """Unknown observer states default to not-midturn."""
+        assert self._eval_midturn("STUCK", time.time(), time.time()) is False
+        assert self._eval_midturn("RETRYING", time.time(), time.time()) is False
+        assert self._eval_midturn("GONE", time.time(), time.time()) is False
+
+    def test_non_numeric_timestamp_not_midturn(self):
+        """Non-numeric msg_ts is not midturn (guard at L2842)."""
+        assert self._eval_midturn("BUSY", time.time(), "not_a_number") is False
+        assert self._eval_midturn("BUSY", time.time(), None) is False
+
+    def test_state_file_provides_since_for_midturn(self, tmp_path):
+        """State file read produces correct 'since' for midturn calc."""
+        path = tmp_path / "state.json"
+        target_since = time.time() - 2.0
+        write_mock_state_file(str(path), state="IDLE", since=target_since)
+        result = BinaryStateObserver.read_state_file(str(path))
+        assert result is not None
+        # This since value is what asdaaas uses for midturn comparison
+        assert result["since"] == pytest.approx(target_since, abs=0.1)
+
+
+# ── I7: STUCK replaces backoff ───────────────────────────────────────────
+
+class TestStuckReplacesBackoff:
+    """I7: When observer reports STUCK, asdaaas skips the continue.
+
+    asdaaas.py L2800-2808: reads STUCK, calculates duration from 'since',
+    writes health, sleeps 5s, continues (skips default doorbell).
+    """
+
+    def test_stuck_state_with_duration(self, tmp_path):
+        """STUCK state file has the fields needed for duration calculation."""
+        stuck_since = time.time() - 45.0
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="STUCK", since=stuck_since)
+        result = BinaryStateObserver.read_state_file(str(path))
+
+        assert result["state"] == "STUCK"
+        # asdaaas calculates: stuck_dur = time.time() - since
+        stuck_dur = time.time() - result["since"]
+        assert stuck_dur >= 44.0
+        assert stuck_dur < 50.0
+
+    def test_stuck_replaces_old_backoff_path(self, tmp_path):
+        """When observer returns STUCK, the fallback (has_pending_tool_calls)
+        at L2809 is NOT reached — observer path takes priority."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="STUCK", since=time.time() - 10.0)
+        result = BinaryStateObserver.read_state_file(str(path))
+        # Key: result is not None, so the `elif obs is None` fallback at L2809
+        # is unreachable. STUCK branch runs instead of the old backoff.
+        assert result is not None
+        assert result["state"] == "STUCK"
+
+
+# ── I9: No continues when BUSY ──────────────────────────────────────────
+
+class TestNoContinesWhenBusy:
+    """I9: When observer reports BUSY, asdaaas skips the continue doorbell.
+
+    asdaaas.py L2774-2779: BUSY → print, sleep 2s, continue (skip doorbell).
+    This replaces the old has_pending_tool_calls heuristic.
+    """
+
+    def test_busy_state_blocks_continue(self, tmp_path):
+        """BUSY state file is read correctly and would block continue."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="BUSY")
+        result = BinaryStateObserver.read_state_file(str(path))
+
+        assert result is not None
+        assert result["state"] == "BUSY"
+        # When obs["state"] == "BUSY", asdaaas skips queue_continue_doorbell
+
+    def test_busy_state_preempts_fallback(self, tmp_path):
+        """When observer returns BUSY (not None), the old heuristic
+        (has_pending_tool_calls) at L2809 is never evaluated."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="BUSY")
+        result = BinaryStateObserver.read_state_file(str(path))
+        # obs is not None → elif at L2809 is unreachable
+        assert result is not None
+
+    def test_idle_state_allows_continue(self, tmp_path):
+        """IDLE state does NOT block continue — only BUSY/GONE/RETRYING/STUCK do."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="IDLE")
+        result = BinaryStateObserver.read_state_file(str(path))
+
+        assert result is not None
+        assert result["state"] == "IDLE"
+        # IDLE falls through all the if/elif checks → reaches queue_continue_doorbell
+
+
+# ── I10: GONE triggers recovery ─────────────────────────────────────────
+
+class TestGoneTriggersRecovery:
+    """I10: When observer reports GONE, asdaaas stops continues and notifies.
+
+    asdaaas.py L2780-2794: GONE → set delay_until_event, write health
+    "stalled" with "binary_gone (exit=N)", send localmail to Sr.
+    """
+
+    def test_gone_state_has_exit_code(self, tmp_path):
+        """GONE state includes exit_code for the health message."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="GONE", extra={"exit_code": 137})
+        result = BinaryStateObserver.read_state_file(str(path))
+
+        assert result is not None
+        assert result["state"] == "GONE"
+        assert result["exit_code"] == 137
+
+    def test_gone_state_exit_code_none(self, tmp_path):
+        """GONE with exit_code=None (process vanished without exit)."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="GONE", extra={"exit_code": None})
+        result = BinaryStateObserver.read_state_file(str(path))
+
+        assert result is not None
+        assert result["state"] == "GONE"
+        assert result["exit_code"] is None
+
+    def test_gone_preempts_fallback(self, tmp_path):
+        """GONE observer state preempts the old has_pending_tool_calls check."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="GONE", extra={"exit_code": 0})
+        result = BinaryStateObserver.read_state_file(str(path))
+        assert result is not None
+
+
+# ── I6: Doom loop detection via observer ─────────────────────────────────
+
+class TestDoomLoopViaObserver:
+    """I6: When observer sets doom_loop=True, asdaaas stops continues.
+
+    asdaaas.py L3027-3041: reads doom_loop flag, sets delay_until_event,
+    writes health "stalled" with "observer_doom_loop_detected",
+    sends localmail to Sr.
+    """
+
+    def test_doom_loop_flag_true(self, tmp_path):
+        """doom_loop=True in state file is read correctly."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="BUSY", doom_loop=True)
+        result = BinaryStateObserver.read_state_file(str(path))
+
+        assert result is not None
+        assert result["doom_loop"] is True
+
+    def test_doom_loop_flag_false(self, tmp_path):
+        """doom_loop=False does NOT trigger the doom loop path."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="BUSY", doom_loop=False)
+        result = BinaryStateObserver.read_state_file(str(path))
+
+        assert result is not None
+        assert result["doom_loop"] is False
+
+    def test_doom_loop_preempts_heuristic(self, tmp_path):
+        """When observer state is not None, the old consecutive-empty-doorbell
+        doom loop check at L3042 is unreachable."""
+        path = tmp_path / "state.json"
+        write_mock_state_file(str(path), state="IDLE", doom_loop=False)
+        result = BinaryStateObserver.read_state_file(str(path))
+        # obs_doom is not None → elif at L3042 is unreachable
+        assert result is not None

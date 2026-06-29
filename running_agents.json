@@ -2,17 +2,17 @@
   "Cinco": {
     "home": "/home/eric/agents/Cinco"
   },
-  "Sr": {
-    "home": "/home/eric/agents/Sr"
-  },
-  "Trip": {
-    "home": "/home/eric/agents/Trip"
-  },
   "Q": {
     "home": "/home/eric/agents/Q"
   },
   "Jr": {
     "home": "/home/eric/agents/Jr"
+  },
+  "Trip": {
+    "home": "/home/eric/agents/Trip"
+  },
+  "Sr": {
+    "home": "/home/eric/agents/Sr"
   },
   "TestAgent": {
     "home": "/home/eric/agents/TestAgent"

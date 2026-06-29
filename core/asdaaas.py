@@ -2722,8 +2722,12 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     # a real message is always better than burning a turn on
                     # a continue doorbell.  3s balances responsiveness with
                     # message collection — matches typical human typing gap.
+                    # Observer optimization: if IDLE, reduce window to 1s (4 polls)
+                    # since the binary is done and we're just catching late arrivals.
+                    obs_cw = read_observer_state()
+                    cw_polls = 4 if (obs_cw is not None and obs_cw.get("state") == "IDLE") else 12
                     collected = False
-                    for _cw in range(12):  # 12 x 0.25s = 3s
+                    for _cw in range(cw_polls):  # 4 x 0.25s = 1s (observer) or 12 x 0.25s = 3s
                         await asyncio.sleep(0.25)
                         if has_pending_adapter_messages(agent_name, awareness):
                             collected = True
@@ -2764,9 +2768,44 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                         if delay_until_event or next_turn_delay > 0:
                             print(f"[asdaaas] Late delay command found — skipping continue")
                             continue
-                    # Don't queue continues while binary has open tool calls
+                    # Don't queue continues while binary is busy
                     # (issue_0041: stale continues during long tool calls).
-                    if backend.has_pending_tool_calls:
+                    obs = read_observer_state()
+                    if obs is not None:
+                        obs_st = obs.get("state")
+                        if obs_st == "BUSY":
+                            print(f"[asdaaas] Observer: binary BUSY — skipping continue")
+                            await asyncio.sleep(2.0)
+                            continue
+                        elif obs_st == "GONE":
+                            exit_code = obs.get("exit_code")
+                            print(f"[asdaaas] Observer: binary GONE (exit_code={exit_code}) — stopping continues")
+                            delay_until_event = True
+                            write_health(agent_name, "stalled", f"binary_gone (exit={exit_code})", total_tokens, context_window)
+                            try:
+                                from localmail import send_mail
+                                send_mail(
+                                    from_agent="asdaaas",
+                                    to_agent="Sr",
+                                    text=f"BINARY GONE: {agent_name} process died (exit_code={exit_code}). Stopping continues.",
+                                )
+                            except Exception:
+                                pass
+                            continue
+                        elif obs_st == "RETRYING":
+                            attempt = obs.get("retry_attempt", 0)
+                            reason = obs.get("retry_reason", "unknown")
+                            print(f"[asdaaas] Observer: binary RETRYING (attempt={attempt}, reason={reason}) — waiting")
+                            await asyncio.sleep(2.0)
+                            continue
+                        elif obs_st == "STUCK":
+                            since = obs.get("since", 0)
+                            stuck_dur = time.time() - since if since else 0
+                            print(f"[asdaaas] Observer: binary STUCK ({stuck_dur:.0f}s) — skipping continue")
+                            write_health(agent_name, "active", f"observer_stuck ({stuck_dur:.0f}s)", total_tokens, context_window)
+                            await asyncio.sleep(5.0)
+                            continue
+                    elif obs is None and backend.has_pending_tool_calls:
                         print(f"[asdaaas] Binary has pending tool calls — skipping continue")
                         await asyncio.sleep(2.0)
                         continue
@@ -2792,11 +2831,24 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 print(f"[asdaaas] Doorbells ({len(bells)}): {[b.get('id', '?') for b in bells]}")
 
             if in_room_msgs:
+                obs_midturn = read_observer_state()
                 for msg in in_room_msgs:
                     sender = msg.get("from", "unknown")
                     adapter = msg.get("adapter", "unknown")
                     text = msg.get("text", "").strip()
-                    midturn = _is_midturn_message(msg, last_response_ts, last_was_foreground, backend.last_activity_ts)
+                    if obs_midturn is not None:
+                        # Observer path: BUSY = midturn, IDLE since T = midturn if msg < T
+                        msg_ts = msg.get("_received_ts") or msg.get("ts")
+                        if not isinstance(msg_ts, (int, float)):
+                            midturn = False
+                        elif obs_midturn.get("state") == "BUSY":
+                            midturn = True
+                        elif obs_midturn.get("state") == "IDLE":
+                            midturn = msg_ts < obs_midturn.get("since", 0)
+                        else:
+                            midturn = False
+                    else:
+                        midturn = _is_midturn_message(msg, last_response_ts, last_was_foreground, backend.last_activity_ts)
                     flag = _midturn_flag(msg) if midturn else ""
                     prompt_parts.append(f"<{sender} (via {adapter}){flag}> {text}")
 
@@ -2946,7 +2998,8 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     detail = f"responded {len(result.speech)} chars"
                     if has_bells and has_msgs:
                         detail = f"coalesced response ({len(bells)} bells + {len(in_room_msgs)} msgs), {len(result.speech)} chars"
-                    write_health(agent_name, "active", detail, total_tokens, context_window)
+                    write_health(agent_name, "active", detail, total_tokens, context_window,
+                                 observer_state=read_observer_state())
                     # After responding to a user message with speech, default
                     # to waiting for agent's next delay command — unless the
                     # agent already wrote an explicit delay in the post-response
@@ -2970,8 +3023,23 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                             print(f"[asdaaas] Backoff: {backoff}s after {consecutive_empty_doorbell} consecutive empty doorbell responses")
                             next_turn_delay = backoff
 
-                        # Doom loop check
-                        if (consecutive_empty_doorbell >= CONTINUE_DOOM_CHECK_AFTER
+                        # Doom loop check — observer-first, heuristic fallback
+                        obs_doom = read_observer_state()
+                        if obs_doom is not None and obs_doom.get("doom_loop"):
+                            print(f"[asdaaas] *** OBSERVER: DOOM LOOP DETECTED for {agent_name} ***")
+                            print(f"[asdaaas]   Stopping continues.")
+                            delay_until_event = True
+                            write_health(agent_name, "stalled", "observer_doom_loop_detected", total_tokens, context_window)
+                            try:
+                                from localmail import send_mail
+                                send_mail(
+                                    from_agent="asdaaas",
+                                    to_agent="Sr",
+                                    text=f"DOOM LOOP (observer): {agent_name} doom loop detected. Stopping continues.",
+                                )
+                            except Exception:
+                                pass
+                        elif obs_doom is None and (consecutive_empty_doorbell >= CONTINUE_DOOM_CHECK_AFTER
                                 and consecutive_empty_doorbell % CONTINUE_DOOM_CHECK_AFTER == 0):
                             try:
                                 from fix_orphaned_tool_results import find_doom_loop_corruption, find_session_dir as _find_sd

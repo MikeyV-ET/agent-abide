@@ -90,13 +90,13 @@ Replace each heuristic with observer read, gated by `observer_enabled`:
 ### Phase 5: Remove old paths
 - Remove gated old code
 - Update the 1 mock scenario test
-- Delete `has_pending_tool_calls` from backend interface
+- Remove `has_pending_tool_calls` call sites from asdaaas (keep property on ABC for MockBinary/debugging)
 
 ## Config
 
 ```python
 # asdaaas_config.py
-observer_enabled: bool = True  # default True once validated
+observer_enabled: bool = False  # ship False, flip True after Phase 4 validation
 observer_state_file: str = "~/agents/{name}/asdaaas/binary_state.json"
 ```
 
@@ -108,6 +108,8 @@ observer_state_file: str = "~/agents/{name}/asdaaas/binary_state.json"
 | State file stale | TTL enforcement — expired = ignored |
 | Observer lags behind binary | 0.25s heartbeat is 4x faster than asdaaas needs |
 | Regression in decision-making | Config flag toggle, 24-48h validation period |
+| Session dir discovery | Backend tracks session dir internally — expose as property/param for observer spawn |
+| Phase 4 monitoring gap | Trip writes validation checklist: state file freshness, observer vs old heuristic comparison |
 
 ## Success Criteria
 

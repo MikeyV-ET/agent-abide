@@ -647,6 +647,10 @@ class MockBinary(AgentBackend):
         return self._session_id
 
     @property
+    def session_dir(self) -> Optional[Path]:
+        return self._session_dir
+
+    @property
     def model_id(self) -> str:
         return self._model_id
 

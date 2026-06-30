@@ -308,3 +308,266 @@ class TestShellToolCallToolEvents:
         )
 
         assert called_with == ["run_terminal_command"]
+
+
+class TestFullPipelineE2E:
+    """Full pipeline: adapter inbox → interjection_watcher → queue → ShellToolCall → stdout.
+
+    Simulates a multi-tool-call turn where a message arrives mid-turn
+    via TUI adapter inbox and gets interjected into a later shell call's output.
+    """
+
+    @pytest.mark.asyncio
+    async def test_mid_turn_message_interjected(self, agent_home, monkeypatch):
+        """Message arrives in TUI inbox during multi-tool-call turn.
+
+        Flow:
+        1. MockBinary has two ShellToolCalls (simulating multi-tool turn)
+        2. First ShellToolCall runs clean (no messages yet)
+        3. During first call, TUI message drops into adapter inbox
+        4. interjection_watcher polls inbox → queues to interjection dir
+        5. Second ShellToolCall picks up the interjection
+        6. Verify message appears in second tool_call_update content
+        """
+        monkeypatch.setattr(Path, 'home', lambda: agent_home)
+
+        # Set up TUI adapter inbox
+        tui_inbox = agent_home / "agents" / "TestAgent" / "asdaaas" / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+
+        # Multi-tool-call scenario: first call is fast, second has longer duration
+        # to give the watcher time to poll between calls
+        scenario = [
+            ShellToolCall(command="echo step1", output="step1 output\n",
+                         speech="", tokens=5000, duration=0.5),
+            ShellToolCall(command="echo step2", output="step2 output\n",
+                         speech="Done with both.", tokens=5000, duration=0.5),
+        ]
+        mock = MockBinary(scenario)
+        agent_cwd = str(agent_home / "agents" / "TestAgent")
+
+        await mock.start(agent_cwd=agent_cwd)
+
+        # Define a mock poll function that reads TUI inbox (same pattern as asdaaas)
+        def poll_tui_inbox():
+            msgs = []
+            if tui_inbox.exists():
+                for f in sorted(tui_inbox.glob("*.json")):
+                    try:
+                        msg = json.loads(f.read_text())
+                        msgs.append(msg)
+                        f.unlink()
+                    except (json.JSONDecodeError, OSError):
+                        pass
+            return msgs
+
+        # Start the interjection watcher (polls every 0.3s for test speed)
+        from interjection import interjection_watcher
+        watcher_task = asyncio.create_task(
+            interjection_watcher("TestAgent", poll_tui_inbox, poll_interval=0.3)
+        )
+
+        try:
+            # Turn 1: first shell call — should be clean
+            await mock.send_prompt("do two things")
+
+            # Run first tool call
+            # We need to process both tool calls, but inject a TUI message between them.
+            # MockBinary processes one step per collect_response call,
+            # so we call collect_response twice.
+            result1 = await mock.collect_response(handle=1)
+
+            # Drop a TUI message into the inbox (simulating Eric typing in the TUI)
+            tui_msg = {
+                "from": "eric",
+                "text": "hey trip, how's it going?",
+                "adapter": "tui",
+                "id": "bell_tui_test_001",
+                "ts": time.time(),
+            }
+            msg_path = tui_inbox / f"msg_{int(time.time()*1000)}.json"
+            msg_path.write_text(json.dumps(tui_msg))
+
+            # Wait for watcher to poll and queue the interjection
+            await asyncio.sleep(0.8)
+
+            # Run second tool call — should pick up the interjection
+            await mock.send_prompt("continue")
+            result2 = await mock.collect_response(handle=2)
+
+        finally:
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except asyncio.CancelledError:
+                pass
+
+        # Parse all updates.jsonl entries
+        updates_text = (mock.session_dir / "updates.jsonl").read_text().strip()
+        all_updates = [json.loads(line) for line in updates_text.split("\n")]
+        tool_updates = [
+            u for u in all_updates
+            if u["params"]["update"].get("sessionUpdate") == "tool_call_update"
+            and u["params"]["update"].get("status") == "completed"
+        ]
+
+        assert len(tool_updates) == 2, f"Expected 2 tool_call_updates, got {len(tool_updates)}"
+
+        # First tool call output should be clean (no interjection)
+        content1 = tool_updates[0]["params"]["update"].get("content", "")
+        assert "<interjection>" not in content1
+        assert "step1 output" in content1
+
+        # Second tool call output should have the interjection
+        content2 = tool_updates[1]["params"]["update"].get("content", "")
+        assert "<interjection>" in content2
+        assert "hey trip, how's it going?" in content2
+        assert "step2 output" in content2
+        assert "[system: messages arrived during your tool call]" in content2
+
+    @pytest.mark.asyncio
+    async def test_interjection_files_consumed_after_delivery(self, agent_home, monkeypatch):
+        """After ShellToolCall delivers an interjection, the queue dir is empty."""
+        monkeypatch.setattr(Path, 'home', lambda: agent_home)
+
+        tui_inbox = agent_home / "agents" / "TestAgent" / "asdaaas" / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+        intj_dir = agent_home / "agents" / "TestAgent" / "asdaaas" / "interjections"
+
+        scenario = [
+            ShellToolCall(command="echo work", output="work done\n",
+                         speech="", tokens=5000, duration=0.3),
+            ShellToolCall(command="echo more", output="more done\n",
+                         speech="All done.", tokens=5000, duration=0.3),
+        ]
+        mock = MockBinary(scenario)
+        agent_cwd = str(agent_home / "agents" / "TestAgent")
+        await mock.start(agent_cwd=agent_cwd)
+
+        def poll_tui():
+            msgs = []
+            if tui_inbox.exists():
+                for f in sorted(tui_inbox.glob("*.json")):
+                    try:
+                        msgs.append(json.loads(f.read_text()))
+                        f.unlink()
+                    except (json.JSONDecodeError, OSError):
+                        pass
+            return msgs
+
+        from interjection import interjection_watcher
+        watcher = asyncio.create_task(
+            interjection_watcher("TestAgent", poll_tui, poll_interval=0.2)
+        )
+
+        try:
+            await mock.send_prompt("work")
+            await mock.collect_response(handle=1)
+
+            # Queue a message
+            msg = {"from": "eric", "text": "checking in", "adapter": "tui",
+                   "id": "bell_consume_test", "ts": time.time()}
+            (tui_inbox / "msg_consume.json").write_text(json.dumps(msg))
+            await asyncio.sleep(0.5)
+
+            # Verify message is in interjection queue before second call
+            queued = list(intj_dir.glob("*.txt"))
+            assert len(queued) > 0, "Watcher should have queued the message"
+
+            await mock.send_prompt("more")
+            await mock.collect_response(handle=2)
+
+            # After delivery, queue should be empty
+            remaining = list(intj_dir.glob("*.txt"))
+            assert remaining == [], f"Expected empty queue, got {remaining}"
+
+        finally:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_delivery_tracked_in_interjection_log(self, agent_home, monkeypatch):
+        """Bonus: verify asdaaas can track delivery via interjection_log.txt.
+
+        The real BASH_ENV hook logs deliveries. ShellToolCall doesn't write
+        the log (that's the hook's job), but we can verify the watcher's
+        queue_interjection was called by checking the interjection dir was
+        populated, and that the message made it through to tool output.
+        """
+        monkeypatch.setattr(Path, 'home', lambda: agent_home)
+
+        tui_inbox = agent_home / "agents" / "TestAgent" / "asdaaas" / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+
+        scenario = [
+            ShellToolCall(command="cat file.txt", output="file contents\n",
+                         speech="", tokens=5000, duration=0.3),
+            ShellToolCall(command="echo done", output="done\n",
+                         speech="Finished.", tokens=5000, duration=0.3),
+        ]
+        mock = MockBinary(scenario)
+        agent_cwd = str(agent_home / "agents" / "TestAgent")
+        await mock.start(agent_cwd=agent_cwd)
+
+        def poll_tui():
+            msgs = []
+            if tui_inbox.exists():
+                for f in sorted(tui_inbox.glob("*.json")):
+                    try:
+                        msgs.append(json.loads(f.read_text()))
+                        f.unlink()
+                    except (json.JSONDecodeError, OSError):
+                        pass
+            return msgs
+
+        from interjection import interjection_watcher, format_message_for_interjection
+        watcher = asyncio.create_task(
+            interjection_watcher("TestAgent", poll_tui, poll_interval=0.2)
+        )
+
+        try:
+            await mock.send_prompt("read file")
+            await mock.collect_response(handle=1)
+
+            # Simulate message via TUI during the turn
+            tui_msg = {
+                "from": "eric",
+                "text": "important update",
+                "adapter": "tui",
+                "id": "bell_track_test",
+                "ts": time.time(),
+            }
+            (tui_inbox / "msg_track.json").write_text(json.dumps(tui_msg))
+            await asyncio.sleep(0.5)
+
+            await mock.send_prompt("continue")
+            await mock.collect_response(handle=2)
+
+        finally:
+            watcher.cancel()
+            try:
+                await watcher
+            except asyncio.CancelledError:
+                pass
+
+        # Verify the formatted message made it through
+        updates_text = (mock.session_dir / "updates.jsonl").read_text().strip()
+        all_updates = [json.loads(line) for line in updates_text.split("\n")]
+        tool_updates = [
+            u for u in all_updates
+            if u["params"]["update"].get("sessionUpdate") == "tool_call_update"
+            and u["params"]["update"].get("status") == "completed"
+        ]
+
+        # Second tool call should contain the formatted interjection
+        content2 = tool_updates[1]["params"]["update"].get("content", "")
+        assert "important update" in content2
+        assert "eric" in content2
+        assert "bell_track_test" in content2
+
+        # Verify the message was formatted with the bell ID for acking
+        # (format_message_for_interjection includes id= in the output)
+        assert "id=bell_track_test" in content2

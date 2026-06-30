@@ -5,6 +5,7 @@ via the BASH_ENV hook (interjection_hook.sh).
 """
 
 import os
+import secrets
 import time
 from pathlib import Path
 
@@ -25,7 +26,8 @@ def queue_interjection(agent_name: str, text: str) -> None:
     dest.mkdir(parents=True, exist_ok=True)
 
     timestamp_ms = int(time.time() * 1000)
-    target = dest / f"interject_{timestamp_ms}_{os.getpid()}.txt"
+    rand = secrets.token_hex(4)
+    target = dest / f"interject_{timestamp_ms}_{os.getpid()}_{rand}.txt"
     tmp = target.with_suffix(".tmp")
 
     tmp.write_text(text)

@@ -122,6 +122,37 @@ When a message arrives mid-turn (observer says BUSY), instead of queuing for nex
 | Message too large for tool result | Cap interjection size, queue remainder for next call |
 | 42% of tool calls are unreachable | Acceptable — next shell call catches overflow. Median gap is short. |
 
+## Prerequisite: Delivery Receipt for All Messages
+
+Interjection requires delivery receipt — confirming the binary actually processed a message. But this shouldn't be interjection-specific. Asdaaas should verify delivery of ALL messages (doorbells, adapter messages, continues) by checking updates.jsonl.
+
+**Current state:** Asdaaas fires a prompt and assumes the binary processed it. No verification. Can't distinguish "agent saw it, didn't ack" from "binary never processed it."
+
+**Proposed:** Asdaaas watches updates.jsonl for message content appearing in `user_message_chunk` events (normal delivery) or `tool_call_update.rawOutput.output_for_prompt` (interjection delivery). This gives three states:
+
+| State | Meaning | Action |
+|-------|---------|--------|
+| Delivered + acked | Agent saw it and confirmed | Clear doorbell |
+| Delivered + not acked | Binary processed it, agent didn't ack | Don't redeliver, flag |
+| Not delivered | Binary dropped it | Redeliver |
+
+The third case is invisible today. Delivery receipt must be implemented before interjection — it's the foundation for knowing whether fire-into-stdout actually worked.
+
+**Implementation:** Asdaaas already reads updates.jsonl for token counts and health. Extend this to track message content hashes against pending doorbells. When content appears in updates.jsonl, mark as delivered.
+
+## Interjection Ack Path
+
+Interjected messages carry doorbell IDs, same as normal delivery. The agent acks them via the standard command queue. Format:
+
+```
+<interjection>
+[system: messages arrived during your tool call]
+[localmail (id=bell_abc123, ts=Mon Jun 29 18:55 PDT) from Jr] hey, check this fix
+</interjection>
+```
+
+Same ID, same ack mechanism, different delivery channel. If the agent doesn't ack after delivery receipt confirms processing, the doorbell persists but is not redelivered (agent saw it but didn't ack yet — may ack later).
+
 ## Design Decisions (resolved with Sr, 2026-06-29)
 
 1. **stdout, not stderr.** Stdout is the guaranteed path into the model's context. Stderr goes to the binary's own logs — may or may not reach the model.
@@ -150,3 +181,4 @@ When a message arrives mid-turn (observer says BUSY), instead of queuing for nex
 - 2026-06-29: BASH_ENV mechanism discovered, proof of concept verified. Tool call distribution analyzed (58% shell, 42% binary-internal).
 - 2026-06-29: This design doc written.
 - 2026-06-29: Sr reviewed. Resolved all open questions: stdout, batch, fast empty path, observer as delivery switch, XML delimiters, AGENTS.md docs.
+- 2026-06-29: Eric review. Added delivery receipt as prerequisite (all messages, not just interjections). Added interjection ack path (carry doorbell IDs).

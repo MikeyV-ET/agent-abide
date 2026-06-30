@@ -448,3 +448,74 @@ class TestEnvSetup:
         # Should succeed silently (no messages queued)
         assert result.returncode == 0
         assert "<interjection>" not in result.stdout
+
+
+# ============================================================================
+# Post-turn drain: unconsumed messages folded into next turn
+# ============================================================================
+
+class TestDrainInterjectionQueue:
+    """Verify drain_interjection_queue() collects leftovers after a turn."""
+
+    def test_drain_empty_queue(self, tmp_path, monkeypatch):
+        """Empty queue returns empty list."""
+        from interjection import drain_interjection_queue
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert drain_interjection_queue("TestAgent") == []
+
+    def test_drain_nonexistent_dir(self, tmp_path, monkeypatch):
+        """No interjections dir at all returns empty list."""
+        from interjection import drain_interjection_queue
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert drain_interjection_queue("NoSuchAgent") == []
+
+    def test_drain_returns_messages(self, tmp_path, monkeypatch):
+        """Unconsumed messages are returned in sorted order."""
+        from interjection import queue_interjection, drain_interjection_queue
+        monkeypatch.setenv("HOME", str(tmp_path))
+        agent = "DrainTest"
+        queue_interjection(agent, "first message")
+        queue_interjection(agent, "second message")
+        result = drain_interjection_queue(agent)
+        assert len(result) == 2
+        assert "first message" in result
+        assert "second message" in result
+
+    def test_drain_removes_files(self, tmp_path, monkeypatch):
+        """After drain, queue dir is empty."""
+        from interjection import queue_interjection, drain_interjection_queue, interjection_dir
+        monkeypatch.setenv("HOME", str(tmp_path))
+        agent = "DrainClean"
+        queue_interjection(agent, "leftover")
+        drain_interjection_queue(agent)
+        remaining = list(interjection_dir(agent).glob("*.txt"))
+        assert remaining == []
+
+    def test_drain_after_hook_consumed(self, tmp_path, monkeypatch):
+        """If hook already consumed everything, drain returns empty."""
+        from interjection import queue_interjection, drain_interjection_queue, interjection_dir
+        monkeypatch.setenv("HOME", str(tmp_path))
+        agent = "HookFirst"
+        queue_interjection(agent, "will be consumed by hook")
+
+        # Simulate hook consuming: delete the files
+        for f in interjection_dir(agent).glob("*.txt"):
+            f.unlink()
+
+        assert drain_interjection_queue(agent) == []
+
+    def test_drain_partial_consumption(self, tmp_path, monkeypatch):
+        """Hook consumed some, drain gets the rest."""
+        from interjection import queue_interjection, drain_interjection_queue, interjection_dir
+        monkeypatch.setenv("HOME", str(tmp_path))
+        agent = "Partial"
+        queue_interjection(agent, "consumed by hook")
+        queue_interjection(agent, "arrived after last tool call")
+
+        # Simulate hook consuming only the first
+        files = sorted(interjection_dir(agent).glob("*.txt"))
+        files[0].unlink()
+
+        result = drain_interjection_queue(agent)
+        assert len(result) == 1
+        assert result[0] == "arrived after last tool call"

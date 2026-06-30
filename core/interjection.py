@@ -32,3 +32,27 @@ def queue_interjection(agent_name: str, text: str) -> None:
 
     tmp.write_text(text)
     tmp.rename(target)
+
+
+def drain_interjection_queue(agent_name: str) -> list[str]:
+    """Drain any unconsumed messages from the interjection queue.
+
+    Called by asdaaas during post-response processing. Returns the text
+    of each unconsumed message and removes the files. Messages left in
+    the queue were queued after the last shell tool call — the hook
+    never had a chance to deliver them.
+
+    Returns an empty list if the queue is empty or doesn't exist.
+    """
+    d = interjection_dir(agent_name)
+    if not d.exists():
+        return []
+
+    messages = []
+    for f in sorted(d.glob("*.txt")):
+        try:
+            messages.append(f.read_text())
+            f.unlink()
+        except (OSError, FileNotFoundError):
+            pass
+    return messages

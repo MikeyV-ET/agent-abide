@@ -129,6 +129,24 @@ class SplitCommandWriter:
     late_commands: list = field(default_factory=list)
 
 
+@dataclass
+class ShellToolCall:
+    """Simulate a run_terminal_command that checks the interjection queue.
+
+    Mimics the BASH_ENV hook behavior: before producing output, checks
+    ~/agents/{agent_name}/asdaaas/interjections/ for .txt files and
+    prepends them in the same <interjection> block format as the real hook.
+
+    This enables E2E tests of the full interjection pipeline without
+    spawning real subprocesses.
+    """
+    command: str = "echo hello"
+    output: str = "hello\n"
+    speech: str = "Done."
+    tokens: int = 5000
+    duration: float = 0.5  # simulated tool call duration
+
+
 # ---------------------------------------------------------------------------
 # MockBinary
 # ---------------------------------------------------------------------------
@@ -293,6 +311,8 @@ class MockBinary(AgentBackend):
             return await self._do_slow(step, on_speech_chunk, on_meta, cancel_event)
         elif isinstance(step, SplitCommandWriter):
             return await self._do_split_command(step, on_speech_chunk, on_meta, cancel_event)
+        elif isinstance(step, ShellToolCall):
+            return await self._do_shell_tool_call(step, on_speech_chunk, on_meta, cancel_event, on_tool_call)
         else:
             raise ValueError(f"Unknown scenario step type: {type(step)}")
 
@@ -536,6 +556,82 @@ class MockBinary(AgentBackend):
             "title": "wait_commands_or_subagents completed",
         }, step.tokens)
 
+        self._write_speech(step.speech, step.tokens)
+
+        if on_speech_chunk and step.speech:
+            on_speech_chunk(step.speech)
+        if on_meta:
+            on_meta(step.tokens)
+
+        return ResponseResult(
+            speech=step.speech, thoughts="",
+            total_tokens=step.tokens,
+            model_id=self._model_id,
+            stop_reason="completed",
+        )
+
+    async def _do_shell_tool_call(self, step: ShellToolCall, on_speech_chunk, on_meta, cancel_event, on_tool_call=None):
+        """Simulate run_terminal_command with BASH_ENV interjection queue check.
+
+        Mimics the real flow: tool_call event → check interjection queue →
+        prepend messages to output → tool_call_update with result → speech.
+        """
+        if cancel_event and cancel_event.is_set():
+            raise TurnCancelled("cancel_event set")
+
+        tool_id = f"shell_{uuid.uuid4().hex[:8]}"
+
+        # Write tool_call (Pending)
+        self._pending_tool_calls.add(tool_id)
+        self._write_update_with_meta({
+            "sessionUpdate": "tool_call",
+            "toolCallId": tool_id,
+            "title": "run_terminal_command",
+            "rawInput": {"command": step.command},
+        }, step.tokens)
+
+        if on_tool_call:
+            on_tool_call("run_terminal_command")
+
+        # Simulate command execution time
+        await asyncio.sleep(step.duration)
+
+        # Check interjection queue — same logic as interjection_hook.sh
+        interjection_prefix = ""
+        if self._agent_cwd:
+            intj_dir = Path(self._agent_cwd) / "asdaaas" / "interjections"
+            if intj_dir.exists():
+                txt_files = sorted(intj_dir.glob("*.txt"))
+                if txt_files:
+                    lines = []
+                    for f in txt_files:
+                        try:
+                            lines.append(f.read_text())
+                            f.unlink()
+                        except (OSError, FileNotFoundError):
+                            pass
+                    if lines:
+                        interjection_prefix = (
+                            "<interjection>\n"
+                            "[system: messages arrived during your tool call]\n"
+                            + "".join(lines)
+                            + "</interjection>\n"
+                        )
+
+        # Combine interjection prefix with tool output
+        combined_output = interjection_prefix + step.output
+
+        # Write tool_call_update with result
+        self._pending_tool_calls.discard(tool_id)
+        self._write_update_with_meta({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": tool_id,
+            "status": "completed",
+            "title": f"run_terminal_command completed",
+            "content": combined_output,
+        }, step.tokens)
+
+        # Write speech
         self._write_speech(step.speech, step.tokens)
 
         if on_speech_chunk and step.speech:

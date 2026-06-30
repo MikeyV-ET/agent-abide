@@ -17,6 +17,7 @@ Speaks the grok JSON-RPC 2.0 stdio protocol:
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable, IO, Optional
@@ -257,7 +258,9 @@ class GrokBackend(AgentBackend):
                     allow_rules: Optional[list[str]] = None,
                     deny_rules: Optional[list[str]] = None,
                     permission_mode: Optional[str] = None,
-                    reasoning_effort: Optional[str] = None) -> str:
+                    reasoning_effort: Optional[str] = None,
+                    interjection_enabled: bool = False,
+                    agent_name: Optional[str] = None) -> str:
         # Top-level grok flags go before "agent stdio"
         cmd = [self._grok_binary]
         if sandbox:
@@ -275,12 +278,20 @@ class GrokBackend(AgentBackend):
             cmd.extend(["--reasoning-effort", reasoning_effort])
         cmd.append("stdio")
 
+        # Set up environment — interjection via BASH_ENV if enabled
+        proc_env = None
+        if interjection_enabled and agent_name:
+            hook_path = Path(__file__).parent / "interjection_hook.sh"
+            if hook_path.exists():
+                proc_env = {**os.environ, "BASH_ENV": str(hook_path), "AGENT_NAME": agent_name}
+
         self._proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=agent_cwd,
+            env=proc_env,
         )
 
         # Initialize JSON-RPC

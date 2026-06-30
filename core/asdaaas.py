@@ -2057,10 +2057,13 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     print(f"[asdaaas] Starting backend: {type(backend).__name__}")
     _log_startup_event(agent_name, "backend_start", "ok", type(backend).__name__)
     try:
+        interjection_enabled = config.agent_interjection_enabled(agent_name) if config else False
         sid = await backend.start(agent_cwd, model=model, session_id=session_id, yolo=agent_yolo,
                                   sandbox=agent_sandbox, allow_rules=agent_allow_rules,
                                   deny_rules=agent_deny_rules, permission_mode=agent_permission_mode,
-                                  reasoning_effort=agent_reasoning_effort)
+                                  reasoning_effort=agent_reasoning_effort,
+                                  interjection_enabled=interjection_enabled,
+                                  agent_name=agent_name)
     except Exception as e:
         _log_startup_event(agent_name, "backend_start", "fail", str(e)[:200])
         raise

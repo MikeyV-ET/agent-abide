@@ -870,7 +870,7 @@ class ToolCallPanel(Static):
         self.tool_kind = kind
         self.tool_status = "running"
         self.tool_output = ""
-        self.border_title = title
+        self.border_title = title.replace("[", "\\[")
         self._collapsed = False
 
     def set_status(self, status: str):

@@ -25,7 +25,8 @@
       "session": "019d1ec1-0748-7b22-b4c2-6a6095a28b74",
       "home": "/home/eric/agents/Trip",
       "short_id": "8b74",
-      "observer_enabled": true
+      "observer_enabled": true,
+      "interjection_enabled": true
     },
     "Q": {
       "session": "019e1dbe-6874-7d00-bbe1-760a77a26e7e",

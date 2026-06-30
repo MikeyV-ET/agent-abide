@@ -368,3 +368,83 @@ class TestIntegration:
         # Message should be consumed
         remaining = list(agents_interject.glob("*.txt"))
         assert remaining == [], f"Message not consumed: {[f.name for f in remaining]}"
+
+
+# ============================================================================
+# Config: interjection_enabled flag
+# ============================================================================
+
+class TestInterjectionConfig:
+    """Config flag mirrors observer_enabled pattern."""
+
+    def test_default_disabled(self):
+        """interjection_enabled defaults to False for unknown agents."""
+        from asdaaas_config import AsdaaasConfig
+        config = AsdaaasConfig.__new__(AsdaaasConfig)
+        config._agents = {}
+        assert config.agent_interjection_enabled("nonexistent") is False
+
+    def test_explicitly_enabled(self):
+        """interjection_enabled=True in agent config returns True."""
+        from asdaaas_config import AsdaaasConfig
+        config = AsdaaasConfig.__new__(AsdaaasConfig)
+        config._agents = {"TestAgent": {"interjection_enabled": True}}
+        assert config.agent_interjection_enabled("TestAgent") is True
+
+    def test_explicitly_disabled(self):
+        """interjection_enabled=False returns False."""
+        from asdaaas_config import AsdaaasConfig
+        config = AsdaaasConfig.__new__(AsdaaasConfig)
+        config._agents = {"TestAgent": {"interjection_enabled": False}}
+        assert config.agent_interjection_enabled("TestAgent") is False
+
+    def test_missing_key_defaults_false(self):
+        """Agent exists but no interjection_enabled key => False."""
+        from asdaaas_config import AsdaaasConfig
+        config = AsdaaasConfig.__new__(AsdaaasConfig)
+        config._agents = {"TestAgent": {"model": "some-model"}}
+        assert config.agent_interjection_enabled("TestAgent") is False
+
+
+# ============================================================================
+# Env setup: BASH_ENV + AGENT_NAME in binary spawn
+# ============================================================================
+
+class TestEnvSetup:
+    """Verify the contract for env vars in the binary subprocess.
+
+    These tests define what Sr needs to implement in grok_backend.py:
+    when interjection_enabled=True, the binary subprocess must receive
+    BASH_ENV and AGENT_NAME in its environment.
+
+    Location in grok_backend.py: create_subprocess_exec at ~L278.
+    Currently passes no env= arg (inherits parent env).
+    Change: env={**os.environ, "BASH_ENV": ..., "AGENT_NAME": ...}
+    when interjection_enabled.
+    """
+
+    def test_hook_script_exists(self):
+        """The hook script must exist at the expected path."""
+        assert HOOK_SCRIPT.exists(), f"Hook script not found at {HOOK_SCRIPT}"
+        assert HOOK_SCRIPT.stat().st_size > 0
+
+    def test_hook_script_executable_as_source(self):
+        """Hook script can be sourced by bash (no syntax errors)."""
+        result = subprocess.run(
+            ["/bin/bash", "-n", str(HOOK_SCRIPT)],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, f"Syntax error: {result.stderr}"
+
+    def test_bash_env_mechanism_works(self):
+        """BASH_ENV is sourced by non-interactive bash before command execution."""
+        # This is the fundamental mechanism. If this fails, the whole
+        # interjection system won't work.
+        result = subprocess.run(
+            ["/bin/bash", "-c", "true"],
+            env={**os.environ, "BASH_ENV": str(HOOK_SCRIPT)},
+            capture_output=True, text=True, timeout=5,
+        )
+        # Should succeed silently (no messages queued)
+        assert result.returncode == 0
+        assert "<interjection>" not in result.stdout

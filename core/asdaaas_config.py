@@ -202,6 +202,10 @@ class AsdaaasConfig:
         """Whether the binary state observer sidecar is enabled for this agent."""
         return self._agents.get(agent_name, {}).get("observer_enabled", False)
 
+    def agent_interjection_enabled(self, agent_name: str) -> bool:
+        """Whether mid-turn message interjection via BASH_ENV is enabled for this agent."""
+        return self._agents.get(agent_name, {}).get("interjection_enabled", False)
+
     def agent_observer_state_file(self, agent_name: str) -> Path:
         """Path to the observer's state file for this agent."""
         return self.agent_asdaaas_dir(agent_name) / "binary_state.json"

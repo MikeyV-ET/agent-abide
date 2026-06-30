@@ -30,6 +30,13 @@ if [ -d "$_intj_dir" ] && compgen -G "$_intj_dir/*.txt" > /dev/null 2>&1; then
             echo "[system: messages arrived during your tool call]"
             cat "$_intj_tmp"/*.txt
             echo "</interjection>"
+
+            # Log delivery for diagnostics
+            _intj_log="$HOME/agents/$AGENT_NAME/asdaaas/interjection_log.txt"
+            _intj_count=$(ls -1 "$_intj_tmp"/*.txt 2>/dev/null | wc -l)
+            _intj_snippet=$(head -c 200 "$_intj_tmp"/*.txt 2>/dev/null | tr '\n' ' ')
+            echo "$(date '+%Y-%m-%d %H:%M:%S %Z') delivered=$_intj_count snippet=\"$_intj_snippet\"" >> "$_intj_log" 2>/dev/null
+            unset _intj_log _intj_count _intj_snippet
         fi
 
         rm -rf "$_intj_tmp"

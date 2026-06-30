@@ -226,6 +226,24 @@ class TestHookDelivery:
         )
 
 
+    def test_delivery_logged(self, agent_env):
+        """Hook logs delivery to interjection_log.txt for diagnostics."""
+        queue_file(agent_env["interject_dir"], "interject_001.txt", "logged message")
+        run_hook(agent_env["env"])
+
+        log_path = agent_env["home"] / "agents" / agent_env["agent_name"] / "asdaaas" / "interjection_log.txt"
+        assert log_path.exists(), "interjection_log.txt not created"
+        log_content = log_path.read_text()
+        assert "delivered=1" in log_content
+        assert "logged message" in log_content
+
+    def test_no_log_on_empty_queue(self, agent_env):
+        """No log entry when queue is empty (zero overhead)."""
+        run_hook(agent_env["env"])
+        log_path = agent_env["home"] / "agents" / agent_env["agent_name"] / "asdaaas" / "interjection_log.txt"
+        assert not log_path.exists(), "Log should not be created when nothing was delivered"
+
+
 # ============================================================================
 # Queue function tests (Python unit tests)
 # ============================================================================

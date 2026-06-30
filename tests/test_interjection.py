@@ -539,3 +539,147 @@ class TestDrainInterjectionQueue:
         result = drain_interjection_queue(agent)
         assert len(result) == 1
         assert result[0] == "arrived after last tool call"
+
+
+# ============================================================================
+# Message formatting for interjection
+# ============================================================================
+
+class TestFormatMessageForInterjection:
+    """Verify message formatting matches doorbell format with IDs."""
+
+    def test_tui_message_format(self):
+        """TUI messages include sender, adapter, and bell ID."""
+        from interjection import format_message_for_interjection
+        msg = {"from": "eric", "adapter": "tui", "text": "check this", "id": "bell_test123"}
+        result = format_message_for_interjection(msg)
+        assert "eric" in result
+        assert "tui" in result
+        assert "bell_test123" in result
+        assert "check this" in result
+
+    def test_localmail_format(self):
+        """Localmail uses 'from sender' format."""
+        from interjection import format_message_for_interjection
+        msg = {"from": "Sr", "adapter": "localmail", "text": "fix is ready", "id": "bell_lm456"}
+        result = format_message_for_interjection(msg)
+        assert "localmail" in result
+        assert "from Sr" in result
+        assert "bell_lm456" in result
+        assert "fix is ready" in result
+
+    def test_missing_id_generates_one(self):
+        """Messages without an ID get an auto-generated bell_ ID."""
+        from interjection import format_message_for_interjection
+        msg = {"from": "eric", "adapter": "tui", "text": "hello"}
+        result = format_message_for_interjection(msg)
+        assert "bell_" in result
+
+    def test_irc_message_format(self):
+        """IRC messages use standard format."""
+        from interjection import format_message_for_interjection
+        msg = {"from": "Q", "adapter": "irc", "text": "done", "id": "bell_irc789"}
+        result = format_message_for_interjection(msg)
+        assert "Q" in result
+        assert "irc" in result
+        assert "bell_irc789" in result
+
+
+# ============================================================================
+# Watcher: async task that routes inbox messages to interjection queue
+# ============================================================================
+
+class TestInterjectionWatcher:
+    """Verify the async watcher routes messages to the queue."""
+
+    @pytest.mark.asyncio
+    async def test_watcher_routes_message(self, tmp_path, monkeypatch):
+        """Watcher polls, finds a message, queues it for interjection."""
+        import asyncio
+        from interjection import interjection_watcher, interjection_dir
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        agent = "WatchTest"
+
+        messages_to_deliver = [
+            [{"from": "eric", "adapter": "tui", "text": "mid-turn hello", "id": "bell_w1"}],
+            [],  # second poll returns nothing
+        ]
+        call_count = [0]
+
+        def mock_poll():
+            if call_count[0] < len(messages_to_deliver):
+                result = messages_to_deliver[call_count[0]]
+                call_count[0] += 1
+                return result
+            return []
+
+        task = asyncio.create_task(interjection_watcher(agent, mock_poll, poll_interval=0.05))
+        await asyncio.sleep(0.15)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        d = interjection_dir(agent)
+        files = list(d.glob("*.txt"))
+        assert len(files) == 1
+        content = files[0].read_text()
+        assert "mid-turn hello" in content
+        assert "bell_w1" in content
+
+    @pytest.mark.asyncio
+    async def test_watcher_cancels_cleanly(self, tmp_path, monkeypatch):
+        """Watcher exits cleanly on cancel without partial state."""
+        import asyncio
+        from interjection import interjection_watcher, interjection_dir
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        agent = "CancelTest"
+
+        task = asyncio.create_task(interjection_watcher(agent, lambda: [], poll_interval=0.05))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # No partial files left
+        d = interjection_dir(agent)
+        assert not d.exists() or list(d.glob("*.tmp")) == []
+
+    @pytest.mark.asyncio
+    async def test_watcher_multiple_messages(self, tmp_path, monkeypatch):
+        """Watcher handles multiple messages in one poll."""
+        import asyncio
+        from interjection import interjection_watcher, interjection_dir
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        agent = "MultiMsg"
+
+        def mock_poll():
+            mock_poll.called += 1
+            if mock_poll.called == 1:
+                return [
+                    {"from": "eric", "adapter": "tui", "text": "msg1", "id": "bell_m1"},
+                    {"from": "Sr", "adapter": "localmail", "text": "msg2", "id": "bell_m2"},
+                ]
+            return []
+        mock_poll.called = 0
+
+        task = asyncio.create_task(interjection_watcher(agent, mock_poll, poll_interval=0.05))
+        await asyncio.sleep(0.15)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        d = interjection_dir(agent)
+        files = list(d.glob("*.txt"))
+        assert len(files) == 2
+        contents = {f.read_text() for f in files}
+        assert any("msg1" in c for c in contents)
+        assert any("msg2" in c for c in contents)

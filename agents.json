@@ -37,7 +37,9 @@
       "session": "019de4e1-3074-7af2-988f-5a224239893f",
       "home": "/home/eric/agents/Jr",
       "short_id": "893f",
-      "model": "sxs-claude-opus-4-6"
+      "model": "sxs-claude-opus-4-6",
+      "observer_enabled": true,
+      "interjection_enabled": true
     },
     "Squiggy": {
       "session": "019e273b-8018-7a82-9390-f766a66ffd6a",

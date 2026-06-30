@@ -56,3 +56,51 @@ def drain_interjection_queue(agent_name: str) -> list[str]:
         except (OSError, FileNotFoundError):
             pass
     return messages
+
+
+def format_message_for_interjection(msg: dict) -> str:
+    """Format an adapter message dict for interjection delivery.
+
+    Produces the same format agents see in doorbells, with ID for acking:
+      [sender (via adapter) (id=bell_xxx, ts=...) ] message text
+
+    For localmail: [localmail (id=bell_xxx, ts=...) from sender] text
+    """
+    import time as _time
+
+    text = msg.get("text", "").strip()
+    sender = msg.get("from", "unknown")
+    adapter = msg.get("adapter", "unknown")
+    bell_id = msg.get("id", f"bell_{secrets.token_hex(4)}")
+    ts = _time.strftime("%a %b %d %H:%M %Z")
+
+    if adapter == "localmail":
+        return f"[localmail (id={bell_id}, ts={ts}) from {sender}] {text}"
+    else:
+        return f"[{sender} (via {adapter}) (id={bell_id}, ts={ts})] {text}"
+
+
+async def interjection_watcher(agent_name: str, poll_fn, poll_interval: float = 2.0):
+    """Poll for incoming messages during BUSY turns and route to interjection queue.
+
+    Args:
+        agent_name: Agent to queue interjections for.
+        poll_fn: Callable that returns list of message dicts (destructive poll).
+                 In asdaaas this is: lambda: poll_adapter_inboxes(agent_name, awareness)
+        poll_interval: Seconds between polls.
+
+    Runs as an asyncio.Task alongside collect_response(). Caller cancels
+    when the turn completes.
+    """
+    import asyncio
+
+    try:
+        while True:
+            await asyncio.sleep(poll_interval)
+            msgs = poll_fn()
+            for msg in msgs:
+                text = format_message_for_interjection(msg)
+                queue_interjection(agent_name, text)
+                print(f"[asdaaas] interjection queued for {agent_name}: {msg.get('from', '?')} via {msg.get('adapter', '?')}")
+    except asyncio.CancelledError:
+        pass

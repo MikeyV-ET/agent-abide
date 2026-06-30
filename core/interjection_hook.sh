@@ -49,3 +49,7 @@ if [ -d "$_intj_dir" ] && compgen -G "$_intj_dir/*.txt" > /dev/null 2>&1; then
 fi
 
 unset _intj_dir _intj_tmp
+
+# Prevent child processes from sourcing this hook again.
+# Each new tool call gets a fresh BASH_ENV from the binary's env.
+unset BASH_ENV

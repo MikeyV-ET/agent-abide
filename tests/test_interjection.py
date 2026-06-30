@@ -467,6 +467,60 @@ class TestEnvSetup:
         assert result.returncode == 0
         assert "<interjection>" not in result.stdout
 
+    def test_script_invocation_skips_hook(self, tmp_path):
+        """Hook does NOT fire when bash runs a script (no -c flag).
+
+        This guards against pre_tool_use hooks (e.g. activity_logger.sh)
+        consuming interjection files before the actual tool call runs.
+        """
+        intj_dir = tmp_path / "agents" / "TestAgent" / "asdaaas" / "interjections"
+        intj_dir.mkdir(parents=True)
+        msg_file = intj_dir / "msg_test.txt"
+        msg_file.write_text("should survive script invocation\n")
+
+        # Write a trivial script that runs under BASH_ENV
+        script = tmp_path / "noop.sh"
+        script.write_text("#!/bin/bash\ntrue\n")
+
+        # Run as "bash script.sh" — no -c flag, $- will NOT contain 'c'
+        result = subprocess.run(
+            ["/bin/bash", str(script)],
+            env={
+                **os.environ,
+                "BASH_ENV": str(HOOK_SCRIPT),
+                "AGENT_NAME": "TestAgent",
+                "HOME": str(tmp_path),
+            },
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0
+        assert "<interjection>" not in result.stdout
+        # File must still exist — script invocation should not consume it
+        assert msg_file.exists(), "Hook consumed file during script invocation"
+
+    def test_bash_c_invocation_fires_hook(self, tmp_path):
+        """Hook DOES fire for bash -c invocations (the actual tool call)."""
+        intj_dir = tmp_path / "agents" / "TestAgent" / "asdaaas" / "interjections"
+        intj_dir.mkdir(parents=True)
+        msg_file = intj_dir / "msg_test.txt"
+        msg_file.write_text("should be delivered\n")
+
+        result = subprocess.run(
+            ["/bin/bash", "-c", "echo hello"],
+            env={
+                **os.environ,
+                "BASH_ENV": str(HOOK_SCRIPT),
+                "AGENT_NAME": "TestAgent",
+                "HOME": str(tmp_path),
+            },
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0
+        assert "<interjection>" in result.stdout
+        assert "should be delivered" in result.stdout
+        # File should be consumed
+        assert not msg_file.exists(), "Hook did not consume file during bash -c"
+
 
 # ============================================================================
 # Post-turn drain: unconsumed messages folded into next turn

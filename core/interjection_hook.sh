@@ -12,6 +12,11 @@
 # Guard: need AGENT_NAME to know which queue to check
 [ -n "$AGENT_NAME" ] || return 0 2>/dev/null || true
 
+# Only fire for bash -c invocations (actual tool call commands).
+# Other bash processes (e.g. hook scripts run as "bash script.sh") also
+# source BASH_ENV but should not consume interjection files.
+case "$-" in *c*) ;; *) return 0 2>/dev/null || true ;; esac
+
 _intj_dir="$HOME/agents/$AGENT_NAME/asdaaas/interjections"
 
 # Fast path: bail if no directory or no .txt files (all builtins, no forks)

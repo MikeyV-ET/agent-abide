@@ -2887,11 +2887,28 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 gaze = read_gaze(agent_name)
                 st = StreamingThoughts(agent_name, gaze)
 
+                # Interjection watcher: poll inboxes during turn, queue for BASH_ENV delivery
+                _ij_watcher = None
+                if interjection_enabled:
+                    from interjection import interjection_watcher
+                    _ij_watcher = asyncio.create_task(
+                        interjection_watcher(agent_name,
+                                             lambda: poll_adapter_inboxes(agent_name, awareness),
+                                             poll_interval=2.0))
+
                 result = await backend.collect_response(
                     msg_handle, on_meta=_on_streaming_meta,
                     on_speech_chunk=st.on_chunk,
                     on_tool_call=st.on_tool_call,
                     cancel_event=cancel_event)
+
+                if _ij_watcher:
+                    _ij_watcher.cancel()
+                    try:
+                        await _ij_watcher
+                    except asyncio.CancelledError:
+                        pass
+
                 timer.mark("prompt_complete")
 
                 total_tokens = backend.total_tokens

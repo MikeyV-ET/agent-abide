@@ -2978,6 +2978,16 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                 fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
                                 with os.fdopen(fd, "w") as f:
                                     json.dump(rc, f)
+                # Drain interjection queue: messages queued after the last
+                # shell tool call in the turn. Fold into doorbells for next prompt.
+                if interjection_enabled:
+                    from interjection import drain_interjection_queue
+                    leftover = drain_interjection_queue(agent_name)
+                    if leftover:
+                        for msg_text in leftover:
+                            queue_continue_doorbell(agent_name, text=msg_text)
+                        print(f"[asdaaas] Drained {len(leftover)} leftover interjection(s) → doorbells")
+
                 # Foreground if any in-room messages included; doorbell-only = non-foreground
                 last_was_foreground = has_msgs
 

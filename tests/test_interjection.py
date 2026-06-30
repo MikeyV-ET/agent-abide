@@ -512,9 +512,11 @@ class TestDrainInterjectionQueue:
         queue_interjection(agent, "consumed by hook")
         queue_interjection(agent, "arrived after last tool call")
 
-        # Simulate hook consuming only the first
-        files = sorted(interjection_dir(agent).glob("*.txt"))
-        files[0].unlink()
+        # Simulate hook consuming the "consumed" message (find by content, not sort order)
+        for f in interjection_dir(agent).glob("*.txt"):
+            if f.read_text() == "consumed by hook":
+                f.unlink()
+                break
 
         result = drain_interjection_queue(agent)
         assert len(result) == 1

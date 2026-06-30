@@ -116,18 +116,32 @@ When a message arrives mid-turn (observer says BUSY), instead of queuing for nex
 | Risk | Mitigation |
 |------|-----------|
 | Hook adds latency to every shell call | Keep hook minimal (one `ls` check). Benchmark. |
-| Message appears mid-output, confusing model | Use clear delimiters (`=== [asdaaas interjection] ===`) |
+| Message appears mid-output, confusing model | XML delimiters + system framing + AGENTS.md docs |
 | Race: two tool calls consume same message | Use atomic rename: write `.tmp`, rename to `.txt` |
 | Binary doesn't pass BASH_ENV to children | Verified: binary inherits env from parent, shells inherit from binary |
 | Message too large for tool result | Cap interjection size, queue remainder for next call |
 | 42% of tool calls are unreachable | Acceptable — next shell call catches overflow. Median gap is short. |
 
-## Open Questions
+## Design Decisions (resolved with Sr, 2026-06-29)
 
-1. **Should interjections go to stdout or stderr?** Stdout is cleaner (model sees it as tool result). Stderr might be captured separately by the binary.
-2. **Should we tag interjections with metadata?** Source adapter, timestamp, priority — or keep it simple?
-3. **Rate limiting?** If many messages arrive during one turn, should we batch or deliver one per tool call?
-4. **Model instruction?** Should AGENTS.md tell agents to watch for `[asdaaas interjection]` blocks and act on them?
+1. **stdout, not stderr.** Stdout is the guaranteed path into the model's context. Stderr goes to the binary's own logs — may or may not reach the model.
+
+2. **Batch delivery.** Drain the entire queue atomically each time the hook fires. Parallel tool calls could fragment a message across results otherwise. Read all, delete all, prepend all as one block.
+
+3. **Delimiter format.** Use XML-style delimiters with system framing:
+```
+<interjection>
+[system: messages arrived during your tool call]
+[localmail from Jr] ...
+[localmail from Q] ...
+</interjection>
+```
+
+4. **Fast empty path.** The hook runs on EVERY shell tool call. Empty-queue path must be ~1ms: `test -d` + `ls` check, no python, no JSON. Only do work when messages are present.
+
+5. **Observer as delivery mode switch.** Observer BUSY = queue for interjection (mid-turn delivery via BASH_ENV). Observer IDLE = deliver normally via doorbell (between-turn delivery). Clean separation: the observer is the single decision point for delivery mode.
+
+6. **AGENTS.md documentation.** Add a section to agent AGENTS.md explaining that `<interjection>` blocks may appear in tool call results and should be acted on. Models need to know this happens so they're not confused by unexpected content in tool output.
 
 ## History
 
@@ -135,3 +149,4 @@ When a message arrives mid-turn (observer says BUSY), instead of queuing for nex
 - 2026-06-29: Full x.ai/* extension surface probed — zero accessible in stdio or WebSocket. Interjection via binary API confirmed impossible.
 - 2026-06-29: BASH_ENV mechanism discovered, proof of concept verified. Tool call distribution analyzed (58% shell, 42% binary-internal).
 - 2026-06-29: This design doc written.
+- 2026-06-29: Sr reviewed. Resolved all open questions: stdout, batch, fast empty path, observer as delivery switch, XML delimiters, AGENTS.md docs.

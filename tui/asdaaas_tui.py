@@ -1287,8 +1287,21 @@ class AgentMessage(Static):
     def full_text(self) -> str:
         return self._text
 
+    @staticmethod
+    def _format_interjections(text: str) -> str:
+        """Replace <interjection> blocks with styled markdown blockquotes."""
+        import re
+        if "<interjection>" not in text:
+            return text
+        def _repl(m):
+            body = m.group(1).strip()
+            lines = body.split("\n")
+            quoted = "\n".join(f"> {line}" for line in lines)
+            return f"\n> 🔔 **[interjection]**\n{quoted}\n"
+        return re.sub(r"<interjection>\n?(.*?)</interjection>", _repl, text, flags=re.DOTALL)
+
     def render(self) -> RichMarkdown:
-        return RichMarkdown(self._text)
+        return RichMarkdown(self._format_interjections(self._text))
 
 
 class ThinkingBlock(Static):

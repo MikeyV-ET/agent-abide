@@ -949,6 +949,8 @@ class ToolCallPanel(Static):
             text = Text()
             text.append(f"  {title}", style=border_style)
             if self.tool_output:
+                if "<interjection>" in self.tool_output:
+                    text.append(" 🔔", style=f"bold {Gruvbox.BR_ORANGE}")
                 text.append("  ▸ click to expand", style=Gruvbox.DARK4)
             return text
 

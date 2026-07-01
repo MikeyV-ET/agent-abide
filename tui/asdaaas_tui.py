@@ -872,6 +872,7 @@ class ToolCallPanel(Static):
         self.tool_output = ""
         self.border_title = title.replace("[", "\\[")
         self._collapsed = False
+        self._mounted_interjections: set[str] = set()
 
     def set_status(self, status: str):
         self.tool_status = status
@@ -3521,8 +3522,10 @@ Type anything else to send a message to the agent.
                     if interjections:
                         content = self._content_scroll()
                         for msg in interjections:
-                            block = InterjectionBlock(msg)
-                            content.mount(block, before=panel)
+                            if msg not in panel._mounted_interjections:
+                                panel._mounted_interjections.add(msg)
+                                block = InterjectionBlock(msg)
+                                content.mount(block, before=panel)
                         content.refresh(layout=True)
                     panel.set_output(clean_text)
             elif item.get("type") == "diff":

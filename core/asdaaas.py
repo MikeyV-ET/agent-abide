@@ -2911,6 +2911,11 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                 timer.mark("prompt_complete")
 
+                # Delivery receipt check
+                if hasattr(backend, 'delivery_confirmed') and not backend.delivery_confirmed:
+                    print(f"[asdaaas] DELIVERY_FAILURE: agent={agent_name} prompt_len={len(prompt_text)} reason=no_user_message_chunk")
+                    write_health(agent_name, "active", "delivery_failure", total_tokens, context_window)
+
                 total_tokens = backend.total_tokens
                 turns_since_compaction += 1
                 # Track which bells were just delivered so the next iteration

@@ -111,6 +111,7 @@ class GrokBackend(AgentBackend):
         self._context_window: int = 200000
         self._last_activity_ts: float = 0.0  # epoch ts of most recent updates.jsonl frame
         self._pending_tool_calls: set[str] = set()  # toolCallIds with no completed update yet
+        self._delivery_confirmed: bool = False  # set True when user_message_chunk received
         self._rpc_id: int = 0
         self._grok_sessions_dir = grok_sessions_dir or Path.home() / ".grok" / "sessions"
         self._grok_binary = grok_binary or "grok"
@@ -363,6 +364,7 @@ class GrokBackend(AgentBackend):
         processes prompts sequentially, so receipt confirmation naturally
         serializes sends even if a previous turn is still in progress.
         """
+        self._delivery_confirmed = False
         await self._send(self._rpc_request("session/prompt", {
             "sessionId": self._session_id,
             "prompt": [{"type": "text", "text": text}],
@@ -401,6 +403,7 @@ class GrokBackend(AgentBackend):
                         print(f"[grok_backend] Receipt confirmed after {elapsed:.1f}s"
                               " (previous turn was still in progress)")
                     self._pending_tool_calls.clear()  # new turn — prior tools done
+                    self._delivery_confirmed = True
                     return  # Receipt confirmed
 
                 # Track tool calls from prior turn still visible in updates
@@ -433,6 +436,7 @@ class GrokBackend(AgentBackend):
             # turn_ended from a prior turn may appear — just consume it
             await asyncio.sleep(0.05)
 
+        self._delivery_confirmed = False
         print(f"[grok_backend] WARNING: receipt confirmation timed out after {timeout}s")
 
     async def collect_response(
@@ -796,6 +800,10 @@ class GrokBackend(AgentBackend):
                 elif su == "user_message_chunk":
                     self._pending_tool_calls.clear()
         return bool(self._pending_tool_calls)
+
+    @property
+    def delivery_confirmed(self) -> bool:
+        return self._delivery_confirmed
 
     @property
     def last_activity_ts(self) -> float:

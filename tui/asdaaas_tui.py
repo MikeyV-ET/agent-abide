@@ -890,31 +890,6 @@ class ToolCallPanel(Static):
 
     MAX_ACTIVE_LINES = 15  # Max lines shown for active/running tool panels
 
-    @staticmethod
-    def _highlight_interjections(content: "Text", raw_output: str) -> "Text":
-        """Re-render output with <interjection> blocks highlighted."""
-        import re
-        if "<interjection>" not in raw_output:
-            return content
-        # Rebuild text with interjection blocks styled distinctly
-        result = Text()
-        pos = 0
-        for m in re.finditer(r"<interjection>\n?(.*?)</interjection>", raw_output, re.DOTALL):
-            # Text before the interjection block
-            if m.start() > pos:
-                result.append(raw_output[pos:m.start()], style=Gruvbox.GRAY)
-            # Interjection block with highlight
-            result.append("🔔 ", style=Gruvbox.BR_ORANGE)
-            result.append(m.group(1).strip(), style=f"bold {Gruvbox.BR_ORANGE}")
-            result.append("\n", style=Gruvbox.GRAY)
-            pos = m.end()
-            if pos < len(raw_output) and raw_output[pos] == "\n":
-                pos += 1
-        # Text after last interjection
-        if pos < len(raw_output):
-            result.append(raw_output[pos:], style=Gruvbox.GRAY)
-        return result
-
     def on_click(self, event) -> None:
         """Toggle collapsed state on click."""
         self._collapsed = not self._collapsed
@@ -949,8 +924,6 @@ class ToolCallPanel(Static):
             text = Text()
             text.append(f"  {title}", style=border_style)
             if self.tool_output:
-                if "<interjection>" in self.tool_output:
-                    text.append(" 🔔", style=f"bold {Gruvbox.BR_ORANGE}")
                 text.append("  ▸ click to expand", style=Gruvbox.DARK4)
             return text
 
@@ -972,9 +945,6 @@ class ToolCallPanel(Static):
                 content = Text(display, style=Gruvbox.GRAY)
             else:
                 content = Text(output, style=Gruvbox.GRAY)
-
-            # Highlight <interjection> blocks with distinct styling
-            content = self._highlight_interjections(content, output)
         else:
             content = Text("(no output)", style=f"italic {Gruvbox.DARK4}")
 
@@ -1360,6 +1330,23 @@ class ThinkingBlock(Static):
             title=title_str,
             title_align="left",
             border_style=Gruvbox.DARK3,
+            padding=(0, 1),
+        )
+
+
+class InterjectionBlock(Static):
+    """Renders an interjection message as a distinct panel, styled like ThinkingBlock."""
+
+    def __init__(self, message: str, **kwargs):
+        super().__init__(**kwargs)
+        self._message = message
+
+    def render(self) -> Panel:
+        return Panel(
+            Text(self._message, style=Gruvbox.BR_ORANGE),
+            title="🔔 Interjection",
+            title_align="left",
+            border_style=Gruvbox.BR_ORANGE,
             padding=(0, 1),
         )
 
@@ -3380,6 +3367,27 @@ Type anything else to send a message to the agent.
             self._debug_log.write(f"{_t.time():.3f} {msg}\n")
             self._debug_log.flush()
 
+    @staticmethod
+    def _extract_interjections(text: str) -> tuple[str, list[str]]:
+        """Extract <interjection> blocks from text.
+
+        Returns (clean_text, list_of_interjection_messages).
+        """
+        import re
+        if "<interjection>" not in text:
+            return text, []
+        messages = []
+        for m in re.finditer(r"<interjection>\n?(.*?)</interjection>\n?", text, re.DOTALL):
+            body = m.group(1).strip()
+            if body:
+                # Strip the [system: ...] header line if present
+                lines = body.split("\n")
+                if lines and lines[0].startswith("[system:"):
+                    body = "\n".join(lines[1:]).strip()
+                messages.append(body)
+        clean = re.sub(r"<interjection>\n?(.*?)</interjection>\n?", "", text, flags=re.DOTALL)
+        return clean, messages
+
     def _dispatch_event(self, event: dict) -> None:
         """Dispatch an updates.jsonl event to the appropriate renderer."""
         update = event.get("params", {}).get("update", {})
@@ -3508,7 +3516,15 @@ Type anything else to send a message to the agent.
                 inner = item.get("content", {})
                 text = inner.get("text", "")
                 if text:
-                    panel.set_output(text)
+                    # Extract interjection blocks and mount as separate widgets
+                    clean_text, interjections = self._extract_interjections(text)
+                    if interjections:
+                        content = self._content_scroll()
+                        for msg in interjections:
+                            block = InterjectionBlock(msg)
+                            content.mount(block, before=panel)
+                        content.refresh(layout=True)
+                    panel.set_output(clean_text)
             elif item.get("type") == "diff":
                 # Show diff info
                 path = item.get("path", "")
@@ -3732,7 +3748,11 @@ Type anything else to send a message to the agent.
                             for item in content_list:
                                 if item.get("type") == "content":
                                     inner = item.get("content", {})
-                                    panel.tool_output = inner.get("text", "")
+                                    raw = inner.get("text", "")
+                                    clean, intj_msgs = self._extract_interjections(raw)
+                                    for msg in intj_msgs:
+                                        widgets_to_prepend.append(InterjectionBlock(msg))
+                                    panel.tool_output = clean
                             widgets_to_prepend.append(panel)
                         elif event_type == "hook_annotation":
                             message = update.get("message", "")

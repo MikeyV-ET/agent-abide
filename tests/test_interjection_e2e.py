@@ -18,7 +18,7 @@ import pytest
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 
-from mock_binary import MockBinary, ShellToolCall, NormalResponse
+from mock_binary import MockBinary, ShellToolCall, NormalResponse, Compaction
 from interjection import queue_interjection, interjection_dir, drain_interjection_queue
 
 
@@ -571,3 +571,281 @@ class TestFullPipelineE2E:
         # Verify the message was formatted with the bell ID for acking
         # (format_message_for_interjection includes id= in the output)
         assert "id=bell_track_test" in content2
+
+
+class TestPostCompactionOrientationInterjection:
+    """Regression test for 393e9b5: interjection watcher during post-compaction orientation turn.
+
+    Bug: The post-compaction orientation turn in main() called collect_response()
+    WITHOUT spawning an interjection watcher. Messages sent during orientation
+    were never queued, so ShellToolCall found an empty interjection directory.
+
+    Fix: Spawn interjection_watcher around orientation's collect_response, same
+    pattern as the regular turn path.
+
+    These tests reproduce the orientation turn's code path: send_prompt → spawn
+    watcher → collect_response (ShellToolCall) → cancel watcher. A TUI message
+    injected during the ShellToolCall's duration should be queued by the watcher
+    and picked up by ShellToolCall.
+    """
+
+    @pytest.mark.asyncio
+    async def test_interjection_during_orientation_turn(self, agent_home, monkeypatch):
+        """Message sent during post-compaction orientation turn is delivered via interjection."""
+        monkeypatch.setattr(Path, 'home', lambda: agent_home)
+
+        # Set up TUI adapter inbox (where the watcher polls)
+        tui_inbox = agent_home / "agents" / "TestAgent" / "asdaaas" / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+
+        # Scenario: Compaction → ShellToolCall (orientation turn)
+        # The ShellToolCall has enough duration for the watcher to poll
+        scenario = [
+            Compaction(tokens_before=150000, tokens_after=30000),
+            ShellToolCall(
+                command="cat lab_notebook.md",
+                output="## Boot protocol complete\n",
+                speech="Boot protocol followed.",
+                tokens=32000,
+                duration=1.0,  # enough time for watcher to poll
+            ),
+        ]
+        mock = MockBinary(scenario)
+        agent_cwd = str(agent_home / "agents" / "TestAgent")
+
+        await mock.start(agent_cwd=agent_cwd)
+
+        # Step 1: Initial turn triggers compaction
+        h1 = await mock.send_prompt("do work")
+        r1 = await mock.collect_response(h1)
+        # Compaction fires auto_compact_completed event
+        has_event, tokens_after, tokens_before = mock.pop_compaction_event()
+        assert has_event is True
+        assert tokens_after == 30000
+
+        # Step 2: Reproduce what main() does for orientation turn (393e9b5 fix)
+        # This is the exact code path from asdaaas.py L2258-2278
+
+        def poll_tui_inbox():
+            """Mock poll function — reads TUI inbox like poll_adapter_inboxes."""
+            msgs = []
+            if tui_inbox.exists():
+                for f in sorted(tui_inbox.glob("*.json")):
+                    try:
+                        msg = json.loads(f.read_text())
+                        msgs.append(msg)
+                        f.unlink()
+                    except (json.JSONDecodeError, OSError):
+                        pass
+            return msgs
+
+        orient_handle = await mock.send_prompt(
+            "[Compaction complete. Context reduced from 150000 to 30000 tokens. "
+            "You are resuming from a compacted context. Follow your boot protocol.]"
+        )
+
+        # Spawn interjection watcher (THE FIX — this was missing before 393e9b5)
+        from interjection import interjection_watcher
+        _ij_orient = asyncio.create_task(
+            interjection_watcher("TestAgent", poll_tui_inbox, poll_interval=0.2)
+        )
+
+        # Inject a TUI message DURING the orientation turn
+        # (simulates Eric typing while agent is booting)
+        tui_msg = {
+            "from": "eric",
+            "text": "hey, you back from compaction?",
+            "adapter": "tui",
+            "id": "bell_post_compact_001",
+            "ts": time.time(),
+        }
+        msg_path = tui_inbox / f"msg_{int(time.time()*1000)}.json"
+        msg_path.write_text(json.dumps(tui_msg))
+
+        # Small delay so watcher polls before ShellToolCall checks the queue
+        await asyncio.sleep(0.5)
+
+        # Collect orientation response (ShellToolCall checks interjection queue)
+        orient_result = await mock.collect_response(orient_handle)
+
+        # Cancel watcher (same as main())
+        _ij_orient.cancel()
+        try:
+            await _ij_orient
+        except asyncio.CancelledError:
+            pass
+
+        assert orient_result.speech == "Boot protocol followed."
+
+        # Verify interjection appeared in the ShellToolCall output
+        updates = (mock.session_dir / "updates.jsonl").read_text().strip().split("\n")
+        tool_updates = [
+            json.loads(line) for line in updates
+            if '"tool_call_update"' in line and '"completed"' in line
+        ]
+
+        # Should have exactly 1 completed tool_call_update (from ShellToolCall)
+        assert len(tool_updates) >= 1, f"Expected tool_call_update, got {len(tool_updates)}"
+
+        content = tool_updates[-1]["params"]["update"].get("content", "")
+        assert "<interjection>" in content, (
+            f"Interjection not found in orientation turn output. "
+            f"Content: {content[:200]}"
+        )
+        assert "hey, you back from compaction?" in content
+        assert "Boot protocol complete" in content  # original output preserved
+
+    @pytest.mark.asyncio
+    async def test_no_interjection_without_watcher(self, agent_home, monkeypatch):
+        """Without the watcher (pre-393e9b5 bug), messages are NOT delivered during orientation."""
+        monkeypatch.setattr(Path, 'home', lambda: agent_home)
+
+        tui_inbox = agent_home / "agents" / "TestAgent" / "asdaaas" / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+
+        scenario = [
+            Compaction(tokens_before=150000, tokens_after=30000),
+            ShellToolCall(
+                command="cat lab_notebook.md",
+                output="## Boot protocol complete\n",
+                speech="Boot done.",
+                tokens=32000,
+                duration=0.5,
+            ),
+        ]
+        mock = MockBinary(scenario)
+        agent_cwd = str(agent_home / "agents" / "TestAgent")
+
+        await mock.start(agent_cwd=agent_cwd)
+
+        # Compaction step
+        h1 = await mock.send_prompt("do work")
+        await mock.collect_response(h1)
+        mock.pop_compaction_event()
+
+        # Orientation turn WITHOUT watcher (the old broken path)
+        orient_handle = await mock.send_prompt("[Compaction complete...]")
+
+        # Inject TUI message — but no watcher running to queue it
+        tui_msg = {
+            "from": "eric",
+            "text": "are you there?",
+            "adapter": "tui",
+            "id": "bell_no_watcher_001",
+            "ts": time.time(),
+        }
+        (tui_inbox / f"msg_{int(time.time()*1000)}.json").write_text(json.dumps(tui_msg))
+
+        await asyncio.sleep(0.3)
+
+        orient_result = await mock.collect_response(orient_handle)
+
+        # Verify: NO interjection in output (message stuck in TUI inbox, never queued)
+        updates = (mock.session_dir / "updates.jsonl").read_text().strip().split("\n")
+        tool_updates = [
+            json.loads(line) for line in updates
+            if '"tool_call_update"' in line and '"completed"' in line
+        ]
+
+        content = tool_updates[-1]["params"]["update"].get("content", "")
+        assert "<interjection>" not in content, (
+            "Interjection should NOT appear without watcher — "
+            "message should still be in TUI inbox"
+        )
+        assert "Boot protocol complete" in content  # original output is there
+
+        # Message should still be in TUI inbox (unconsumed)
+        remaining = list(tui_inbox.glob("*.json"))
+        assert len(remaining) == 1, "Message should still be in TUI inbox"
+
+    @pytest.mark.asyncio
+    async def test_multiple_messages_during_orientation(self, agent_home, monkeypatch):
+        """Multiple messages arriving during orientation turn all get delivered."""
+        monkeypatch.setattr(Path, 'home', lambda: agent_home)
+
+        tui_inbox = agent_home / "agents" / "TestAgent" / "asdaaas" / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+
+        scenario = [
+            Compaction(tokens_before=150000, tokens_after=30000),
+            ShellToolCall(
+                command="date",
+                output="Wed Jul  1 07:00:00 PDT 2026\n",
+                speech="Checked the time.",
+                tokens=32000,
+                duration=1.5,  # longer duration for multiple watcher polls
+            ),
+        ]
+        mock = MockBinary(scenario)
+        agent_cwd = str(agent_home / "agents" / "TestAgent")
+
+        await mock.start(agent_cwd=agent_cwd)
+
+        h1 = await mock.send_prompt("work")
+        await mock.collect_response(h1)
+        mock.pop_compaction_event()
+
+        orient_handle = await mock.send_prompt("[Compaction complete...]")
+
+        from interjection import interjection_watcher
+        _ij = asyncio.create_task(
+            interjection_watcher("TestAgent", lambda: [
+                json.loads(f.read_text()) or f.unlink()
+                for f in sorted(tui_inbox.glob("*.json"))
+                if not (f.unlink() if False else False)
+            ] if tui_inbox.exists() else [], poll_interval=0.2)
+        )
+
+        # Actually, the lambda above is too clever. Use a proper poll function.
+        _ij.cancel()
+        try:
+            await _ij
+        except asyncio.CancelledError:
+            pass
+
+        def poll_tui():
+            msgs = []
+            if tui_inbox.exists():
+                for f in sorted(tui_inbox.glob("*.json")):
+                    try:
+                        msgs.append(json.loads(f.read_text()))
+                        f.unlink()
+                    except (json.JSONDecodeError, OSError):
+                        pass
+            return msgs
+
+        _ij = asyncio.create_task(
+            interjection_watcher("TestAgent", poll_tui, poll_interval=0.2)
+        )
+
+        # Send two messages with a small gap
+        msg1 = {"from": "eric", "text": "first message", "adapter": "tui",
+                "id": "bell_multi_001", "ts": time.time()}
+        (tui_inbox / "msg_001.json").write_text(json.dumps(msg1))
+
+        await asyncio.sleep(0.3)
+
+        msg2 = {"from": "Sr", "text": "second message via localmail", "adapter": "localmail",
+                "id": "bell_multi_002", "ts": time.time()}
+        (tui_inbox / "msg_002.json").write_text(json.dumps(msg2))
+
+        await asyncio.sleep(0.5)
+
+        orient_result = await mock.collect_response(orient_handle)
+
+        _ij.cancel()
+        try:
+            await _ij
+        except asyncio.CancelledError:
+            pass
+
+        updates = (mock.session_dir / "updates.jsonl").read_text().strip().split("\n")
+        tool_updates = [
+            json.loads(line) for line in updates
+            if '"tool_call_update"' in line and '"completed"' in line
+        ]
+
+        content = tool_updates[-1]["params"]["update"].get("content", "")
+        assert "<interjection>" in content
+        assert "first message" in content
+        assert "second message" in content

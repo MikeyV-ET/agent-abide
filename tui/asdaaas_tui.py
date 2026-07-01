@@ -890,6 +890,31 @@ class ToolCallPanel(Static):
 
     MAX_ACTIVE_LINES = 15  # Max lines shown for active/running tool panels
 
+    @staticmethod
+    def _highlight_interjections(content: "Text", raw_output: str) -> "Text":
+        """Re-render output with <interjection> blocks highlighted."""
+        import re
+        if "<interjection>" not in raw_output:
+            return content
+        # Rebuild text with interjection blocks styled distinctly
+        result = Text()
+        pos = 0
+        for m in re.finditer(r"<interjection>\n?(.*?)</interjection>", raw_output, re.DOTALL):
+            # Text before the interjection block
+            if m.start() > pos:
+                result.append(raw_output[pos:m.start()], style=Gruvbox.GRAY)
+            # Interjection block with highlight
+            result.append("🔔 ", style=Gruvbox.BR_ORANGE)
+            result.append(m.group(1).strip(), style=f"bold {Gruvbox.BR_ORANGE}")
+            result.append("\n", style=Gruvbox.GRAY)
+            pos = m.end()
+            if pos < len(raw_output) and raw_output[pos] == "\n":
+                pos += 1
+        # Text after last interjection
+        if pos < len(raw_output):
+            result.append(raw_output[pos:], style=Gruvbox.GRAY)
+        return result
+
     def on_click(self, event) -> None:
         """Toggle collapsed state on click."""
         self._collapsed = not self._collapsed
@@ -945,6 +970,9 @@ class ToolCallPanel(Static):
                 content = Text(display, style=Gruvbox.GRAY)
             else:
                 content = Text(output, style=Gruvbox.GRAY)
+
+            # Highlight <interjection> blocks with distinct styling
+            content = self._highlight_interjections(content, output)
         else:
             content = Text("(no output)", style=f"italic {Gruvbox.DARK4}")
 

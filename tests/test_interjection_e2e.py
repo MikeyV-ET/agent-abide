@@ -849,3 +849,301 @@ class TestPostCompactionOrientationInterjection:
         assert "<interjection>" in content
         assert "first message" in content
         assert "second message" in content
+
+
+class TestConditionalDrainPostCompaction:
+    """Tests for c39c47e: conditional drain during post-compaction orientation.
+
+    When interjection_enabled=True: adapter messages stay in inboxes for the
+    watcher to deliver mid-turn. Only internal messages (poll_inbox) drain.
+
+    When interjection_enabled=False: all messages drain to pending queue
+    (original issue_0033 behavior).
+    """
+
+    @pytest.mark.asyncio
+    async def test_interjection_enabled_adapter_messages_not_drained(self, agent_home, monkeypatch):
+        """With interjection enabled, adapter inbox messages stay for watcher pickup."""
+        monkeypatch.setattr(Path, 'home', lambda: agent_home)
+
+        # Set up TUI adapter inbox with a message
+        tui_inbox = agent_home / "agents" / "TestAgent" / "asdaaas" / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+
+        msg = {
+            "from": "eric",
+            "text": "STOP — don't run that destructive command",
+            "adapter": "tui",
+            "id": "bell_stop_001",
+            "ts": time.time(),
+        }
+        (tui_inbox / f"msg_{int(time.time()*1000)}.json").write_text(json.dumps(msg))
+
+        # Scenario: Compaction → ShellToolCall (orientation turn with long enough duration)
+        scenario = [
+            Compaction(tokens_before=150000, tokens_after=30000),
+            ShellToolCall(
+                command="cat ~/agents/docs/PRINCIPLES.md",
+                output="## check-the-foundation\n...\n",
+                speech="Boot protocol started.",
+                tokens=32000,
+                duration=1.0,
+            ),
+        ]
+        mock = MockBinary(scenario)
+        agent_cwd = str(agent_home / "agents" / "TestAgent")
+        await mock.start(agent_cwd=agent_cwd)
+
+        # Trigger compaction
+        h1 = await mock.send_prompt("work")
+        await mock.collect_response(h1)
+        mock.pop_compaction_event()
+
+        # Simulate interjection_enabled=True path:
+        # Do NOT drain adapter inboxes (messages stay for watcher)
+        # Verify messages are still in inbox
+        remaining = list(tui_inbox.glob("*.json"))
+        assert len(remaining) == 1, "Adapter message should NOT be drained"
+
+        # Spawn watcher, orientation turn — watcher picks up the message
+        def poll_tui():
+            msgs = []
+            if tui_inbox.exists():
+                for f in sorted(tui_inbox.glob("*.json")):
+                    try:
+                        msgs.append(json.loads(f.read_text()))
+                        f.unlink()
+                    except (json.JSONDecodeError, OSError):
+                        pass
+            return msgs
+
+        orient_handle = await mock.send_prompt("[Compaction complete...]")
+
+        from interjection import interjection_watcher
+        _ij = asyncio.create_task(
+            interjection_watcher("TestAgent", poll_tui, poll_interval=0.2)
+        )
+
+        await asyncio.sleep(0.5)
+
+        orient_result = await mock.collect_response(orient_handle)
+
+        _ij.cancel()
+        try:
+            await _ij
+        except asyncio.CancelledError:
+            pass
+
+        # Verify: interjection delivered in tool output
+        updates = (mock.session_dir / "updates.jsonl").read_text().strip().split("\n")
+        tool_updates = [
+            json.loads(line) for line in updates
+            if '"tool_call_update"' in line and '"completed"' in line
+        ]
+        content = tool_updates[-1]["params"]["update"].get("content", "")
+        assert "<interjection>" in content, "Message should be interjected during orientation"
+        assert "STOP" in content
+        assert "destructive" in content
+
+        # Adapter inbox should now be empty (watcher consumed it)
+        remaining_after = list(tui_inbox.glob("*.json"))
+        assert len(remaining_after) == 0, "Watcher should have consumed the message"
+
+    @pytest.mark.asyncio
+    async def test_interjection_disabled_adapter_messages_drained(self, agent_home, monkeypatch):
+        """Without interjection, adapter inbox messages are drained to pending queue."""
+        monkeypatch.setattr(Path, 'home', lambda: agent_home)
+
+        # Set up TUI adapter inbox with a message
+        tui_inbox = agent_home / "agents" / "TestAgent" / "asdaaas" / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+
+        msg = {
+            "from": "eric",
+            "text": "hey are you back?",
+            "adapter": "tui",
+            "id": "bell_drain_001",
+            "ts": time.time(),
+        }
+        (tui_inbox / f"msg_{int(time.time()*1000)}.json").write_text(json.dumps(msg))
+
+        # Simulate interjection_disabled path: drain adapter inboxes
+        import asdaaas
+        orig_home = asdaaas.AGENTS_HOME_DIR
+        monkeypatch.setattr(asdaaas, "AGENTS_HOME_DIR", agent_home / "agents")
+
+        awareness = {"direct_attach": ["tui"], "background_channels": {}}
+        drained = asdaaas.poll_adapter_inboxes("TestAgent", awareness)
+
+        # Restore
+        monkeypatch.setattr(asdaaas, "AGENTS_HOME_DIR", orig_home)
+
+        assert len(drained) == 1, "Message should have been drained"
+        assert drained[0]["text"] == "hey are you back?"
+
+        # Inbox should now be empty
+        remaining = list(tui_inbox.glob("*.json"))
+        assert len(remaining) == 0, "Inbox should be empty after drain"
+
+        # Verify: running a ShellToolCall now finds NO interjection
+        scenario = [
+            ShellToolCall(
+                command="date",
+                output="Wed Jul 1\n",
+                speech="Done.",
+                tokens=32000,
+                duration=0.3,
+            ),
+        ]
+        mock = MockBinary(scenario)
+        agent_cwd = str(agent_home / "agents" / "TestAgent")
+        await mock.start(agent_cwd=agent_cwd)
+
+        h = await mock.send_prompt("[Compaction complete...]")
+        await mock.collect_response(h)
+
+        updates = (mock.session_dir / "updates.jsonl").read_text().strip().split("\n")
+        tool_updates = [
+            json.loads(line) for line in updates
+            if '"tool_call_update"' in line and '"completed"' in line
+        ]
+        content = tool_updates[-1]["params"]["update"].get("content", "")
+        assert "<interjection>" not in content, "No interjection — messages were drained"
+
+    @pytest.mark.asyncio
+    async def test_internal_messages_always_drain(self, agent_home, monkeypatch):
+        """Internal inbox (localmail) messages drain regardless of interjection setting."""
+        monkeypatch.setattr(Path, 'home', lambda: agent_home)
+
+        # Set up both adapter inbox AND internal inbox
+        tui_inbox = agent_home / "agents" / "TestAgent" / "asdaaas" / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+
+        import asdaaas
+        orig_home = asdaaas.AGENTS_HOME_DIR
+        monkeypatch.setattr(asdaaas, "AGENTS_HOME_DIR", agent_home / "agents")
+
+        # Create internal inbox message
+        inbox_dir = agent_home / "agents" / "inbox"
+        inbox_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(asdaaas, "INBOX_DIR", inbox_dir)
+
+        internal_msg = {
+            "from": "Sr",
+            "to": "TestAgent",
+            "text": "deployment complete",
+            "adapter": "localmail",
+        }
+        (inbox_dir / f"msg_{int(time.time()*1000)}.json").write_text(json.dumps(internal_msg))
+
+        # Adapter message
+        adapter_msg = {
+            "from": "eric",
+            "text": "abort!",
+            "adapter": "tui",
+            "id": "bell_both_001",
+            "ts": time.time(),
+        }
+        (tui_inbox / f"msg_{int(time.time()*1000)}.json").write_text(json.dumps(adapter_msg))
+
+        # Simulate interjection_enabled=True path:
+        # Internal messages drain, adapter messages do NOT drain
+        internal_drained = asdaaas.poll_inbox("TestAgent")
+        assert len(internal_drained) == 1, "Internal messages should always drain"
+        assert internal_drained[0]["text"] == "deployment complete"
+
+        # Adapter messages should still be in inbox
+        adapter_remaining = list(tui_inbox.glob("*.json"))
+        assert len(adapter_remaining) == 1, "Adapter messages should NOT drain with interjection enabled"
+
+        monkeypatch.setattr(asdaaas, "AGENTS_HOME_DIR", orig_home)
+
+    @pytest.mark.asyncio
+    async def test_orientation_prompt_always_first(self, agent_home, monkeypatch):
+        """Regardless of interjection setting, compaction-complete prompt is always first (issue_0033 regression guard)."""
+        monkeypatch.setattr(Path, 'home', lambda: agent_home)
+
+        tui_inbox = agent_home / "agents" / "TestAgent" / "asdaaas" / "adapters" / "tui" / "inbox"
+        tui_inbox.mkdir(parents=True, exist_ok=True)
+
+        msg = {
+            "from": "eric",
+            "text": "urgent message during compaction",
+            "adapter": "tui",
+            "id": "bell_order_001",
+            "ts": time.time(),
+        }
+        (tui_inbox / f"msg_{int(time.time()*1000)}.json").write_text(json.dumps(msg))
+
+        scenario = [
+            Compaction(tokens_before=150000, tokens_after=30000),
+            ShellToolCall(
+                command="cat principles.md",
+                output="principles content\n",
+                speech="Done booting.",
+                tokens=32000,
+                duration=1.0,
+            ),
+        ]
+        mock = MockBinary(scenario)
+        agent_cwd = str(agent_home / "agents" / "TestAgent")
+        await mock.start(agent_cwd=agent_cwd)
+
+        # Compaction
+        h1 = await mock.send_prompt("work")
+        await mock.collect_response(h1)
+        mock.pop_compaction_event()
+
+        # Orientation prompt FIRST
+        orientation_text = "[Compaction complete. Context reduced from 150000 to 30000 tokens.]"
+        orient_handle = await mock.send_prompt(orientation_text)
+
+        def poll_tui():
+            msgs = []
+            if tui_inbox.exists():
+                for f in sorted(tui_inbox.glob("*.json")):
+                    try:
+                        msgs.append(json.loads(f.read_text()))
+                        f.unlink()
+                    except (json.JSONDecodeError, OSError):
+                        pass
+            return msgs
+
+        from interjection import interjection_watcher
+        _ij = asyncio.create_task(
+            interjection_watcher("TestAgent", poll_tui, poll_interval=0.2)
+        )
+
+        await asyncio.sleep(0.5)
+        await mock.collect_response(orient_handle)
+
+        _ij.cancel()
+        try:
+            await _ij
+        except asyncio.CancelledError:
+            pass
+
+        # Check prompt ordering in updates.jsonl
+        updates = (mock.session_dir / "updates.jsonl").read_text().strip().split("\n")
+        user_prompts = [
+            json.loads(line) for line in updates
+            if '"user_message_chunk"' in line
+        ]
+
+        # The first user prompt after compaction should be the orientation message
+        # Find prompts after the compaction event
+        prompt_texts = [
+            u["params"]["update"]["content"]["text"]
+            for u in user_prompts
+            if "Compaction complete" in u["params"]["update"].get("content", {}).get("text", "")
+            or "urgent" in u["params"]["update"].get("content", {}).get("text", "")
+        ]
+
+        # Orientation must appear, and must be before any user message prompt
+        assert any("Compaction complete" in t for t in prompt_texts), (
+            "Orientation prompt must appear in prompts"
+        )
+        # Eric's message should NOT appear as a separate prompt — it should be an interjection
+        assert not any("urgent message" in t for t in prompt_texts), (
+            "User message should be interjected, not a separate prompt (issue_0033)"
+        )

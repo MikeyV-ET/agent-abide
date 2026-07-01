@@ -2256,10 +2256,27 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 write_health(agent_name, "working", "post-compaction orientation", tokens_after, context_window)
                 await backend.drain_stale()
                 orient_handle = await backend.send_prompt(orientation_text)
+
+                # Interjection watcher for orientation turn
+                _ij_orient = None
+                if interjection_enabled:
+                    from interjection import interjection_watcher
+                    _ij_orient = asyncio.create_task(
+                        interjection_watcher(agent_name,
+                                             lambda: poll_adapter_inboxes(agent_name, awareness),
+                                             poll_interval=2.0))
+
                 orient_result = await backend.collect_response(
                     orient_handle, on_meta=_on_streaming_meta,
                     keepalive_timeout=60.0, max_wall_clock=300.0,
                 )
+
+                if _ij_orient:
+                    _ij_orient.cancel()
+                    try:
+                        await _ij_orient
+                    except asyncio.CancelledError:
+                        pass
                 total_tokens = backend.total_tokens
                 _prev_tokens = total_tokens
                 if orient_result.speech.strip():

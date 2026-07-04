@@ -176,3 +176,80 @@ class TestCompactionDetection:
         detected = await engine.handle_compaction_detection()
         assert detected is True
         assert engine.turns_since_compaction == 0
+
+
+class TestInterjectionDrain:
+    """Interjections queued mid-turn get drained to doorbells in post_turn."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(reason="post_turn calls drain_interjection_queue without env=self.env")
+    async def test_leftover_interjections_become_doorbells(self, asdaaas_env):
+        """Interjections not delivered mid-turn become continue doorbells."""
+        from mock_binary import MockBinary, NormalResponse
+        mock = MockBinary([NormalResponse(speech="Working on it.", tokens=5000)])
+        engine = asdaaas_env.make_engine(backend=mock)
+        engine.interjection_enabled = True
+
+        asdaaas_env.inject_doorbell("bell_ij", adapter="tui", sender="eric", text="Start task")
+        # Queue an interjection that won't be consumed mid-turn
+        # (interjection_watcher only runs if interjection_enabled=True in deliver_turn call)
+        asdaaas_env.inject_interjection("Hey, update on that?")
+
+        g, dr, ptr = await asdaaas_env.run_turn(engine)
+        assert dr.speech == "Working on it."
+        assert ptr.interjections_drained >= 1
+
+
+class TestContinueCap:
+    """Continue cap stops continues after CONTINUE_MAX_CONSECUTIVE empties."""
+
+    @pytest.mark.asyncio
+    async def test_continue_cap_sets_delay_until_event(self, asdaaas_env):
+        """After 20 consecutive empty doorbell responses, delay_until_event is set."""
+        from mock_binary import MockBinary, NormalResponse
+
+        # Create 21 empty responses to exceed CONTINUE_MAX_CONSECUTIVE (20)
+        scenario = [NormalResponse(speech="", tokens=5000) for _ in range(21)]
+        mock = MockBinary(scenario)
+        engine = asdaaas_env.make_engine(backend=mock)
+
+        for i in range(21):
+            asdaaas_env.inject_doorbell(f"bell_cap_{i}", adapter="tui", sender="system",
+                                        text=f"Continue {i}")
+            await asdaaas_env.run_turn(engine)
+
+        assert engine.consecutive_empty_doorbell >= 20
+        assert engine.delay_until_event is True
+
+
+class TestDelayUntilEvent:
+    """delay: until_event command sets delay_until_event on engine."""
+
+    @pytest.mark.asyncio
+    async def test_until_event_from_command(self, asdaaas_env):
+        """Agent writing delay: until_event sets engine.delay_until_event."""
+        from mock_binary import MockBinary, NormalResponse
+        mock = MockBinary([NormalResponse(speech="Sleeping now.", tokens=5000)])
+        engine = asdaaas_env.make_engine(backend=mock)
+
+        asdaaas_env.inject_doorbell("bell_ue", adapter="tui", sender="eric", text="Go to sleep")
+        asdaaas_env.inject_command({"action": "delay", "seconds": "until_event"})
+        _, dr, ptr = await asdaaas_env.run_turn(engine)
+        assert ptr.agent_wrote_delay is True
+        assert engine.delay_until_event is True
+        assert engine.next_turn_delay == 0
+
+    @pytest.mark.asyncio
+    async def test_speech_response_to_message_defaults_until_event(self, asdaaas_env):
+        """After responding with speech to a user message, default to until_event."""
+        from mock_binary import MockBinary, NormalResponse
+        mock = MockBinary([NormalResponse(speech="Here's my answer.", tokens=5000)])
+        engine = asdaaas_env.make_engine(backend=mock)
+
+        # Inject as adapter message (not doorbell) to simulate user message
+        asdaaas_env.inject_message("tui", "What do you think?", sender="eric")
+        _, dr, ptr = await asdaaas_env.run_turn(engine)
+        assert dr.speech == "Here's my answer."
+        # After responding to a user message with speech, should default to until_event
+        # (issue_0030 behavior) unless agent wrote explicit delay
+        assert engine.delay_until_event is True

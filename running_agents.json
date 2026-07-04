@@ -5,14 +5,14 @@
   "Sr": {
     "home": "/home/eric/agents/Sr"
   },
+  "Trip": {
+    "home": "/home/eric/agents/Trip"
+  },
   "Cinco": {
     "home": "/home/eric/agents/Cinco"
   },
   "Q": {
     "home": "/home/eric/agents/Q"
-  },
-  "Trip": {
-    "home": "/home/eric/agents/Trip"
   },
   "Jr": {
     "home": "/home/eric/agents/Jr"

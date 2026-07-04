@@ -169,3 +169,55 @@ class TestTurnEngineScaffold:
         assert engine.total_tokens == 0
         assert engine.turns_since_compaction == 2
         assert engine.delay_until_event is False
+
+
+class TestGatherPhase:
+    """Test gather_pending() phase through the fixture.
+
+    These tests inject input through the file interface and call
+    engine.gather_pending() to verify GatherResult contents.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(reason="gather_pending doesn't thread env to poll_doorbells yet (S4 WIP)")
+    async def test_gather_doorbells(self, asdaaas_env):
+        """Injected doorbells appear in GatherResult."""
+        asdaaas_env.inject_doorbell("bell_1", adapter="tui", sender="eric", text="Hey Trip")
+        asdaaas_env.inject_doorbell("bell_2", adapter="tui", sender="eric", text="Second msg")
+        engine = asdaaas_env.make_engine()
+        result = await engine.gather_pending()
+        assert len(result.doorbells) == 2
+        assert result.has_content is True
+
+    @pytest.mark.asyncio
+    async def test_gather_no_content(self, asdaaas_env):
+        """Empty workspace produces empty GatherResult."""
+        engine = asdaaas_env.make_engine()
+        result = await engine.gather_pending()
+        assert result.doorbells == []
+        assert result.messages == []
+        assert result.has_content is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(reason="gather_pending doesn't thread env to poll_doorbells yet (S4 WIP)")
+    async def test_gather_suppresses_redelivered_doorbells(self, asdaaas_env):
+        """Doorbells already in last_delivered_bell_ids are suppressed."""
+        asdaaas_env.inject_doorbell("bell_old", adapter="tui", text="Already seen")
+        asdaaas_env.inject_doorbell("bell_new", adapter="tui", text="Fresh")
+        engine = asdaaas_env.make_engine()
+        engine.last_delivered_bell_ids = {"bell_old"}
+        result = await engine.gather_pending()
+        bell_ids = [b.get("id") for b in result.doorbells]
+        assert "bell_new" in bell_ids
+        assert "bell_old" not in bell_ids
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(reason="gather_pending doesn't thread env to poll_adapter_inboxes yet (S4 WIP)")
+    async def test_gather_adapter_messages(self, asdaaas_env):
+        """Messages in adapter inbox appear in GatherResult.messages."""
+        asdaaas_env.inject_message("tui", "Hello from TUI", sender="eric")
+        engine = asdaaas_env.make_engine()
+        result = await engine.gather_pending()
+        assert len(result.messages) >= 1
+        assert any("Hello from TUI" in m.get("text", "") for m in result.messages)
+        assert result.has_content is True

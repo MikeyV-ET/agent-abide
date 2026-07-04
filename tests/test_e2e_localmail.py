@@ -159,8 +159,8 @@ class TestTurnEngineScaffold:
         """PostTurnResult has sane defaults."""
         from turn_engine import PostTurnResult
         result = PostTurnResult()
-        assert result.commands_processed == []
-        assert result.continue_queued is False
+        assert result.commands_processed == 0
+        assert result.agent_wrote_delay is False
 
     def test_engine_state_fields(self, asdaaas_env):
         """TurnEngine tracks per-session state."""
@@ -179,7 +179,6 @@ class TestGatherPhase:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="gather_pending doesn't thread env to poll_doorbells yet (S4 WIP)")
     async def test_gather_doorbells(self, asdaaas_env):
         """Injected doorbells appear in GatherResult."""
         asdaaas_env.inject_doorbell("bell_1", adapter="tui", sender="eric", text="Hey Trip")
@@ -199,7 +198,6 @@ class TestGatherPhase:
         assert result.has_content is False
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="gather_pending doesn't thread env to poll_doorbells yet (S4 WIP)")
     async def test_gather_suppresses_redelivered_doorbells(self, asdaaas_env):
         """Doorbells already in last_delivered_bell_ids are suppressed."""
         asdaaas_env.inject_doorbell("bell_old", adapter="tui", text="Already seen")
@@ -212,7 +210,6 @@ class TestGatherPhase:
         assert "bell_old" not in bell_ids
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="gather_pending doesn't thread env to poll_adapter_inboxes yet (S4 WIP)")
     async def test_gather_adapter_messages(self, asdaaas_env):
         """Messages in adapter inbox appear in GatherResult.messages."""
         asdaaas_env.inject_message("tui", "Hello from TUI", sender="eric")

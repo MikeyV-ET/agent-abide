@@ -255,7 +255,7 @@ class TurnEngine:
         from asdaaas import (
             format_doorbell, _is_midturn_message, _midturn_flag,
             context_left_tag, write_conversation, write_health,
-            read_gaze, poll_adapter_inboxes, read_observer_state,
+            read_gaze, poll_adapter_inboxes,
             MessageTimer, StreamingThoughts,
         )
 
@@ -271,7 +271,7 @@ class TurnEngine:
             print(f"[asdaaas] Doorbells ({len(bells)}): {[b.get('id', '?') for b in bells]}")
 
         if in_room_msgs:
-            obs_midturn = read_observer_state()
+            obs_midturn = self.read_observer_state()
             for msg in in_room_msgs:
                 sender = msg.get("from", "unknown")
                 adapter = msg.get("adapter", "unknown")
@@ -394,7 +394,7 @@ class TurnEngine:
             poll_commands, ack_doorbells, agent_dir,
             _cleanup_continue_doorbells, queue_continue_doorbell,
             write_conversation, write_to_outbox, write_health,
-            write_profile, read_gaze, read_observer_state,
+            write_profile, read_gaze,
             EMPTY_DOORBELL_BACKOFF_AFTER, EMPTY_DOORBELL_BACKOFF_PER,
             EMPTY_DOORBELL_BACKOFF_MAX, CONTINUE_DOOM_CHECK_AFTER,
             CONTINUE_MAX_CONSECUTIVE,
@@ -518,7 +518,7 @@ class TurnEngine:
                 detail = (f"coalesced response ({len(bells)} bells + "
                           f"{len(in_room_msgs)} msgs), {len(deliver_result.speech)} chars")
             write_health(agent_name, "active", detail, self.total_tokens,
-                        self.context_window, observer_state=read_observer_state(), env=self.env)
+                        self.context_window, observer_state=self.read_observer_state(), env=self.env)
             # After responding to a user message with speech, default to
             # waiting unless agent already wrote an explicit delay (issue_0030).
             if has_msgs and not ptr.agent_wrote_delay:
@@ -543,7 +543,7 @@ class TurnEngine:
                     self.next_turn_delay = backoff
 
                 # Doom loop check — observer-first, heuristic fallback
-                obs_doom = read_observer_state()
+                obs_doom = self.read_observer_state()
                 if obs_doom is not None and obs_doom.get("doom_loop"):
                     print(f"[asdaaas] *** OBSERVER: DOOM LOOP DETECTED for {agent_name} ***")
                     print(f"[asdaaas]   Stopping continues.")

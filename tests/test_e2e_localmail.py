@@ -1,7 +1,7 @@
-"""True e2e tests for localmail via asdaaas_env fixture.
+"""True e2e tests for fixture infrastructure via asdaaas_env.
 
 Uses only the public file interface — no private asdaaas imports.
-Exercises the converted localmail.py through AsdaaasEnv.
+Exercises converted modules (localmail, interjection) through AsdaaasEnv.
 """
 
 import json
@@ -95,3 +95,35 @@ class TestLocalmailViaFixture:
         assert len(asdaaas_env.outbox("tui")) == 1
         asdaaas_env.clear_outbox("tui")
         assert len(asdaaas_env.outbox("tui")) == 0
+
+
+class TestInterjectionViaFixture:
+    """Verify interjection queue/drain works through the hermetic fixture."""
+
+    def test_inject_and_drain_interjection(self, asdaaas_env):
+        """Queue an interjection, drain it back."""
+        asdaaas_env.inject_interjection("STOP — do not proceed")
+        messages = asdaaas_env.drain_interjections()
+        assert len(messages) == 1
+        assert "STOP" in messages[0]
+
+    def test_drain_empty_queue(self, asdaaas_env):
+        """Draining empty queue returns empty list."""
+        messages = asdaaas_env.drain_interjections()
+        assert messages == []
+
+    def test_multiple_interjections(self, asdaaas_env):
+        """Multiple interjections all drain in order."""
+        asdaaas_env.inject_interjection("First message")
+        asdaaas_env.inject_interjection("Second message")
+        asdaaas_env.inject_interjection("Third message")
+        messages = asdaaas_env.drain_interjections()
+        assert len(messages) == 3
+
+    def test_drain_is_destructive(self, asdaaas_env):
+        """Draining consumes — second drain returns empty."""
+        asdaaas_env.inject_interjection("One-shot message")
+        first = asdaaas_env.drain_interjections()
+        assert len(first) == 1
+        second = asdaaas_env.drain_interjections()
+        assert len(second) == 0

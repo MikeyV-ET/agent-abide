@@ -132,6 +132,16 @@ class AsdaaasTestEnv:
         )
         return self.asdaaas_dir / "adapters" / "localmail" / "inbox" / f"{msg_id}.json"
 
+    def inject_interjection(self, text: str) -> None:
+        """Queue an interjection using the real interjection API."""
+        from interjection import queue_interjection
+        queue_interjection(self.agent_name, text, env=self.env)
+
+    def drain_interjections(self) -> list:
+        """Drain and return all queued interjections."""
+        from interjection import drain_interjection_queue
+        return drain_interjection_queue(self.agent_name, env=self.env)
+
     # --- Output: read from the agent's world ---
 
     def outbox(self, adapter: str = "tui") -> list:

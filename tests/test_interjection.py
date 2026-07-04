@@ -25,6 +25,14 @@ HOOK_SCRIPT = Path(__file__).resolve().parent.parent / "core" / "interjection_ho
 # Fixtures
 # ============================================================================
 
+@pytest.fixture(autouse=True)
+def _patch_asdaaas_env(tmp_path, monkeypatch):
+    """S1 transition: patch AsdaaasEnv.from_config to use tmp_path/agents."""
+    from asdaaas_env import AsdaaasEnv
+    test_env = AsdaaasEnv(agents_home=tmp_path / "agents")
+    monkeypatch.setattr(AsdaaasEnv, "from_config", classmethod(lambda cls: test_env))
+
+
 @pytest.fixture
 def agent_env(tmp_path):
     """Set up a temp agent home with interjection queue directory.

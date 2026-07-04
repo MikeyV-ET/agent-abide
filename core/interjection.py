@@ -8,21 +8,25 @@ import os
 import secrets
 import time
 from pathlib import Path
+from typing import Optional
 
 
-def interjection_dir(agent_name: str) -> Path:
+def interjection_dir(agent_name: str, env=None) -> Path:
     """Return the interjection queue directory for an agent."""
-    return Path.home() / "agents" / agent_name / "asdaaas" / "interjections"
+    if env is None:
+        from asdaaas_env import AsdaaasEnv
+        env = AsdaaasEnv.from_config()
+    return env.agents_home / agent_name / "asdaaas" / "interjections"
 
 
-def queue_interjection(agent_name: str, text: str) -> None:
+def queue_interjection(agent_name: str, text: str, env=None) -> None:
     """Queue a message for mid-turn delivery via BASH_ENV hook.
 
     Writes to ~/agents/{agent_name}/asdaaas/interjections/interject_{timestamp_ms}_{pid}.txt
     Uses atomic write: .tmp first, then rename to .txt so the hook
     never reads a partially-written file.
     """
-    dest = interjection_dir(agent_name)
+    dest = interjection_dir(agent_name, env=env)
     dest.mkdir(parents=True, exist_ok=True)
 
     timestamp_ms = int(time.time() * 1000)
@@ -34,7 +38,7 @@ def queue_interjection(agent_name: str, text: str) -> None:
     tmp.rename(target)
 
 
-def drain_interjection_queue(agent_name: str) -> list[str]:
+def drain_interjection_queue(agent_name: str, env=None) -> list[str]:
     """Drain any unconsumed messages from the interjection queue.
 
     Called by asdaaas during post-response processing. Returns the text
@@ -44,7 +48,7 @@ def drain_interjection_queue(agent_name: str) -> list[str]:
 
     Returns an empty list if the queue is empty or doesn't exist.
     """
-    d = interjection_dir(agent_name)
+    d = interjection_dir(agent_name, env=env)
     if not d.exists():
         return []
 
@@ -80,7 +84,8 @@ def format_message_for_interjection(msg: dict) -> str:
         return f"[{sender} (via {adapter}) (id={bell_id}, ts={ts})] {text}"
 
 
-async def interjection_watcher(agent_name: str, poll_fn, poll_interval: float = 2.0):
+async def interjection_watcher(agent_name: str, poll_fn, poll_interval: float = 2.0,
+                               env=None):
     """Poll for incoming messages during BUSY turns and route to interjection queue.
 
     Args:
@@ -88,6 +93,7 @@ async def interjection_watcher(agent_name: str, poll_fn, poll_interval: float = 
         poll_fn: Callable that returns list of message dicts (destructive poll).
                  In asdaaas this is: lambda: poll_adapter_inboxes(agent_name, awareness)
         poll_interval: Seconds between polls.
+        env: Optional AsdaaasEnv for path resolution.
 
     Runs as an asyncio.Task alongside collect_response(). Caller cancels
     when the turn completes.
@@ -100,7 +106,7 @@ async def interjection_watcher(agent_name: str, poll_fn, poll_interval: float = 
             msgs = poll_fn()
             for msg in msgs:
                 text = format_message_for_interjection(msg)
-                queue_interjection(agent_name, text)
+                queue_interjection(agent_name, text, env=env)
                 print(f"[asdaaas] interjection queued for {agent_name}: {msg.get('from', '?')} via {msg.get('adapter', '?')}")
     except asyncio.CancelledError:
         pass

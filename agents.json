@@ -69,7 +69,8 @@
       "permission_mode": "auto",
       "deny_rules": [
         "Write(/home/eric/.grok/**)"
-      ]
+      ],
+      "observer_enabled": true
     },
     "MockTestAgent": {
       "home": "/home/eric/agents/MockTestAgent",

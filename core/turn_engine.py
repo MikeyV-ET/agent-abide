@@ -96,6 +96,11 @@ class TurnEngine:
         self.consecutive_empty_doorbell: int = 0
         self.interjection_enabled: bool = False
 
+        # Compaction state
+        self._prev_tokens: int = 0
+        self.compact_pending = None
+        self.compact_pending_turns: int = 0
+
     def agent_dir(self) -> Path:
         """Per-agent asdaaas directory."""
         return self.env.agents_home / self.agent_name / "asdaaas"
@@ -592,3 +597,110 @@ class TurnEngine:
                             self.total_tokens, self.context_window)
 
         return ptr
+
+    async def handle_compaction_detection(self, *,
+                                          on_streaming_meta=None) -> bool:
+        """Detect and handle auto/event compaction + orientation turn.
+
+        Returns True if compaction was detected and orientation was sent
+        (caller should 'continue' to next iteration). Returns False if
+        no compaction detected (caller proceeds normally).
+
+        Updates self.total_tokens, self.turns_since_compaction,
+        self._prev_tokens, self.compact_pending.
+        """
+        import asyncio
+        from asdaaas import (
+            read_gaze, context_left_tag, write_to_outbox,
+            write_health, write_compaction_state,
+            poll_adapter_inboxes, poll_inbox,
+        )
+
+        agent_name = self.agent_name
+
+        # Event-based detection
+        compaction_event, event_tokens, event_tokens_before = self.backend.pop_compaction_event()
+        heuristic_compaction = (
+            not compaction_event
+            and self.total_tokens < self._prev_tokens * 0.6
+            and self._prev_tokens > 0
+        )
+        compaction_detected = compaction_event or heuristic_compaction
+
+        if not (compaction_detected and self.turns_since_compaction > 0):
+            self._prev_tokens = self.total_tokens
+            return False
+
+        tokens_before = event_tokens_before or self._prev_tokens
+        tokens_after = event_tokens or self.total_tokens
+        source = "event" if compaction_event else "heuristic"
+        print(f"[asdaaas] Compaction detected ({source}): {tokens_before} -> {tokens_after}")
+
+        self.turns_since_compaction = 0
+        self.compact_pending = None
+        self.compact_pending_turns = 0
+        self.total_tokens = tokens_after
+        self._prev_tokens = self.total_tokens
+        write_compaction_state(agent_name, "complete",
+                              tokens_before=tokens_before, tokens_after=tokens_after)
+
+        # Drain pending messages before orientation
+        if self.interjection_enabled:
+            held_msgs = poll_inbox(agent_name)
+            if held_msgs:
+                print(f"[asdaaas] Holding {len(held_msgs)} internal message(s) until after orientation"
+                      " (adapter msgs left for interjection watcher)")
+                if self.pending_queue:
+                    for hm in held_msgs:
+                        self.pending_queue.enqueue(hm)
+        else:
+            awareness = self.awareness or {}
+            held_msgs = poll_adapter_inboxes(agent_name, awareness)
+            held_msgs.extend(poll_inbox(agent_name))
+            if held_msgs:
+                print(f"[asdaaas] Holding {len(held_msgs)} message(s) until after orientation")
+                if self.pending_queue:
+                    for hm in held_msgs:
+                        self.pending_queue.enqueue(hm)
+
+        self.gaze = read_gaze(agent_name)
+        orientation_text = (
+            f"[Compaction complete. Context reduced from {tokens_before} to {tokens_after} tokens. "
+            f"You are resuming from a compacted context. Follow your boot protocol.]"
+            + context_left_tag(tokens_after, self.context_window,
+                              self.turns_since_compaction, gaze=self.gaze)
+        )
+        print(f"[asdaaas] Immediate orientation turn for {agent_name}")
+        write_health(agent_name, "working", "post-compaction orientation",
+                    tokens_after, self.context_window)
+        await self.backend.drain_stale()
+        orient_handle = await self.backend.send_prompt(orientation_text)
+
+        # Interjection watcher for orientation turn
+        _ij_orient = None
+        if self.interjection_enabled:
+            from interjection import interjection_watcher
+            awareness = self.awareness or {}
+            _ij_orient = asyncio.create_task(
+                interjection_watcher(agent_name,
+                                     lambda: poll_adapter_inboxes(agent_name, awareness),
+                                     poll_interval=2.0))
+
+        orient_result = await self.backend.collect_response(
+            orient_handle, on_meta=on_streaming_meta,
+            keepalive_timeout=60.0, max_wall_clock=300.0)
+
+        if _ij_orient:
+            _ij_orient.cancel()
+            try:
+                await _ij_orient
+            except asyncio.CancelledError:
+                pass
+
+        self.total_tokens = self.backend.total_tokens
+        self._prev_tokens = self.total_tokens
+        if orient_result.speech.strip():
+            write_to_outbox(agent_name, orient_result.speech.strip(),
+                           self.gaze.get("speech"), "speech")
+
+        return True

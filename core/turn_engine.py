@@ -908,3 +908,49 @@ class TurnEngine:
         except Exception as e:
             write_compaction_state(agent_name, "failed", env=self.env)
             print(f"[asdaaas] Force compact failed: {e}")
+
+    async def deliver_background_doorbells(self, bg_doorbells: list, *,
+                                           cancel_event=None,
+                                           on_streaming_meta=None) -> int:
+        """Deliver background doorbell messages one at a time.
+
+        Each message gets its own prompt+response cycle.
+        Returns the number of doorbells delivered.
+        """
+        import time
+        from asdaaas import (
+            read_gaze, format_background_doorbell, context_left_tag,
+            write_to_outbox, write_health,
+        )
+
+        agent_name = self.agent_name
+        delivered = 0
+
+        for msg in bg_doorbells:
+            self.gaze = read_gaze(agent_name, env=self.env)
+            bell_text = (format_background_doorbell(msg, agent_name=agent_name)
+                        + context_left_tag(self.total_tokens, self.context_window,
+                                          self.turns_since_compaction, gaze=self.gaze))
+            print(f"[asdaaas] BACKGROUND: {bell_text[:120]}")
+            await self.backend.drain_stale()
+            write_health(agent_name, "working", "processing background doorbell",
+                        self.total_tokens, self.context_window, env=self.env)
+            bg_handle = await self.backend.send_prompt(bell_text)
+            bg_result = await self.backend.collect_response(
+                bg_handle, on_meta=on_streaming_meta, cancel_event=cancel_event)
+            self.total_tokens = self.backend.total_tokens
+            self.turns_since_compaction += 1
+            self.last_response_ts = time.time()
+            self.last_was_foreground = False
+            if bg_result.speech.strip():
+                write_to_outbox(agent_name, bg_result.speech.strip(),
+                               self.gaze.get("speech"), "speech", env=self.env)
+                if (bg_result.thoughts.strip() and self.gaze.get("thoughts")
+                        and bg_result.thoughts.strip() != bg_result.speech.strip()):
+                    write_to_outbox(agent_name, bg_result.thoughts.strip(),
+                                   self.gaze.get("thoughts"), "thoughts", env=self.env)
+                write_health(agent_name, "active", "background doorbell response",
+                            self.total_tokens, self.context_window, env=self.env)
+            delivered += 1
+
+        return delivered

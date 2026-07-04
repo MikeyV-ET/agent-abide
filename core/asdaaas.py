@@ -2782,102 +2782,26 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 continue
 
             # ==== 4. COALESCED DELIVERY: doorbells + in-room messages ====
-            # Build one prompt with everything the agent needs to see.
-            # Agent gets the full picture in a single turn.
-            prompt_parts = []
+            # Extracted to TurnEngine.deliver_turn() (S4 decomposition)
+            deliver_result = await engine.deliver_turn(
+                gathered,
+                cancel_event=cancel_event,
+                interjection_enabled=interjection_enabled,
+                last_response_ts=last_response_ts,
+                last_was_foreground=last_was_foreground,
+                on_streaming_meta=_on_streaming_meta)
 
-            if bells:
-                bell_lines = [format_doorbell(bell) for bell in bells]
-                prompt_parts.extend(bell_lines)
-                print(f"[asdaaas] Doorbells ({len(bells)}): {[b.get('id', '?') for b in bells]}")
-
-            if in_room_msgs:
-                obs_midturn = read_observer_state()
-                for msg in in_room_msgs:
-                    sender = msg.get("from", "unknown")
-                    adapter = msg.get("adapter", "unknown")
-                    text = msg.get("text", "").strip()
-                    if obs_midturn is not None:
-                        # Observer path: BUSY = midturn, IDLE since T = midturn if msg < T
-                        msg_ts = msg.get("_received_ts") or msg.get("ts")
-                        if not isinstance(msg_ts, (int, float)):
-                            midturn = False
-                        elif obs_midturn.get("state") == "BUSY":
-                            midturn = True
-                        elif obs_midturn.get("state") == "IDLE":
-                            midturn = msg_ts < obs_midturn.get("since", 0)
-                        else:
-                            midturn = False
-                    else:
-                        midturn = _is_midturn_message(msg, last_response_ts, last_was_foreground, backend.last_activity_ts)
-                    flag = _midturn_flag(msg) if midturn else ""
-                    prompt_parts.append(f"<{sender} (via {adapter}){flag}> {text}")
-
-            if prompt_parts:
+            if deliver_result is not None:
                 did_work_this_iteration = True
-                # Refresh token count from authoritative source before
-                # building the prompt. Ensures context_left_tag is accurate
-                # even after compaction (which happens between turns).
-                total_tokens = backend.refresh_tokens()
-                gaze = read_gaze(agent_name)
-                prompt_text = "\n".join(prompt_parts) + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
-
-                has_bells = bool(bells)
-                has_msgs = bool(in_room_msgs)
-                if has_bells and has_msgs:
-                    print(f"[asdaaas] COALESCED: {len(bells)} doorbell(s) + {len(in_room_msgs)} message(s) in single prompt")
-                elif has_msgs and len(in_room_msgs) > 1:
-                    print(f"[asdaaas] BATCH: {len(in_room_msgs)} messages coalesced into single prompt")
-
-                msg_id = (in_room_msgs[-1] if in_room_msgs else bells[-1]).get("id", f"t{int(time.time()*1000)}")
-                timer = MessageTimer(agent_name, msg_id)
-                print(f"[asdaaas] IN: {prompt_text[:120]}")
-
-                await backend.drain_stale()
-                timer.mark("prompt_sent")
-                write_health(agent_name, "working",
-                             f"processing {'coalesced' if has_bells and has_msgs else 'doorbells' if has_bells else 'prompt'}"
-                             f" ({len(prompt_parts)} items)", total_tokens, context_window)
-                msg_handle = await backend.send_prompt(prompt_text)
-                write_conversation(agent_name, "user", prompt_text)
-
-                # Stream intermediate speech to thoughts channel
-                gaze = read_gaze(agent_name)
-                st = StreamingThoughts(agent_name, gaze)
-
-                # Interjection watcher: poll inboxes during turn, queue for BASH_ENV delivery
-                _ij_watcher = None
-                if interjection_enabled:
-                    from interjection import interjection_watcher
-                    _ij_watcher = asyncio.create_task(
-                        interjection_watcher(agent_name,
-                                             lambda: poll_adapter_inboxes(agent_name, awareness),
-                                             poll_interval=2.0))
-
-                result = await backend.collect_response(
-                    msg_handle, on_meta=_on_streaming_meta,
-                    on_speech_chunk=st.on_chunk,
-                    on_tool_call=st.on_tool_call,
-                    cancel_event=cancel_event)
-
-                if _ij_watcher:
-                    _ij_watcher.cancel()
-                    try:
-                        await _ij_watcher
-                    except asyncio.CancelledError:
-                        pass
-
-                timer.mark("prompt_complete")
-
-                # Delivery receipt check
-                if hasattr(backend, 'delivery_confirmed') and not backend.delivery_confirmed:
-                    print(f"[asdaaas] DELIVERY_FAILURE: agent={agent_name} prompt_len={len(prompt_text)} reason=no_user_message_chunk")
-                    write_health(agent_name, "active", "delivery_failure", total_tokens, context_window)
-
-                total_tokens = backend.total_tokens
-                turns_since_compaction += 1
-                # Track which bells were just delivered so the next iteration
-                # skips them (issue_0039: agent's ack may still be in-flight).
+                result = deliver_result
+                total_tokens = engine.total_tokens
+                turns_since_compaction = engine.turns_since_compaction
+                gaze = engine.gaze
+                # Unpack delivery metadata for post-turn processing
+                timer = deliver_result._timer
+                has_bells = deliver_result._has_bells
+                has_msgs = deliver_result._has_msgs
+                # Track which bells were just delivered (issue_0039)
                 if bells:
                     last_delivered_bell_ids = {b.get("id") for b in bells if b.get("id")}
                     engine.last_delivered_bell_ids = last_delivered_bell_ids

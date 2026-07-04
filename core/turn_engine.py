@@ -212,3 +212,140 @@ class TurnEngine:
         result.has_content = bool(bells or in_room_msgs or bg_doorbell_msgs)
 
         return result
+
+    async def deliver_turn(self, gathered: GatherResult, *,
+                           cancel_event=None,
+                           interjection_enabled: bool = False,
+                           last_response_ts: float = None,
+                           last_was_foreground: bool = True,
+                           on_streaming_meta=None) -> 'DeliverResult | None':
+        """Build prompt from gathered items and deliver to backend.
+
+        Returns DeliverResult if there was content to deliver, or None
+        if nothing was gathered (caller should handle idle path).
+
+        Side effects: sends prompt to backend, writes conversation log,
+        updates health, runs interjection watcher during response.
+        """
+        import asyncio
+        import time
+        from asdaaas import (
+            format_doorbell, _is_midturn_message, _midturn_flag,
+            context_left_tag, write_conversation, write_health,
+            read_gaze, poll_adapter_inboxes, read_observer_state,
+            MessageTimer, StreamingThoughts,
+        )
+
+        agent_name = self.agent_name
+        bells = gathered.doorbells
+        in_room_msgs = gathered.messages
+
+        prompt_parts = []
+
+        if bells:
+            bell_lines = [format_doorbell(bell) for bell in bells]
+            prompt_parts.extend(bell_lines)
+            print(f"[asdaaas] Doorbells ({len(bells)}): {[b.get('id', '?') for b in bells]}")
+
+        if in_room_msgs:
+            obs_midturn = read_observer_state()
+            for msg in in_room_msgs:
+                sender = msg.get("from", "unknown")
+                adapter = msg.get("adapter", "unknown")
+                text = msg.get("text", "").strip()
+                if obs_midturn is not None:
+                    msg_ts = msg.get("_received_ts") or msg.get("ts")
+                    if not isinstance(msg_ts, (int, float)):
+                        midturn = False
+                    elif obs_midturn.get("state") == "BUSY":
+                        midturn = True
+                    elif obs_midturn.get("state") == "IDLE":
+                        midturn = msg_ts < obs_midturn.get("since", 0)
+                    else:
+                        midturn = False
+                else:
+                    midturn = _is_midturn_message(
+                        msg, last_response_ts, last_was_foreground,
+                        self.backend.last_activity_ts)
+                flag = _midturn_flag(msg) if midturn else ""
+                prompt_parts.append(f"<{sender} (via {adapter}){flag}> {text}")
+
+        if not prompt_parts:
+            return None
+
+        # Build and send prompt
+        self.total_tokens = self.backend.refresh_tokens()
+        self.gaze = read_gaze(agent_name)
+        prompt_text = "\n".join(prompt_parts) + context_left_tag(
+            self.total_tokens, self.context_window,
+            self.turns_since_compaction, gaze=self.gaze)
+
+        has_bells = bool(bells)
+        has_msgs = bool(in_room_msgs)
+        if has_bells and has_msgs:
+            print(f"[asdaaas] COALESCED: {len(bells)} doorbell(s) + {len(in_room_msgs)} message(s) in single prompt")
+        elif has_msgs and len(in_room_msgs) > 1:
+            print(f"[asdaaas] BATCH: {len(in_room_msgs)} messages coalesced into single prompt")
+
+        msg_id = (in_room_msgs[-1] if in_room_msgs else bells[-1]).get(
+            "id", f"t{int(time.time()*1000)}")
+        timer = MessageTimer(agent_name, msg_id)
+        print(f"[asdaaas] IN: {prompt_text[:120]}")
+
+        await self.backend.drain_stale()
+        timer.mark("prompt_sent")
+        write_health(agent_name, "working",
+                     f"processing {'coalesced' if has_bells and has_msgs else 'doorbells' if has_bells else 'prompt'}"
+                     f" ({len(prompt_parts)} items)", self.total_tokens, self.context_window)
+        msg_handle = await self.backend.send_prompt(prompt_text)
+        write_conversation(agent_name, "user", prompt_text)
+
+        # Streaming thoughts
+        self.gaze = read_gaze(agent_name)
+        st = StreamingThoughts(agent_name, self.gaze)
+
+        # Interjection watcher
+        _ij_watcher = None
+        if interjection_enabled:
+            from interjection import interjection_watcher
+            _ij_watcher = asyncio.create_task(
+                interjection_watcher(agent_name,
+                                     lambda: poll_adapter_inboxes(agent_name, self.awareness),
+                                     poll_interval=2.0))
+
+        result = await self.backend.collect_response(
+            msg_handle, on_meta=on_streaming_meta,
+            on_speech_chunk=st.on_chunk,
+            on_tool_call=st.on_tool_call,
+            cancel_event=cancel_event)
+
+        if _ij_watcher:
+            _ij_watcher.cancel()
+            try:
+                await _ij_watcher
+            except asyncio.CancelledError:
+                pass
+
+        timer.mark("prompt_complete")
+
+        # Delivery receipt check
+        if hasattr(self.backend, 'delivery_confirmed') and not self.backend.delivery_confirmed:
+            print(f"[asdaaas] DELIVERY_FAILURE: agent={agent_name} prompt_len={len(prompt_text)} reason=no_user_message_chunk")
+            write_health(agent_name, "active", "delivery_failure", self.total_tokens, self.context_window)
+
+        self.total_tokens = self.backend.total_tokens
+        self.turns_since_compaction += 1
+
+        dr = DeliverResult()
+        dr.speech = result.speech if result.speech else ""
+        dr.thoughts = result.thoughts if hasattr(result, 'thoughts') and result.thoughts else ""
+        dr.total_tokens = self.total_tokens
+        # Store extras on result for post_turn to use
+        dr._timer = timer
+        dr._has_bells = has_bells
+        dr._has_msgs = has_msgs
+        dr._bells = bells
+        dr._in_room_msgs = in_room_msgs
+        dr._prompt_text = prompt_text
+
+        return dr

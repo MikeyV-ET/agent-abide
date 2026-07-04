@@ -2597,25 +2597,17 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 agent_wrote_delay = post_result.agent_wrote_delay
 
             # ==== 5. Background doorbell messages (separate delivery) ====
-            for msg in bg_doorbell_msgs:
-                gaze = read_gaze(agent_name)
-                bell_text = format_background_doorbell(msg, agent_name=agent_name) + context_left_tag(total_tokens, context_window, turns_since_compaction, gaze=gaze)
-                print(f"[asdaaas] BACKGROUND: {bell_text[:120]}")
-                await backend.drain_stale()
-                write_health(agent_name, "working", "processing background doorbell", total_tokens, context_window)
-                bg_handle = await backend.send_prompt(bell_text)
-                bg_result = await backend.collect_response(bg_handle, on_meta=_on_streaming_meta, cancel_event=cancel_event)
-                total_tokens = backend.total_tokens
-                turns_since_compaction += 1
-                last_response_ts = time.time()
-                last_was_foreground = False
-                engine.last_response_ts = last_response_ts
-                engine.last_was_foreground = False
-                if bg_result.speech.strip():
-                    write_to_outbox(agent_name, bg_result.speech.strip(), gaze.get("speech"), "speech")
-                    if bg_result.thoughts.strip() and gaze.get("thoughts") and bg_result.thoughts.strip() != bg_result.speech.strip():
-                        write_to_outbox(agent_name, bg_result.thoughts.strip(), gaze.get("thoughts"), "thoughts")
-                    write_health(agent_name, "active", "background doorbell response", total_tokens, context_window)
+            # Extracted to TurnEngine.deliver_background_doorbells() (S4)
+            if bg_doorbell_msgs:
+                engine.total_tokens = total_tokens
+                engine.turns_since_compaction = turns_since_compaction
+                await engine.deliver_background_doorbells(
+                    bg_doorbell_msgs, cancel_event=cancel_event,
+                    on_streaming_meta=_on_streaming_meta)
+                total_tokens = engine.total_tokens
+                turns_since_compaction = engine.turns_since_compaction
+                last_response_ts = engine.last_response_ts
+                last_was_foreground = engine.last_was_foreground
 
             errors = 0
 

@@ -23,12 +23,16 @@ from interjection import queue_interjection, interjection_dir, drain_interjectio
 
 
 @pytest.fixture
-def agent_home(tmp_path):
+def agent_home(tmp_path, monkeypatch):
     """Create a mock agent home directory structure."""
     agent_dir = tmp_path / "agents" / "TestAgent" / "asdaaas"
     agent_dir.mkdir(parents=True)
     (agent_dir / "commands").mkdir()
     (agent_dir / "interjections").mkdir()
+    # S1 transition: patch AsdaaasEnv.from_config so env fallback uses tmp_path/agents
+    from asdaaas_env import AsdaaasEnv
+    test_env = AsdaaasEnv(agents_home=tmp_path / "agents")
+    monkeypatch.setattr(AsdaaasEnv, "from_config", classmethod(lambda cls: test_env))
     return tmp_path
 
 

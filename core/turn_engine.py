@@ -126,13 +126,13 @@ class TurnEngine:
         agent_name = self.agent_name
 
         # Refresh awareness and gaze from disk
-        self.awareness = read_awareness(agent_name)
-        self.gaze = read_gaze(agent_name)
+        self.awareness = read_awareness(agent_name, env=self.env)
+        self.gaze = read_gaze(agent_name, env=self.env)
 
         result = GatherResult()
 
         # 2a. Poll doorbells with suppression (issue_0039)
-        all_bells = poll_doorbells(agent_name, self.awareness)
+        all_bells = poll_doorbells(agent_name, self.awareness, env=self.env)
         if self.last_delivered_bell_ids:
             still_pending = {b.get("id") for b in all_bells} & self.last_delivered_bell_ids
             bells = [b for b in all_bells if b.get("id") not in self.last_delivered_bell_ids]
@@ -152,14 +152,14 @@ class TurnEngine:
         result.doorbells = bells
 
         # 2b. Poll attentions + timeouts + pending queue
-        attentions = poll_attentions(agent_name)
-        timeout_bells = check_attention_timeouts(agent_name, attentions)
+        attentions = poll_attentions(agent_name, env=self.env)
+        timeout_bells = check_attention_timeouts(agent_name, attentions, env=self.env)
         if timeout_bells:
             for tb in timeout_bells:
                 self.backend.proc.stdin.write((tb["text"] + "\n").encode())
                 await self.backend.proc.stdin.drain()
                 print(f"[asdaaas] ATTENTION TIMEOUT delivered to {agent_name}: {tb['msg_id']}")
-            attentions = poll_attentions(agent_name)
+            attentions = poll_attentions(agent_name, env=self.env)
         result.timeout_bells = timeout_bells
 
         pending_msgs = []
@@ -169,8 +169,8 @@ class TurnEngine:
                 print(f"[asdaaas] PENDING: delivering {len(pending_msgs)} queued message(s) (gaze matched)")
         result.pending_msgs = pending_msgs
 
-        messages = poll_adapter_inboxes(agent_name, self.awareness)
-        legacy_msgs = poll_inbox(agent_name)
+        messages = poll_adapter_inboxes(agent_name, self.awareness, env=self.env)
+        legacy_msgs = poll_inbox(agent_name, env=self.env)
         messages.extend(legacy_msgs)
         messages = pending_msgs + messages
 
@@ -195,11 +195,11 @@ class TurnEngine:
                     self.backend.proc.stdin.write((response_text + "\n").encode())
                     await self.backend.proc.stdin.drain()
                     print(f"[asdaaas] ATTENTION RESPONSE delivered to {agent_name}: {matched_attn['msg_id']}")
-                    attentions = poll_attentions(agent_name)
+                    attentions = poll_attentions(agent_name, env=self.env)
                     continue
 
             # Gaze filtering
-            self.gaze = read_gaze(agent_name)
+            self.gaze = read_gaze(agent_name, env=self.env)
 
             if not matches_gaze(msg, self.gaze):
                 mode = get_background_mode(msg, self.awareness)
@@ -285,7 +285,7 @@ class TurnEngine:
 
         # Build and send prompt
         self.total_tokens = self.backend.refresh_tokens()
-        self.gaze = read_gaze(agent_name)
+        self.gaze = read_gaze(agent_name, env=self.env)
         prompt_text = "\n".join(prompt_parts) + context_left_tag(
             self.total_tokens, self.context_window,
             self.turns_since_compaction, gaze=self.gaze)
@@ -306,12 +306,12 @@ class TurnEngine:
         timer.mark("prompt_sent")
         write_health(agent_name, "working",
                      f"processing {'coalesced' if has_bells and has_msgs else 'doorbells' if has_bells else 'prompt'}"
-                     f" ({len(prompt_parts)} items)", self.total_tokens, self.context_window)
+                     f" ({len(prompt_parts)} items)", self.total_tokens, self.context_window, env=self.env)
         msg_handle = await self.backend.send_prompt(prompt_text)
-        write_conversation(agent_name, "user", prompt_text)
+        write_conversation(agent_name, "user", prompt_text, env=self.env)
 
         # Streaming thoughts
-        self.gaze = read_gaze(agent_name)
+        self.gaze = read_gaze(agent_name, env=self.env)
         st = StreamingThoughts(agent_name, self.gaze)
 
         # Interjection watcher
@@ -320,7 +320,7 @@ class TurnEngine:
             from interjection import interjection_watcher
             _ij_watcher = asyncio.create_task(
                 interjection_watcher(agent_name,
-                                     lambda: poll_adapter_inboxes(agent_name, self.awareness),
+                                     lambda: poll_adapter_inboxes(agent_name, self.awareness, env=self.env),
                                      poll_interval=2.0))
 
         result = await self.backend.collect_response(
@@ -341,7 +341,7 @@ class TurnEngine:
         # Delivery receipt check
         if hasattr(self.backend, 'delivery_confirmed') and not self.backend.delivery_confirmed:
             print(f"[asdaaas] DELIVERY_FAILURE: agent={agent_name} prompt_len={len(prompt_text)} reason=no_user_message_chunk")
-            write_health(agent_name, "active", "delivery_failure", self.total_tokens, self.context_window)
+            write_health(agent_name, "active", "delivery_failure", self.total_tokens, self.context_window, env=self.env)
 
         self.total_tokens = self.backend.total_tokens
         self.turns_since_compaction += 1
@@ -397,15 +397,15 @@ class TurnEngine:
         in_room_msgs = deliver_result._in_room_msgs
 
         # ---- Post-response command drain ----
-        post_cmds = poll_commands(agent_name)
+        post_cmds = poll_commands(agent_name, env=self.env)
         requeue = []
         for pc in post_cmds:
             pa = pc.get("action", "")
             piggy = pc.get("ack", [])
             if piggy:
-                ack_doorbells(agent_name, piggy)
+                ack_doorbells(agent_name, piggy, env=self.env)
             if pa == "ack":
-                ack_doorbells(agent_name, pc.get("handled", []))
+                ack_doorbells(agent_name, pc.get("handled", []), env=self.env)
             elif pa == "delay":
                 dv = pc.get("seconds", 0)
                 self.delay_text = pc.get("text") or None
@@ -420,7 +420,7 @@ class TurnEngine:
                 requeue.append(pc)
 
         if requeue:
-            cmd_dir = agent_dir(agent_name) / "commands"
+            cmd_dir = agent_dir(agent_name, env=self.env) / "commands"
             cmd_dir.mkdir(parents=True, exist_ok=True)
             for rc in requeue:
                 fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
@@ -434,17 +434,17 @@ class TurnEngine:
                   (f", requeued {ptr.commands_requeued}" if ptr.commands_requeued else ""))
 
         requeue = []
-        _cleanup_continue_doorbells(agent_name)
+        _cleanup_continue_doorbells(agent_name, env=self.env)
 
         # ---- Late command poll ----
         if not self.delay_until_event and self.next_turn_delay == 0:
             await asyncio.sleep(0.5)
-            late_cmds = poll_commands(agent_name)
+            late_cmds = poll_commands(agent_name, env=self.env)
             for lc in late_cmds:
                 la = lc.get("action", "")
                 lpiggy = lc.get("ack", [])
                 if lpiggy:
-                    ack_doorbells(agent_name, lpiggy)
+                    ack_doorbells(agent_name, lpiggy, env=self.env)
                 if la == "delay":
                     ldv = lc.get("seconds", 0)
                     self.delay_text = lc.get("text") or None
@@ -456,13 +456,13 @@ class TurnEngine:
                         self.delay_until_event = False
                     ptr.agent_wrote_delay = True
                 elif la == "ack":
-                    ack_doorbells(agent_name, lc.get("handled", []))
+                    ack_doorbells(agent_name, lc.get("handled", []), env=self.env)
                 elif la in ("compact", "gaze", "awareness"):
                     requeue.append(lc)
             if late_cmds:
                 print(f"[asdaaas] Late command poll: {len(late_cmds)} command(s)")
                 if requeue:
-                    cmd_dir = agent_dir(agent_name) / "commands"
+                    cmd_dir = agent_dir(agent_name, env=self.env) / "commands"
                     cmd_dir.mkdir(parents=True, exist_ok=True)
                     for rc in requeue:
                         fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
@@ -475,7 +475,7 @@ class TurnEngine:
             leftover = drain_interjection_queue(agent_name)
             if leftover:
                 for msg_text in leftover:
-                    queue_continue_doorbell(agent_name, text=msg_text)
+                    queue_continue_doorbell(agent_name, text=msg_text, env=self.env)
                 ptr.interjections_drained = len(leftover)
                 print(f"[asdaaas] Drained {len(leftover)} leftover interjection(s) → doorbells")
 
@@ -483,29 +483,29 @@ class TurnEngine:
         self.last_was_foreground = has_msgs
 
         # ---- Speech routing / empty response handling ----
-        self.gaze = read_gaze(agent_name)
+        self.gaze = read_gaze(agent_name, env=self.env)
 
         if deliver_result.speech.strip():
             self.last_response_ts = time.time()
             self.consecutive_empty_doorbell = 0
-            write_conversation(agent_name, "assistant", deliver_result.speech)
+            write_conversation(agent_name, "assistant", deliver_result.speech, env=self.env)
             if deliver_result.thoughts.strip():
-                write_conversation(agent_name, "thinking", deliver_result.thoughts)
+                write_conversation(agent_name, "thinking", deliver_result.thoughts, env=self.env)
             write_to_outbox(agent_name, deliver_result.speech.strip(),
-                           self.gaze.get("speech"), "speech")
+                           self.gaze.get("speech"), "speech", env=self.env)
             timer.mark("outbox_done")
             if (deliver_result.thoughts.strip() and self.gaze.get("thoughts")
                     and deliver_result.thoughts.strip() != deliver_result.speech.strip()):
                 write_to_outbox(agent_name, deliver_result.thoughts.strip(),
-                               self.gaze.get("thoughts"), "thoughts")
+                               self.gaze.get("thoughts"), "thoughts", env=self.env)
             print(timer.log_line())
-            write_profile(agent_name, timer)
+            write_profile(agent_name, timer, env=self.env)
             detail = f"responded {len(deliver_result.speech)} chars"
             if has_bells and has_msgs:
                 detail = (f"coalesced response ({len(bells)} bells + "
                           f"{len(in_room_msgs)} msgs), {len(deliver_result.speech)} chars")
             write_health(agent_name, "active", detail, self.total_tokens,
-                        self.context_window, observer_state=read_observer_state())
+                        self.context_window, observer_state=read_observer_state(), env=self.env)
             # After responding to a user message with speech, default to
             # waiting unless agent already wrote an explicit delay (issue_0030).
             if has_msgs and not ptr.agent_wrote_delay:
@@ -515,12 +515,12 @@ class TurnEngine:
             # Empty response handling
             if has_bells and not has_msgs:
                 self.consecutive_empty_doorbell += 1
-                _cleanup_continue_doorbells(agent_name)
+                _cleanup_continue_doorbells(agent_name, env=self.env)
                 print(f"[asdaaas] {agent_name} doorbell -> (empty) "
                       f"[consecutive={self.consecutive_empty_doorbell}]")
                 write_health(agent_name, "active",
                             f"empty doorbell response (x{self.consecutive_empty_doorbell})",
-                            self.total_tokens, self.context_window)
+                            self.total_tokens, self.context_window, env=self.env)
 
                 if self.consecutive_empty_doorbell >= EMPTY_DOORBELL_BACKOFF_AFTER:
                     backoff = min(EMPTY_DOORBELL_BACKOFF_PER * self.consecutive_empty_doorbell,
@@ -536,7 +536,7 @@ class TurnEngine:
                     print(f"[asdaaas]   Stopping continues.")
                     self.delay_until_event = True
                     write_health(agent_name, "stalled", "observer_doom_loop_detected",
-                                self.total_tokens, self.context_window)
+                                self.total_tokens, self.context_window, env=self.env)
                     try:
                         from localmail import send_mail
                         send_mail(from_agent="asdaaas", to_agent="Sr",
@@ -562,7 +562,7 @@ class TurnEngine:
                                       f"python3 fix_orphaned_tool_results.py --agent {agent_name}")
                                 self.delay_until_event = True
                                 write_health(agent_name, "stalled", "doom_loop_corruption_detected",
-                                            self.total_tokens, self.context_window)
+                                            self.total_tokens, self.context_window, env=self.env)
                                 try:
                                     from localmail import send_mail
                                     send_mail(from_agent="asdaaas", to_agent="Sr",
@@ -581,7 +581,7 @@ class TurnEngine:
                     self.delay_until_event = True
                     write_health(agent_name, "stalled",
                                 f"continue_cap_hit ({self.consecutive_empty_doorbell})",
-                                self.total_tokens, self.context_window)
+                                self.total_tokens, self.context_window, env=self.env)
                     try:
                         from localmail import send_mail
                         send_mail(from_agent="asdaaas", to_agent="Sr",
@@ -592,9 +592,9 @@ class TurnEngine:
             else:
                 print(f"[asdaaas] {agent_name} -> (empty)")
                 print(timer.log_line())
-                write_profile(agent_name, timer)
+                write_profile(agent_name, timer, env=self.env)
                 write_health(agent_name, "active", "empty response",
-                            self.total_tokens, self.context_window)
+                            self.total_tokens, self.context_window, env=self.env)
 
         return ptr
 
@@ -642,11 +642,11 @@ class TurnEngine:
         self.total_tokens = tokens_after
         self._prev_tokens = self.total_tokens
         write_compaction_state(agent_name, "complete",
-                              tokens_before=tokens_before, tokens_after=tokens_after)
+                              tokens_before=tokens_before, tokens_after=tokens_after, env=self.env)
 
         # Drain pending messages before orientation
         if self.interjection_enabled:
-            held_msgs = poll_inbox(agent_name)
+            held_msgs = poll_inbox(agent_name, env=self.env)
             if held_msgs:
                 print(f"[asdaaas] Holding {len(held_msgs)} internal message(s) until after orientation"
                       " (adapter msgs left for interjection watcher)")
@@ -655,15 +655,15 @@ class TurnEngine:
                         self.pending_queue.enqueue(hm)
         else:
             awareness = self.awareness or {}
-            held_msgs = poll_adapter_inboxes(agent_name, awareness)
-            held_msgs.extend(poll_inbox(agent_name))
+            held_msgs = poll_adapter_inboxes(agent_name, awareness, env=self.env)
+            held_msgs.extend(poll_inbox(agent_name, env=self.env))
             if held_msgs:
                 print(f"[asdaaas] Holding {len(held_msgs)} message(s) until after orientation")
                 if self.pending_queue:
                     for hm in held_msgs:
                         self.pending_queue.enqueue(hm)
 
-        self.gaze = read_gaze(agent_name)
+        self.gaze = read_gaze(agent_name, env=self.env)
         orientation_text = (
             f"[Compaction complete. Context reduced from {tokens_before} to {tokens_after} tokens. "
             f"You are resuming from a compacted context. Follow your boot protocol.]"
@@ -672,7 +672,7 @@ class TurnEngine:
         )
         print(f"[asdaaas] Immediate orientation turn for {agent_name}")
         write_health(agent_name, "working", "post-compaction orientation",
-                    tokens_after, self.context_window)
+                    tokens_after, self.context_window, env=self.env)
         await self.backend.drain_stale()
         orient_handle = await self.backend.send_prompt(orientation_text)
 
@@ -683,7 +683,7 @@ class TurnEngine:
             awareness = self.awareness or {}
             _ij_orient = asyncio.create_task(
                 interjection_watcher(agent_name,
-                                     lambda: poll_adapter_inboxes(agent_name, awareness),
+                                     lambda: poll_adapter_inboxes(agent_name, awareness, env=self.env),
                                      poll_interval=2.0))
 
         orient_result = await self.backend.collect_response(
@@ -701,7 +701,7 @@ class TurnEngine:
         self._prev_tokens = self.total_tokens
         if orient_result.speech.strip():
             write_to_outbox(agent_name, orient_result.speech.strip(),
-                           self.gaze.get("speech"), "speech")
+                           self.gaze.get("speech"), "speech", env=self.env)
 
         return True
 
@@ -729,7 +729,7 @@ class TurnEngine:
 
         if self.turns_since_compaction < COMPACTION_COOLDOWN_TURNS:
             print(f"[asdaaas] Compact rejected: cooldown ({self.turns_since_compaction} turns since last compaction)")
-            bell_dir = agent_dir(agent_name) / "doorbells"
+            bell_dir = agent_dir(agent_name, env=self.env) / "doorbells"
             bell_dir.mkdir(parents=True, exist_ok=True)
             bell = {
                 "adapter": "session",
@@ -750,14 +750,14 @@ class TurnEngine:
         if self.compact_pending:
             self.compact_pending = None
             self.compact_pending_turns = 0
-            _cleanup_compact_doorbells(agent_name)
+            _cleanup_compact_doorbells(agent_name, env=self.env)
         print(f"[asdaaas] Compact: executing immediately for {agent_name}")
 
         try:
             tokens_before = self.total_tokens
             write_compaction_state(agent_name, "in_flight", request_id=request_id,
-                                  tokens_before=tokens_before)
-            instructions = cmd.get("instructions") or get_compaction_instructions(agent_name)
+                                  tokens_before=tokens_before, env=self.env)
+            instructions = cmd.get("instructions") or get_compaction_instructions(agent_name, env=self.env)
             compact_prompt = f"/compact {instructions}"
             compact_handle = await self.backend.send_prompt(compact_prompt)
             compact_result = await self.backend.collect_response(
@@ -769,7 +769,7 @@ class TurnEngine:
                 print(f"[asdaaas] Compact pending: {tokens_before} -> {self.total_tokens} "
                       "(polling for async completion)")
                 write_compaction_state(agent_name, "pending", request_id=request_id,
-                                     tokens_before=tokens_before)
+                                     tokens_before=tokens_before, env=self.env)
                 compaction_landed = False
                 for _poll in range(15):
                     await asyncio.sleep(2)
@@ -785,23 +785,23 @@ class TurnEngine:
                     self._prev_tokens = self.total_tokens
                     self.turns_since_compaction = 0
                     write_compaction_state(agent_name, "complete", request_id=request_id,
-                                         tokens_before=tokens_before, tokens_after=self.total_tokens)
-                    _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens)
+                                         tokens_before=tokens_before, tokens_after=self.total_tokens, env=self.env)
+                    _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens, env=self.env)
                 else:
                     _, event_ta, event_tb = self.backend.pop_compaction_event()
                     tokens_before = event_tb or tokens_before
                     self.total_tokens = event_ta or self.total_tokens
                     print(f"[asdaaas] Compact still pending after 30s poll — queueing doorbell anyway")
                     write_compaction_state(agent_name, "complete", request_id=request_id,
-                                         tokens_before=tokens_before, tokens_after=self.total_tokens)
-                    _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens)
+                                         tokens_before=tokens_before, tokens_after=self.total_tokens, env=self.env)
+                    _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens, env=self.env)
                     self.turns_since_compaction = 0
                     self._prev_tokens = self.total_tokens
             else:
                 _, event_ta, event_tb = self.backend.pop_compaction_event()
                 tokens_before = event_tb or tokens_before
                 self.total_tokens = event_ta or self.total_tokens
-                self.gaze = read_gaze(agent_name)
+                self.gaze = read_gaze(agent_name, env=self.env)
                 probe_text = (
                     f"[Compaction complete. Context reduced from {tokens_before} to {self.total_tokens} tokens. "
                     f"You are resuming from a compacted context. Follow your boot protocol.]"
@@ -816,10 +816,10 @@ class TurnEngine:
                 print(f"[asdaaas] Compact probe: real totalTokens={self.total_tokens}")
                 if probe_result.speech.strip():
                     write_to_outbox(agent_name, probe_result.speech.strip(),
-                                   self.gaze.get("speech"), "speech")
+                                   self.gaze.get("speech"), "speech", env=self.env)
                 self._prev_tokens = self.total_tokens
                 self.turns_since_compaction = 0
-                result_file = agent_dir(agent_name) / "command_result.json"
+                result_file = agent_dir(agent_name, env=self.env) / "command_result.json"
                 tmp = str(result_file) + ".tmp"
                 with open(tmp, "w") as f:
                     json.dump({
@@ -832,13 +832,13 @@ class TurnEngine:
                 os.rename(tmp, str(result_file))
                 print(f"[asdaaas] Compact: {tokens_before} -> {self.total_tokens}")
                 write_compaction_state(agent_name, "complete", request_id=request_id,
-                                     tokens_before=tokens_before, tokens_after=self.total_tokens)
+                                     tokens_before=tokens_before, tokens_after=self.total_tokens, env=self.env)
                 write_health(agent_name, "ready",
                             f"compacted {tokens_before}->{self.total_tokens}",
-                            self.total_tokens, self.context_window)
-                _cleanup_compact_doorbells(agent_name)
+                            self.total_tokens, self.context_window, env=self.env)
+                _cleanup_compact_doorbells(agent_name, env=self.env)
         except Exception as e:
-            write_compaction_state(agent_name, "failed", request_id=request_id)
+            write_compaction_state(agent_name, "failed", request_id=request_id, env=self.env)
             print(f"[asdaaas] Compact failed: {e}")
 
     async def handle_force_compact_command(self, cmd: dict, *,
@@ -864,8 +864,8 @@ class TurnEngine:
 
         try:
             tokens_before = self.total_tokens
-            write_compaction_state(agent_name, "in_flight", tokens_before=tokens_before)
-            instructions = cmd.get("instructions") or get_compaction_instructions(agent_name)
+            write_compaction_state(agent_name, "in_flight", tokens_before=tokens_before, env=self.env)
+            instructions = cmd.get("instructions") or get_compaction_instructions(agent_name, env=self.env)
             compact_prompt = f"/compact {instructions}"
             compact_handle = await self.backend.send_prompt(compact_prompt)
             compact_result = await self.backend.collect_response(
@@ -874,13 +874,13 @@ class TurnEngine:
 
             if self.total_tokens >= tokens_before:
                 print(f"[asdaaas] Force compact pending: {tokens_before} -> {self.total_tokens} (no reduction yet)")
-                write_compaction_state(agent_name, "pending", tokens_before=tokens_before)
+                write_compaction_state(agent_name, "pending", tokens_before=tokens_before, env=self.env)
                 self._prev_tokens = self.total_tokens
             else:
                 _, event_ta, event_tb = self.backend.pop_compaction_event()
                 tokens_before = event_tb or tokens_before
                 self.total_tokens = event_ta or self.total_tokens
-                self.gaze = read_gaze(agent_name)
+                self.gaze = read_gaze(agent_name, env=self.env)
                 probe_text = (
                     f"[Compaction complete. Context reduced from {tokens_before} to {self.total_tokens} tokens. "
                     f"You are resuming from a compacted context. Follow your boot protocol.]"
@@ -895,16 +895,16 @@ class TurnEngine:
                 print(f"[asdaaas] Force compact probe: real totalTokens={self.total_tokens}")
                 if probe_result.speech.strip():
                     write_to_outbox(agent_name, probe_result.speech.strip(),
-                                   self.gaze.get("speech"), "speech")
+                                   self.gaze.get("speech"), "speech", env=self.env)
                 self._prev_tokens = self.total_tokens
                 self.turns_since_compaction = 0
-                _cleanup_compact_doorbells(agent_name)
+                _cleanup_compact_doorbells(agent_name, env=self.env)
                 write_compaction_state(agent_name, "complete",
-                                     tokens_before=tokens_before, tokens_after=self.total_tokens)
+                                     tokens_before=tokens_before, tokens_after=self.total_tokens, env=self.env)
                 write_health(agent_name, "ready",
                             f"force-compacted {tokens_before}->{self.total_tokens}",
-                            self.total_tokens, self.context_window)
+                            self.total_tokens, self.context_window, env=self.env)
                 print(f"[asdaaas] Force compact: {tokens_before} -> {self.total_tokens}")
         except Exception as e:
-            write_compaction_state(agent_name, "failed")
+            write_compaction_state(agent_name, "failed", env=self.env)
             print(f"[asdaaas] Force compact failed: {e}")

@@ -235,8 +235,8 @@ class MessageTimer:
         return f"[profile] {self.agent} msg={self.msg_id}: {' | '.join(parts)}"
 
 
-def write_profile(agent_name, timer):
-    profile_dir = agent_dir(agent_name) / "profile"
+def write_profile(agent_name, timer, env=None):
+    profile_dir = agent_dir(agent_name, env=env) / "profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
     summary = timer.summary()
     entry = {
@@ -282,9 +282,9 @@ _current_model_id = "unknown"
 _current_session_id = None
 _current_backend_type = "grok"
 
-def write_health(agent_name, status, detail="", total_tokens=0, context_window=CONTEXT_WINDOW,
+def write_health(agent_name, status, detail="", total_tokens=0, context_window=CONTEXT_WINDOW, env=None,
                   observer_state=None):
-    agent_dir(agent_name).mkdir(parents=True, exist_ok=True)
+    agent_dir(agent_name, env=env).mkdir(parents=True, exist_ok=True)
     health = {
         "agent": agent_name,
         "status": status,
@@ -305,7 +305,7 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
             "since": observer_state.get("since"),
             "written_at": observer_state.get("written_at"),
         }
-    path = agent_dir(agent_name) / "health.json"
+    path = agent_dir(agent_name, env=env) / "health.json"
     tmp = str(path) + ".tmp"
     with open(tmp, "w") as f:
         json.dump(health, f)
@@ -321,12 +321,12 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
 
 _conv_seq = 0
 
-def write_conversation(agent_name, role, content):
+def write_conversation(agent_name, role, content, env=None):
     """Append one line to ~/agents/<Name>/asdaaas/conversation.jsonl."""
     global _conv_seq
     if not content or not content.strip():
         return
-    conv_dir = agent_dir(agent_name)
+    conv_dir = agent_dir(agent_name, env=env)
     conv_dir.mkdir(parents=True, exist_ok=True)
     path = conv_dir / "conversation.jsonl"
     entry = {
@@ -340,13 +340,13 @@ def write_conversation(agent_name, role, content):
         f.write(json.dumps(entry) + "\n")
 
 
-def write_compaction_state(agent_name, phase, request_id=None, tokens_before=None, tokens_after=None):
+def write_compaction_state(agent_name, phase, request_id=None, tokens_before=None, tokens_after=None, env=None):
     """Write compaction phase to disk for external consumers (TUI, SA).
 
     Phases: idle, requested, confirmed, in_flight, complete, failed.
     Preserves last_completed timestamp across phase transitions.
     """
-    state_path = agent_dir(agent_name) / "compaction_state.json"
+    state_path = agent_dir(agent_name, env=env) / "compaction_state.json"
     existing = {}
     try:
         with open(state_path) as f:
@@ -365,20 +365,20 @@ def write_compaction_state(agent_name, phase, request_id=None, tokens_before=Non
     if phase == "complete":
         state["last_completed"] = state["ts"]
 
-    agent_dir(agent_name).mkdir(parents=True, exist_ok=True)
+    agent_dir(agent_name, env=env).mkdir(parents=True, exist_ok=True)
     tmp = str(state_path) + ".tmp"
     with open(tmp, "w") as f:
         json.dump(state, f)
     os.rename(tmp, str(state_path))
 
 
-def get_compaction_instructions(agent_name):
+def get_compaction_instructions(agent_name, env=None):
     """Return compaction instructions for the given agent.
 
     Priority: per-agent file > default constant.
     Per-agent file: ~/agents/<Name>/asdaaas/compaction_instructions.txt
     """
-    agent_file = agent_dir(agent_name) / "compaction_instructions.txt"
+    agent_file = agent_dir(agent_name, env=env) / "compaction_instructions.txt"
     try:
         return agent_file.read_text().strip()
     except (FileNotFoundError, OSError):
@@ -432,9 +432,9 @@ def context_left_tag(total_tokens, context_window, turns_since_compaction=None, 
 # GAZE (split: speech + thoughts)
 # ============================================================================
 
-def read_gaze(agent_name):
+def read_gaze(agent_name, env=None):
     """Read split gaze file. Returns {"speech": {...}, "thoughts": {...} or None}."""
-    gaze_file = agent_dir(agent_name) / "gaze.json"
+    gaze_file = agent_dir(agent_name, env=env) / "gaze.json"
     try:
         with open(gaze_file) as f:
             gaze = json.load(f)
@@ -735,10 +735,10 @@ class PendingQueue:
 #           to know about the attention -- just responds naturally.
 # ============================================================================
 
-def poll_attentions(agent_name):
+def poll_attentions(agent_name, env=None):
     """Read all pending attention declarations for an agent.
     Returns list of attention dicts, sorted by created_at (oldest first = FIFO)."""
-    attn_dir = agent_dir(agent_name) / "attention"
+    attn_dir = agent_dir(agent_name, env=env) / "attention"
     if not attn_dir.exists():
         return []
     attentions = []
@@ -754,7 +754,7 @@ def poll_attentions(agent_name):
     return attentions
 
 
-def check_attention_timeouts(agent_name, attentions):
+def check_attention_timeouts(agent_name, attentions, env=None):
     """Check for expired attentions. Returns list of timeout doorbell dicts.
     Deletes expired attention files."""
     now = time.time()
@@ -816,9 +816,9 @@ def resolve_attention(attn, response_text):
 # AWARENESS FILE
 # ============================================================================
 
-def read_awareness(agent_name):
+def read_awareness(agent_name, env=None):
     """Read agent awareness file. Returns dict with direct_attach, control_watch, notify_watch."""
-    awareness_file = agent_dir(agent_name) / "awareness.json"
+    awareness_file = agent_dir(agent_name, env=env) / "awareness.json"
     try:
         with open(awareness_file) as f:
             return json.load(f)
@@ -912,7 +912,7 @@ def _apply_awareness_command(cmd, current_awareness):
 # PER-ADAPTER INBOX POLLING
 # ============================================================================
 
-def poll_adapter_inboxes(agent_name, awareness):
+def poll_adapter_inboxes(agent_name, awareness, env=None):
     """Poll all adapter inboxes that the agent is aware of.
     Returns list of messages from all watched adapters.
     DESTRUCTIVE: deletes inbox files after reading. Use has_pending_adapter_messages()
@@ -921,7 +921,7 @@ def poll_adapter_inboxes(agent_name, awareness):
     
     # Poll direct adapter inboxes (agent-centric: ~/agents/<name>/asdaaas/adapters/<adapter>/inbox/)
     for adapter in awareness.get("direct_attach", []):
-        inbox = agent_dir(agent_name) / "adapters" / adapter / "inbox"
+        inbox = agent_dir(agent_name, env=env) / "adapters" / adapter / "inbox"
         if not inbox.exists():
             continue
         for f in sorted(inbox.glob("*.json")):
@@ -985,14 +985,14 @@ async def run_delay_loop(agent_name, delay_seconds, awareness, poll_interval=DEL
     return False, "expired"
 
 
-def queue_continue_doorbell(agent_name, text=None):
+def queue_continue_doorbell(agent_name, text=None, env=None):
     """Queue a [continue] doorbell for the agent, unless one already exists.
     
     If *text* is provided (from a delay command's ``text`` field), it replaces
     the default continue message so the agent receives directed context.
 
     Returns True if a doorbell was queued, False if one already existed."""
-    bell_dir = agent_dir(agent_name) / "doorbells"
+    bell_dir = agent_dir(agent_name, env=env) / "doorbells"
     bell_dir.mkdir(parents=True, exist_ok=True)
     if any(f.name.startswith("cont_") for f in bell_dir.glob("*.json")):
         return False
@@ -1010,7 +1010,7 @@ def queue_continue_doorbell(agent_name, text=None):
     return True
 
 
-def write_to_outbox(agent_name, content, gaze_target, content_type="speech"):
+def write_to_outbox(agent_name, content, gaze_target, content_type="speech", env=None):
     """Write a message to an adapter's per-agent outbox."""
     if gaze_target is None:
         return  # null target = discard
@@ -1019,7 +1019,7 @@ def write_to_outbox(agent_name, content, gaze_target, content_type="speech"):
     params = gaze_target.get("params", {})
     
     # Agent-centric outbox: ~/agents/<name>/asdaaas/adapters/<target>/outbox/
-    outbox = agent_dir(agent_name) / "adapters" / target / "outbox"
+    outbox = agent_dir(agent_name, env=env) / "adapters" / target / "outbox"
     outbox.mkdir(parents=True, exist_ok=True)
 
     msg = {
@@ -1104,7 +1104,7 @@ class StreamingThoughts:
 # INBOX POLLING
 # ============================================================================
 
-def poll_inbox(agent_name):
+def poll_inbox(agent_name, env=None):
     """Poll universal inbox for messages addressed to this agent."""
     if not INBOX_DIR.exists():
         return []
@@ -1125,7 +1125,7 @@ def poll_inbox(agent_name):
 # DOORBELL DELIVERY
 # ============================================================================
 
-def poll_doorbells(agent_name, awareness=None):
+def poll_doorbells(agent_name, awareness=None, env=None):
     """Poll doorbell directory for notifications from adapters.
     
     Doorbells persist on disk until explicitly acked or TTL-expired.
@@ -1136,7 +1136,7 @@ def poll_doorbells(agent_name, awareness=None):
     Returns list of doorbell dicts, sorted by priority (lowest first).
     Expired doorbells are auto-removed and not returned.
     """
-    bell_dir = agent_dir(agent_name) / "doorbells"
+    bell_dir = agent_dir(agent_name, env=env) / "doorbells"
     if not bell_dir.exists():
         return []
     
@@ -1197,13 +1197,13 @@ def has_pending_doorbells(agent_name):
     return any(bell_dir.glob("*.json"))
 
 
-def ack_doorbells(agent_name, handled_ids):
+def ack_doorbells(agent_name, handled_ids, env=None):
     """Remove acked doorbells from disk.
     
     Agent writes {"action": "ack", "handled": ["id1", "id2"]} to command file.
     Everything not in handled_ids persists for next delivery.
     """
-    bell_dir = agent_dir(agent_name) / "doorbells"
+    bell_dir = agent_dir(agent_name, env=env) / "doorbells"
     if not bell_dir.exists():
         return 0
     removed = 0
@@ -1222,7 +1222,7 @@ def ack_doorbells(agent_name, handled_ids):
     return removed
 
 
-def _cleanup_compact_doorbells(agent_name):
+def _cleanup_compact_doorbells(agent_name, env=None):
     """Remove all compact_confirm doorbells from disk.
     
     Called after compaction succeeds or the confirmation request expires.
@@ -1231,7 +1231,7 @@ def _cleanup_compact_doorbells(agent_name):
     request and writes a new compact command -- creating an infinite loop.
     (Bug observed: Q went through 8 cycles of this in Session 40.)
     """
-    bell_dir = agent_dir(agent_name) / "doorbells"
+    bell_dir = agent_dir(agent_name, env=env) / "doorbells"
     if not bell_dir.exists():
         return
     removed = 0
@@ -1248,7 +1248,7 @@ def _cleanup_compact_doorbells(agent_name):
         print(f"[asdaaas] Cleaned up {removed} compact_confirm doorbell(s)")
 
 
-def _cleanup_continue_doorbells(agent_name):
+def _cleanup_continue_doorbells(agent_name, env=None):
     """Remove all continue doorbells from disk.
 
     Called when delay until_event is set.  Continue doorbells persist like
@@ -1256,7 +1256,7 @@ def _cleanup_continue_doorbells(agent_name):
     continues from being queued -- it doesn't stop already-queued ones from
     being re-delivered each iteration.  (Bug_0003: Jr saw 50+ re-deliveries.)
     """
-    bell_dir = agent_dir(agent_name) / "doorbells"
+    bell_dir = agent_dir(agent_name, env=env) / "doorbells"
     if not bell_dir.exists():
         return
     removed = 0
@@ -1270,14 +1270,14 @@ def _cleanup_continue_doorbells(agent_name):
         print(f"[asdaaas] Cleaned up {removed} continue doorbell(s)")
 
 
-def _queue_post_compaction_doorbell(agent_name, tokens_before, tokens_after):
+def _queue_post_compaction_doorbell(agent_name, tokens_before, tokens_after, env=None):
     """Queue a doorbell telling the agent it just came back from compaction.
 
     After auto-compaction, the binary injects 'Continue... pick up as if the
     break never happened' which conflicts with AGENTS.md boot protocol.  This
     doorbell fires on the next turn to override that and trigger re-orientation.
     """
-    bell_dir = agent_dir(agent_name) / "doorbells"
+    bell_dir = agent_dir(agent_name, env=env) / "doorbells"
     bell_dir.mkdir(parents=True, exist_ok=True)
     bell = {
         "adapter": "system",
@@ -1342,7 +1342,7 @@ def format_doorbell(bell):
 # COMMAND FILE WATCHER
 # ============================================================================
 
-def poll_commands(agent_name):
+def poll_commands(agent_name, env=None):
     """Poll command queue for commands from adapters or the agent itself.
     E.g., session adapter sends {"action": "compact"}, agent sends {"action": "delay"}.
     
@@ -1356,7 +1356,7 @@ def poll_commands(agent_name):
     Returns a list of command dicts (may be empty). Previously returned a single
     dict or None; callers should iterate over the list.
     """
-    a_dir = agent_dir(agent_name)
+    a_dir = agent_dir(agent_name, env=env)
     a_dir.mkdir(parents=True, exist_ok=True)
     commands = []
 

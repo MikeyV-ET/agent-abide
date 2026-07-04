@@ -46,6 +46,8 @@ except ModuleNotFoundError:
     import sys; sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'core'))
     from asdaaas_config import config
 
+from asdaaas_env import AsdaaasEnv
+
 HUB_DIR = config.hub_dir
 AGENTS_DIR = HUB_DIR / "agents"  # legacy
 AGENTS_HOME_DIR = config.agents_home
@@ -147,6 +149,7 @@ def write_attention(
     msg_id: str,
     timeout_s: int = 30,
     message_text: str = "",
+    env: Optional[AsdaaasEnv] = None,
 ) -> str:
     """
     Write an attention declaration. The agent is declaring: "I sent a message
@@ -166,7 +169,8 @@ def write_attention(
     Returns:
         The msg_id.
     """
-    attn_dir = AGENTS_HOME_DIR / agent_name / "asdaaas" / "attention"
+    env = env or AsdaaasEnv.from_config()
+    attn_dir = env.agents_home / agent_name / "asdaaas" / "attention"
     attn_dir.mkdir(parents=True, exist_ok=True)
 
     now = time.time()
@@ -758,9 +762,10 @@ def cleanup_payloads(max_age_seconds: int = 3600) -> int:
 SESSION_INBOX = HUB_DIR / "adapters" / "session" / "inbox"  # legacy, kept for monkeypatching
 
 
-def _session_inbox(agent_name):
+def _session_inbox(agent_name, env: Optional[AsdaaasEnv] = None):
     """Get the session adapter inbox for an agent (agent-centric path)."""
-    return AGENTS_HOME_DIR / agent_name / "asdaaas" / "adapters" / "session" / "inbox"
+    env = env or AsdaaasEnv.from_config()
+    return env.agents_home / agent_name / "asdaaas" / "adapters" / "session" / "inbox"
 
 
 def request_compact(agent_name: str) -> str:
@@ -837,7 +842,8 @@ def request_status(agent_name: str) -> str:
 
 
 def set_gaze(agent_name: str, room: str, adapter: str = "irc",
-             thoughts_room: str = None, thoughts_adapter: str = None):
+             thoughts_room: str = None, thoughts_adapter: str = None,
+             env: Optional[AsdaaasEnv] = None):
     """
     Set the agent's gaze (where speech and thoughts go).
 
@@ -848,7 +854,8 @@ def set_gaze(agent_name: str, room: str, adapter: str = "irc",
         thoughts_room:    Room for thoughts (default: #{agent}-thoughts)
         thoughts_adapter: Adapter for thoughts (default: same as speech adapter)
     """
-    agent_d = AGENTS_HOME_DIR / agent_name / "asdaaas"
+    env = env or AsdaaasEnv.from_config()
+    agent_d = env.agents_home / agent_name / "asdaaas"
     agent_d.mkdir(parents=True, exist_ok=True)
 
     thoughts_adapter = thoughts_adapter or adapter
@@ -875,7 +882,8 @@ def set_gaze(agent_name: str, room: str, adapter: str = "irc",
 
 
 def set_awareness(agent_name: str, background_channels: dict = None,
-                  background_default: str = "pending"):
+                  background_default: str = "pending",
+                  env: Optional[AsdaaasEnv] = None):
     """
     Set the agent's awareness (what it hears in the background).
 
@@ -884,7 +892,8 @@ def set_awareness(agent_name: str, background_channels: dict = None,
         background_channels: Dict of room -> mode (e.g. {"#standup": "doorbell"})
         background_default:  Default mode for unlisted rooms ("doorbell", "pending", "drop")
     """
-    agent_d = AGENTS_HOME_DIR / agent_name / "asdaaas"
+    env = env or AsdaaasEnv.from_config()
+    agent_d = env.agents_home / agent_name / "asdaaas"
     agent_d.mkdir(parents=True, exist_ok=True)
 
     awareness = {
@@ -982,6 +991,7 @@ def write_to_adapter_inbox(
     sender: str = None,
     meta: Optional[dict] = None,
     msg_id: Optional[str] = None,
+    env: Optional[AsdaaasEnv] = None,
 ) -> str:
     """
     Write a message to an adapter's per-agent inbox.
@@ -989,7 +999,8 @@ def write_to_adapter_inbox(
     
     Path: ~/agents/<agent>/asdaaas/adapters/<adapter>/inbox/<msg_id>.json
     """
-    inbox = AGENTS_HOME_DIR / to / "asdaaas" / "adapters" / adapter_name / "inbox"
+    env = env or AsdaaasEnv.from_config()
+    inbox = env.agents_home / to / "asdaaas" / "adapters" / adapter_name / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
     
     if sender is None:
@@ -1023,14 +1034,16 @@ def write_to_adapter_inbox(
     return msg_id
 
 
-def poll_adapter_inbox(adapter_name: str, agent_name: str, delete: bool = True) -> list:
+def poll_adapter_inbox(adapter_name: str, agent_name: str, delete: bool = True,
+                      env: Optional[AsdaaasEnv] = None) -> list:
     """
     Poll an adapter's per-agent inbox for messages.
     Called by asdaaas to pick up inbound messages for an agent.
     
     Path: ~/agents/<agent>/asdaaas/adapters/<adapter>/inbox/
     """
-    inbox = AGENTS_HOME_DIR / agent_name / "asdaaas" / "adapters" / adapter_name / "inbox"
+    env = env or AsdaaasEnv.from_config()
+    inbox = env.agents_home / agent_name / "asdaaas" / "adapters" / adapter_name / "inbox"
     if not inbox.exists():
         return []
     
@@ -1059,6 +1072,7 @@ def write_to_adapter_outbox(
     content_type: str = "speech",
     meta: Optional[dict] = None,
     msg_id: Optional[str] = None,
+    env: Optional[AsdaaasEnv] = None,
 ) -> str:
     """
     Write a message to an adapter's per-agent outbox.
@@ -1066,7 +1080,8 @@ def write_to_adapter_outbox(
     
     Path: ~/agents/<agent>/asdaaas/adapters/<adapter>/outbox/<msg_id>.json
     """
-    outbox = AGENTS_HOME_DIR / agent_name / "asdaaas" / "adapters" / adapter_name / "outbox"
+    env = env or AsdaaasEnv.from_config()
+    outbox = env.agents_home / agent_name / "asdaaas" / "adapters" / adapter_name / "outbox"
     outbox.mkdir(parents=True, exist_ok=True)
     
     msg_id = msg_id or str(uuid.uuid4())
@@ -1096,14 +1111,16 @@ def write_to_adapter_outbox(
     return msg_id
 
 
-def poll_adapter_outbox(adapter_name: str, agent_name: str, delete: bool = True) -> list:
+def poll_adapter_outbox(adapter_name: str, agent_name: str, delete: bool = True,
+                       env: Optional[AsdaaasEnv] = None) -> list:
     """
     Poll an adapter's per-agent outbox for responses.
     Called by adapters to pick up agent responses.
     
     Path: ~/agents/<agent>/asdaaas/adapters/<adapter>/outbox/
     """
-    outbox = AGENTS_HOME_DIR / agent_name / "asdaaas" / "adapters" / adapter_name / "outbox"
+    env = env or AsdaaasEnv.from_config()
+    outbox = env.agents_home / agent_name / "asdaaas" / "adapters" / adapter_name / "outbox"
     if not outbox.exists():
         return []
     

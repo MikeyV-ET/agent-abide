@@ -78,6 +78,11 @@ def hub_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(adapter_api, "STATUS_QUERY_DIR", hub / "status")
     monkeypatch.setattr(adapter_api, "SESSION_INBOX", hub / "adapters" / "session" / "inbox")
 
+    # S1 transition: patch AsdaaasEnv.from_config so env fallback uses tmp_path
+    from asdaaas_env import AsdaaasEnv
+    test_env = AsdaaasEnv(agents_home=agents_home)
+    monkeypatch.setattr(AsdaaasEnv, "from_config", classmethod(lambda cls: test_env))
+
     return hub
 
 

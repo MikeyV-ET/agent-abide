@@ -127,3 +127,45 @@ class TestInterjectionViaFixture:
         assert len(first) == 1
         second = asdaaas_env.drain_interjections()
         assert len(second) == 0
+
+
+class TestTurnEngineScaffold:
+    """Verify TurnEngine types are wirable through the fixture."""
+
+    def test_make_engine(self, asdaaas_env):
+        """make_engine() creates a TurnEngine with correct env."""
+        engine = asdaaas_env.make_engine()
+        assert engine.agent_name == "TestAgent"
+        assert engine.env.agents_home == asdaaas_env.agents_home
+        assert engine.agent_dir() == asdaaas_env.asdaaas_dir
+
+    def test_gather_result_defaults(self, asdaaas_env):
+        """GatherResult has sane defaults."""
+        from turn_engine import GatherResult
+        result = GatherResult()
+        assert result.doorbells == []
+        assert result.messages == []
+        assert result.has_content is False
+
+    def test_deliver_result_defaults(self, asdaaas_env):
+        """DeliverResult has sane defaults."""
+        from turn_engine import DeliverResult
+        result = DeliverResult()
+        assert result.speech == ""
+        assert result.total_tokens == 0
+        assert result.interjections_delivered == 0
+
+    def test_post_turn_result_defaults(self, asdaaas_env):
+        """PostTurnResult has sane defaults."""
+        from turn_engine import PostTurnResult
+        result = PostTurnResult()
+        assert result.commands_processed == []
+        assert result.continue_queued is False
+
+    def test_engine_state_fields(self, asdaaas_env):
+        """TurnEngine tracks per-session state."""
+        engine = asdaaas_env.make_engine(context_window=100000)
+        assert engine.context_window == 100000
+        assert engine.total_tokens == 0
+        assert engine.turns_since_compaction == 2
+        assert engine.delay_until_event is False

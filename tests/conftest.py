@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 
 from asdaaas_env import AsdaaasEnv
+from turn_engine import TurnEngine, GatherResult, DeliverResult, PostTurnResult
 
 
 AGENT_NAME = "TestAgent"
@@ -217,6 +218,17 @@ class AsdaaasTestEnv:
         if not path.exists():
             return {}
         return json.loads(path.read_text())
+
+    # --- Engine ---
+
+    def make_engine(self, backend=None, context_window: int = 200000) -> TurnEngine:
+        """Create a TurnEngine wired to this hermetic environment."""
+        return TurnEngine(
+            env=self.env,
+            agent_name=self.agent_name,
+            backend=backend,
+            context_window=context_window,
+        )
 
     # --- Helpers ---
 

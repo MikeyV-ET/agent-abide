@@ -2287,186 +2287,32 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                         print(f"[asdaaas] Ack: {removed} doorbell(s) cleared")
 
                 elif action == "compact":
-                    if turns_since_compaction < COMPACTION_COOLDOWN_TURNS:
-                        # Cooldown active -- reject
-                        print(f"[asdaaas] Compact rejected: cooldown ({turns_since_compaction} turns since last compaction)")
-                        bell_dir = agent_dir(agent_name) / "doorbells"
-                        bell_dir.mkdir(parents=True, exist_ok=True)
-                        bell = {
-                            "adapter": "session",
-                            "command": "compact",
-                            "priority": 3,
-                            "text": f"Compaction rejected: cooldown active ({turns_since_compaction} turn(s) since last compaction). Wait {COMPACTION_COOLDOWN_TURNS - turns_since_compaction} more turn(s).",
-                            "request_id": request_id,
-                            "ts": time.time(),
-                        }
-                        fd, tmp_path = tempfile.mkstemp(dir=str(bell_dir), suffix=".tmp", prefix="cpt_")
-                        with os.fdopen(fd, "w") as f:
-                            json.dump(bell, f)
-                        os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
-                    else:
-                        # Execute compaction immediately.
-                        # History: previously used a touch-file handshake where
-                        # asdaaas sent a compact_confirm doorbell and the agent
-                        # had to `touch /tmp/compact_confirm_<name>_<hex>.tmp`
-                        # within 3 turns. This was added to prevent stale doorbell
-                        # loops (Q Session 40). But the handshake itself became
-                        # the failure mode: at high context (>80%), agents can't
-                        # reliably parse the doorbell and execute the touch command
-                        # — they respond with speech only. Both Jr and Trip failed
-                        # repeatedly this way. The stale-doorbell problem is now
-                        # defended by _cleanup_compact_doorbells(), DOORBELL_MAX_DELIVERIES,
-                        # and COMPACTION_COOLDOWN_TURNS. The agent's compact command
-                        # IS the intent — no handshake needed.
-                        if compact_pending:
-                            compact_pending = None
-                            compact_pending_turns = 0
-                            _cleanup_compact_doorbells(agent_name)
-                        print(f"[asdaaas] Compact: executing immediately for {agent_name}")
-                        try:
-                            tokens_before = total_tokens
-                            write_compaction_state(agent_name, "in_flight", request_id=request_id, tokens_before=tokens_before)
-                            instructions = cmd.get("instructions") or get_compaction_instructions(agent_name)
-                            compact_prompt = f"/compact {instructions}"
-                            compact_handle = await backend.send_prompt(compact_prompt)
-                            compact_result = await backend.collect_response(
-                                compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
-                            total_tokens = backend.total_tokens
-
-                            # Verify compaction actually reduced tokens.
-                            # /compact is async — the binary may compact at the next
-                            # turn boundary, not immediately. If tokens didn't drop,
-                            # skip the probe (saves tokens) and let auto-compaction
-                            # detection at the top of the loop catch the real drop.
-                            if total_tokens >= tokens_before:
-                                # /compact is async — binary compacts at next turn
-                                # boundary. Poll for the actual token drop.
-                                print(f"[asdaaas] Compact pending: {tokens_before} -> {total_tokens} (polling for async completion)")
-                                write_compaction_state(agent_name, "pending", request_id=request_id, tokens_before=tokens_before)
-                                compaction_landed = False
-                                for _poll in range(15):  # 15 x 2s = 30s max
-                                    await asyncio.sleep(2)
-                                    total_tokens = backend.refresh_tokens()
-                                    if total_tokens < tokens_before * 0.6:
-                                        compaction_landed = True
-                                        break
-                                if compaction_landed:
-                                    _, event_ta, event_tb = backend.pop_compaction_event()  # drain + get event values
-                                    tokens_before = event_tb or tokens_before
-                                    total_tokens = event_ta or total_tokens
-                                    print(f"[asdaaas] Compact completed (async): {tokens_before} -> {total_tokens}")
-                                    _prev_tokens = total_tokens
-                                    turns_since_compaction = 0
-                                    write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
-                                    _queue_post_compaction_doorbell(agent_name, tokens_before, total_tokens)
-                                else:
-                                    # Compaction likely landed but refresh_tokens()
-                                    # couldn't see the drop (file pointer past the
-                                    # post-compaction _meta frames). Queue doorbell
-                                    # unconditionally — false positive is better than
-                                    # a stuck agent with no turn.
-                                    _, event_ta, event_tb = backend.pop_compaction_event()  # drain + get event values
-                                    tokens_before = event_tb or tokens_before
-                                    total_tokens = event_ta or total_tokens
-                                    print(f"[asdaaas] Compact still pending after 30s poll — queueing doorbell anyway")
-                                    write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
-                                    _queue_post_compaction_doorbell(agent_name, tokens_before, total_tokens)
-                                    turns_since_compaction = 0
-                                    _prev_tokens = total_tokens
-                            else:
-                                _, event_ta, event_tb = backend.pop_compaction_event()
-                                tokens_before = event_tb or tokens_before
-                                total_tokens = event_ta or total_tokens
-                                gaze = read_gaze(agent_name)
-                                probe_text = (
-                                    f"[Compaction complete. Context reduced from {tokens_before} to {total_tokens} tokens. "
-                                    f"You are resuming from a compacted context. Follow your boot protocol.]"
-                                    + context_left_tag(total_tokens, context_window, 0, gaze=gaze)
-                                )
-                                await backend.drain_stale()
-                                probe_handle = await backend.send_prompt(probe_text)
-                                probe_result = await backend.collect_response(
-                                    probe_handle, on_meta=_on_streaming_meta,
-                                    keepalive_timeout=60.0, max_wall_clock=300.0)
-                                total_tokens = backend.total_tokens
-                                print(f"[asdaaas] Compact probe: real totalTokens={total_tokens}")
-                                if probe_result.speech.strip():
-                                    write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
-                                _prev_tokens = total_tokens
-                                turns_since_compaction = 0
-                                result_file = agent_dir(agent_name) / "command_result.json"
-                                tmp = str(result_file) + ".tmp"
-                                with open(tmp, "w") as f:
-                                    json.dump({
-                                        "request_id": request_id,
-                                        "action": "compact",
-                                        "before": tokens_before,
-                                        "after": total_tokens,
-                                        "ts": time.time(),
-                                    }, f)
-                                os.rename(tmp, str(result_file))
-                                print(f"[asdaaas] Compact: {tokens_before} -> {total_tokens}")
-                                write_compaction_state(agent_name, "complete", request_id=request_id, tokens_before=tokens_before, tokens_after=total_tokens)
-                                write_health(agent_name, "ready", f"compacted {tokens_before}->{total_tokens}", total_tokens, context_window)
-                                _cleanup_compact_doorbells(agent_name)
-                        except Exception as e:
-                            write_compaction_state(agent_name, "failed", request_id=request_id)
-                            print(f"[asdaaas] Compact failed: {e}")
+                    # Extracted to TurnEngine.handle_compact_command() (S4)
+                    engine.turns_since_compaction = turns_since_compaction
+                    engine.compact_pending = compact_pending
+                    engine.compact_pending_turns = compact_pending_turns
+                    engine.total_tokens = total_tokens
+                    await engine.handle_compact_command(cmd, on_streaming_meta=_on_streaming_meta)
+                    total_tokens = engine.total_tokens
+                    turns_since_compaction = engine.turns_since_compaction
+                    _prev_tokens = engine._prev_tokens
+                    compact_pending = engine.compact_pending
+                    compact_pending_turns = engine.compact_pending_turns
+                    gaze = engine.gaze
 
                 elif action == "force_compact":
-                    # External operator tool: skip confirmation, compact immediately.
-                    # Used when agent is stuck and can't self-compact.
-                    if turns_since_compaction < COMPACTION_COOLDOWN_TURNS:
-                        print(f"[asdaaas] Force compact: overriding cooldown ({turns_since_compaction} turns)")
-                    if compact_pending:
-                        print(f"[asdaaas] Force compact: clearing pending confirmation")
-                        compact_pending = None
-                        compact_pending_turns = 0
-                    print(f"[asdaaas] Force compact: executing immediately for {agent_name}")
-                    try:
-                        tokens_before = total_tokens
-                        write_compaction_state(agent_name, "in_flight", tokens_before=tokens_before)
-                        instructions = cmd.get("instructions") or get_compaction_instructions(agent_name)
-                        compact_prompt = f"/compact {instructions}"
-                        compact_handle = await backend.send_prompt(compact_prompt)
-                        compact_result = await backend.collect_response(
-                            compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
-                        total_tokens = backend.total_tokens
-
-                        # Verify compaction actually reduced tokens (see compact path comment)
-                        if total_tokens >= tokens_before:
-                            print(f"[asdaaas] Force compact pending: {tokens_before} -> {total_tokens} (no reduction yet)")
-                            write_compaction_state(agent_name, "pending", tokens_before=tokens_before)
-                            _prev_tokens = total_tokens
-                        else:
-                            _, event_ta, event_tb = backend.pop_compaction_event()
-                            tokens_before = event_tb or tokens_before
-                            total_tokens = event_ta or total_tokens
-                            gaze = read_gaze(agent_name)
-                            probe_text = (
-                                f"[Compaction complete. Context reduced from {tokens_before} to {total_tokens} tokens. "
-                                f"You are resuming from a compacted context. Follow your boot protocol.]"
-                                + context_left_tag(total_tokens, context_window, 0, gaze=gaze)
-                            )
-                            await backend.drain_stale()
-                            probe_handle = await backend.send_prompt(probe_text)
-                            probe_result = await backend.collect_response(
-                                probe_handle, on_meta=_on_streaming_meta,
-                                keepalive_timeout=60.0, max_wall_clock=300.0)
-                            total_tokens = backend.total_tokens
-                            print(f"[asdaaas] Force compact probe: real totalTokens={total_tokens}")
-                            if probe_result.speech.strip():
-                                write_to_outbox(agent_name, probe_result.speech.strip(), gaze.get("speech"), "speech")
-
-                            _prev_tokens = total_tokens
-                            turns_since_compaction = 0
-                            _cleanup_compact_doorbells(agent_name)
-                            write_compaction_state(agent_name, "complete", tokens_before=tokens_before, tokens_after=total_tokens)
-                            write_health(agent_name, "ready", f"force-compacted {tokens_before}->{total_tokens}", total_tokens, context_window)
-                            print(f"[asdaaas] Force compact: {tokens_before} -> {total_tokens}")
-                    except Exception as e:
-                        write_compaction_state(agent_name, "failed")
-                        print(f"[asdaaas] Force compact failed: {e}")
+                    # Extracted to TurnEngine.handle_force_compact_command() (S4)
+                    engine.turns_since_compaction = turns_since_compaction
+                    engine.compact_pending = compact_pending
+                    engine.compact_pending_turns = compact_pending_turns
+                    engine.total_tokens = total_tokens
+                    await engine.handle_force_compact_command(cmd, on_streaming_meta=_on_streaming_meta)
+                    total_tokens = engine.total_tokens
+                    turns_since_compaction = engine.turns_since_compaction
+                    _prev_tokens = engine._prev_tokens
+                    compact_pending = engine.compact_pending
+                    compact_pending_turns = engine.compact_pending_turns
+                    gaze = engine.gaze
 
                 elif action == "interrupt":
                     # External operator tool: inject a high-priority message into the agent's next prompt.

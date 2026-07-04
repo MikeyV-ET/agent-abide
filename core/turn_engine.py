@@ -704,3 +704,207 @@ class TurnEngine:
                            self.gaze.get("speech"), "speech")
 
         return True
+
+    async def handle_compact_command(self, cmd: dict, *,
+                                     on_streaming_meta=None) -> None:
+        """Handle agent-initiated compact command.
+
+        Checks cooldown, sends /compact, polls for async completion,
+        sends orientation probe or queues doorbell.
+        """
+        import asyncio
+        import json
+        import os
+        import tempfile
+        import time
+        from asdaaas import (
+            agent_dir, read_gaze, context_left_tag, write_to_outbox,
+            write_health, write_compaction_state, get_compaction_instructions,
+            _cleanup_compact_doorbells, _queue_post_compaction_doorbell,
+            COMPACTION_COOLDOWN_TURNS,
+        )
+
+        agent_name = self.agent_name
+        request_id = cmd.get("request_id", "")
+
+        if self.turns_since_compaction < COMPACTION_COOLDOWN_TURNS:
+            print(f"[asdaaas] Compact rejected: cooldown ({self.turns_since_compaction} turns since last compaction)")
+            bell_dir = agent_dir(agent_name) / "doorbells"
+            bell_dir.mkdir(parents=True, exist_ok=True)
+            bell = {
+                "adapter": "session",
+                "command": "compact",
+                "priority": 3,
+                "text": (f"Compaction rejected: cooldown active ({self.turns_since_compaction} turn(s) "
+                         f"since last compaction). Wait "
+                         f"{COMPACTION_COOLDOWN_TURNS - self.turns_since_compaction} more turn(s)."),
+                "request_id": request_id,
+                "ts": time.time(),
+            }
+            fd, tmp_path = tempfile.mkstemp(dir=str(bell_dir), suffix=".tmp", prefix="cpt_")
+            with os.fdopen(fd, "w") as f:
+                json.dump(bell, f)
+            os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
+            return
+
+        if self.compact_pending:
+            self.compact_pending = None
+            self.compact_pending_turns = 0
+            _cleanup_compact_doorbells(agent_name)
+        print(f"[asdaaas] Compact: executing immediately for {agent_name}")
+
+        try:
+            tokens_before = self.total_tokens
+            write_compaction_state(agent_name, "in_flight", request_id=request_id,
+                                  tokens_before=tokens_before)
+            instructions = cmd.get("instructions") or get_compaction_instructions(agent_name)
+            compact_prompt = f"/compact {instructions}"
+            compact_handle = await self.backend.send_prompt(compact_prompt)
+            compact_result = await self.backend.collect_response(
+                compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
+            self.total_tokens = self.backend.total_tokens
+
+            if self.total_tokens >= tokens_before:
+                # Async — poll for token drop
+                print(f"[asdaaas] Compact pending: {tokens_before} -> {self.total_tokens} "
+                      "(polling for async completion)")
+                write_compaction_state(agent_name, "pending", request_id=request_id,
+                                     tokens_before=tokens_before)
+                compaction_landed = False
+                for _poll in range(15):
+                    await asyncio.sleep(2)
+                    self.total_tokens = self.backend.refresh_tokens()
+                    if self.total_tokens < tokens_before * 0.6:
+                        compaction_landed = True
+                        break
+                if compaction_landed:
+                    _, event_ta, event_tb = self.backend.pop_compaction_event()
+                    tokens_before = event_tb or tokens_before
+                    self.total_tokens = event_ta or self.total_tokens
+                    print(f"[asdaaas] Compact completed (async): {tokens_before} -> {self.total_tokens}")
+                    self._prev_tokens = self.total_tokens
+                    self.turns_since_compaction = 0
+                    write_compaction_state(agent_name, "complete", request_id=request_id,
+                                         tokens_before=tokens_before, tokens_after=self.total_tokens)
+                    _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens)
+                else:
+                    _, event_ta, event_tb = self.backend.pop_compaction_event()
+                    tokens_before = event_tb or tokens_before
+                    self.total_tokens = event_ta or self.total_tokens
+                    print(f"[asdaaas] Compact still pending after 30s poll — queueing doorbell anyway")
+                    write_compaction_state(agent_name, "complete", request_id=request_id,
+                                         tokens_before=tokens_before, tokens_after=self.total_tokens)
+                    _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens)
+                    self.turns_since_compaction = 0
+                    self._prev_tokens = self.total_tokens
+            else:
+                _, event_ta, event_tb = self.backend.pop_compaction_event()
+                tokens_before = event_tb or tokens_before
+                self.total_tokens = event_ta or self.total_tokens
+                self.gaze = read_gaze(agent_name)
+                probe_text = (
+                    f"[Compaction complete. Context reduced from {tokens_before} to {self.total_tokens} tokens. "
+                    f"You are resuming from a compacted context. Follow your boot protocol.]"
+                    + context_left_tag(self.total_tokens, self.context_window, 0, gaze=self.gaze)
+                )
+                await self.backend.drain_stale()
+                probe_handle = await self.backend.send_prompt(probe_text)
+                probe_result = await self.backend.collect_response(
+                    probe_handle, on_meta=on_streaming_meta,
+                    keepalive_timeout=60.0, max_wall_clock=300.0)
+                self.total_tokens = self.backend.total_tokens
+                print(f"[asdaaas] Compact probe: real totalTokens={self.total_tokens}")
+                if probe_result.speech.strip():
+                    write_to_outbox(agent_name, probe_result.speech.strip(),
+                                   self.gaze.get("speech"), "speech")
+                self._prev_tokens = self.total_tokens
+                self.turns_since_compaction = 0
+                result_file = agent_dir(agent_name) / "command_result.json"
+                tmp = str(result_file) + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump({
+                        "request_id": request_id,
+                        "action": "compact",
+                        "before": tokens_before,
+                        "after": self.total_tokens,
+                        "ts": time.time(),
+                    }, f)
+                os.rename(tmp, str(result_file))
+                print(f"[asdaaas] Compact: {tokens_before} -> {self.total_tokens}")
+                write_compaction_state(agent_name, "complete", request_id=request_id,
+                                     tokens_before=tokens_before, tokens_after=self.total_tokens)
+                write_health(agent_name, "ready",
+                            f"compacted {tokens_before}->{self.total_tokens}",
+                            self.total_tokens, self.context_window)
+                _cleanup_compact_doorbells(agent_name)
+        except Exception as e:
+            write_compaction_state(agent_name, "failed", request_id=request_id)
+            print(f"[asdaaas] Compact failed: {e}")
+
+    async def handle_force_compact_command(self, cmd: dict, *,
+                                           on_streaming_meta=None) -> None:
+        """Handle operator force_compact command. Skips cooldown."""
+        import asyncio
+        import time
+        from asdaaas import (
+            read_gaze, context_left_tag, write_to_outbox, write_health,
+            write_compaction_state, get_compaction_instructions,
+            _cleanup_compact_doorbells, COMPACTION_COOLDOWN_TURNS,
+        )
+
+        agent_name = self.agent_name
+
+        if self.turns_since_compaction < COMPACTION_COOLDOWN_TURNS:
+            print(f"[asdaaas] Force compact: overriding cooldown ({self.turns_since_compaction} turns)")
+        if self.compact_pending:
+            print(f"[asdaaas] Force compact: clearing pending confirmation")
+            self.compact_pending = None
+            self.compact_pending_turns = 0
+        print(f"[asdaaas] Force compact: executing immediately for {agent_name}")
+
+        try:
+            tokens_before = self.total_tokens
+            write_compaction_state(agent_name, "in_flight", tokens_before=tokens_before)
+            instructions = cmd.get("instructions") or get_compaction_instructions(agent_name)
+            compact_prompt = f"/compact {instructions}"
+            compact_handle = await self.backend.send_prompt(compact_prompt)
+            compact_result = await self.backend.collect_response(
+                compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
+            self.total_tokens = self.backend.total_tokens
+
+            if self.total_tokens >= tokens_before:
+                print(f"[asdaaas] Force compact pending: {tokens_before} -> {self.total_tokens} (no reduction yet)")
+                write_compaction_state(agent_name, "pending", tokens_before=tokens_before)
+                self._prev_tokens = self.total_tokens
+            else:
+                _, event_ta, event_tb = self.backend.pop_compaction_event()
+                tokens_before = event_tb or tokens_before
+                self.total_tokens = event_ta or self.total_tokens
+                self.gaze = read_gaze(agent_name)
+                probe_text = (
+                    f"[Compaction complete. Context reduced from {tokens_before} to {self.total_tokens} tokens. "
+                    f"You are resuming from a compacted context. Follow your boot protocol.]"
+                    + context_left_tag(self.total_tokens, self.context_window, 0, gaze=self.gaze)
+                )
+                await self.backend.drain_stale()
+                probe_handle = await self.backend.send_prompt(probe_text)
+                probe_result = await self.backend.collect_response(
+                    probe_handle, on_meta=on_streaming_meta,
+                    keepalive_timeout=60.0, max_wall_clock=300.0)
+                self.total_tokens = self.backend.total_tokens
+                print(f"[asdaaas] Force compact probe: real totalTokens={self.total_tokens}")
+                if probe_result.speech.strip():
+                    write_to_outbox(agent_name, probe_result.speech.strip(),
+                                   self.gaze.get("speech"), "speech")
+                self._prev_tokens = self.total_tokens
+                self.turns_since_compaction = 0
+                _cleanup_compact_doorbells(agent_name)
+                write_compaction_state(agent_name, "complete",
+                                     tokens_before=tokens_before, tokens_after=self.total_tokens)
+                write_health(agent_name, "ready",
+                            f"force-compacted {tokens_before}->{self.total_tokens}",
+                            self.total_tokens, self.context_window)
+                print(f"[asdaaas] Force compact: {tokens_before} -> {self.total_tokens}")
+        except Exception as e:
+            write_compaction_state(agent_name, "failed")
+            print(f"[asdaaas] Force compact failed: {e}")

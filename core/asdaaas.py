@@ -2672,6 +2672,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                             # Agent was idle during delay — any arriving message
                             # is a fresh interaction, not midturn.
                             last_was_foreground = True
+                            engine.last_was_foreground = True
                             if interrupted:
                                 print(f"[asdaaas] Delay interrupted by {reason}")
                                 continue
@@ -2778,6 +2779,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 # Agent idle (until_event or no default_doorbell) — reset
                 # midturn state so arriving messages aren't falsely flagged.
                 last_was_foreground = True
+                engine.last_was_foreground = True
                 await asyncio.sleep(IDLE_POLL_INTERVAL)
                 continue
 
@@ -2787,8 +2789,6 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 gathered,
                 cancel_event=cancel_event,
                 interjection_enabled=interjection_enabled,
-                last_response_ts=last_response_ts,
-                last_was_foreground=last_was_foreground,
                 on_streaming_meta=_on_streaming_meta)
 
             if deliver_result is not None:
@@ -2805,206 +2805,20 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 if bells:
                     last_delivered_bell_ids = {b.get("id") for b in bells if b.get("id")}
                     engine.last_delivered_bell_ids = last_delivered_bell_ids
-                # Process ack commands written during the response BEFORE
-                # the next iteration polls doorbells. Without this, the bell
-                # gets repolled and redelivered before the ack is processed.
-                post_cmds = poll_commands(agent_name)
-                requeue = []
-                agent_wrote_delay = False  # track if agent explicitly set delay
-                for pc in post_cmds:
-                    pa = pc.get("action", "")
-                    piggy = pc.get("ack", [])
-                    if piggy:
-                        ack_doorbells(agent_name, piggy)
-                    if pa == "ack":
-                        ack_doorbells(agent_name, pc.get("handled", []))
-                    elif pa == "delay":
-                        dv = pc.get("seconds", 0)
-                        delay_text = pc.get("text") or None
-                        if dv == "until_event":
-                            delay_until_event = True
-                            next_turn_delay = 0
-                        else:
-                            next_turn_delay = float(dv)
-                            delay_until_event = False
-                        agent_wrote_delay = True
-                    elif pa in ("compact", "gaze", "awareness"):
-                        # Complex commands need full step 1 handling — put back.
-                        requeue.append(pc)
-                if requeue:
-                    cmd_dir = agent_dir(agent_name) / "commands"
-                    cmd_dir.mkdir(parents=True, exist_ok=True)
-                    for rc in requeue:
-                        fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
-                        with os.fdopen(fd, "w") as f:
-                            json.dump(rc, f)
-                handled_count = len(post_cmds) - len(requeue)
-                if handled_count:
-                    print(f"[asdaaas] Post-response: drained {handled_count} command(s)" +
-                          (f", requeued {len(requeue)}" if requeue else ""))
-                requeue = []  # reset so late poll doesn't re-write already-queued items
-                # Clean up continue doorbells after every response. Prevents
-                # re-delivery cascade: without this, a persistent continue bell
-                # gets re-delivered with delivery+1 on each loop iteration,
-                # burning turns on redundant prompts.
-                _cleanup_continue_doorbells(agent_name)
-                # Late command poll: the agent's delay command may not be on
-                # disk yet when the first post-response drain runs (tool call
-                # file write races with collect_response return). Brief wait
-                # then re-poll catches late-arriving commands.
-                if not delay_until_event and next_turn_delay == 0:
-                    await asyncio.sleep(0.5)
-                    late_cmds = poll_commands(agent_name)
-                    for lc in late_cmds:
-                        la = lc.get("action", "")
-                        lpiggy = lc.get("ack", [])
-                        if lpiggy:
-                            ack_doorbells(agent_name, lpiggy)
-                        if la == "delay":
-                            ldv = lc.get("seconds", 0)
-                            delay_text = lc.get("text") or None
-                            if ldv == "until_event":
-                                delay_until_event = True
-                                next_turn_delay = 0
-                            else:
-                                next_turn_delay = float(ldv)
-                                delay_until_event = False
-                            agent_wrote_delay = True
-                        elif la == "ack":
-                            ack_doorbells(agent_name, lc.get("handled", []))
-                        elif la in ("compact", "gaze", "awareness"):
-                            requeue.append(lc)
-                    if late_cmds:
-                        print(f"[asdaaas] Late command poll: {len(late_cmds)} command(s)")
-                        if requeue:
-                            cmd_dir = agent_dir(agent_name) / "commands"
-                            cmd_dir.mkdir(parents=True, exist_ok=True)
-                            for rc in requeue:
-                                fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
-                                with os.fdopen(fd, "w") as f:
-                                    json.dump(rc, f)
-                # Drain interjection queue: messages queued after the last
-                # shell tool call in the turn. Fold into doorbells for next prompt.
-                if interjection_enabled:
-                    from interjection import drain_interjection_queue
-                    leftover = drain_interjection_queue(agent_name)
-                    if leftover:
-                        for msg_text in leftover:
-                            queue_continue_doorbell(agent_name, text=msg_text)
-                        print(f"[asdaaas] Drained {len(leftover)} leftover interjection(s) → doorbells")
-
-                # Foreground if any in-room messages included; doorbell-only = non-foreground
-                last_was_foreground = has_msgs
-
-                gaze = read_gaze(agent_name)
-
-                if result.speech.strip():
-                    # Only update last_response_ts when the agent actually spoke.
-                    # Empty responses (wall clock timeout, no_visible_content)
-                    # should NOT reset this — the agent hasn't addressed the user.
-                    last_response_ts = time.time()
-                    consecutive_empty_doorbell = 0
-                    write_conversation(agent_name, "assistant", result.speech)
-                    if result.thoughts.strip():
-                        write_conversation(agent_name, "thinking", result.thoughts)
-                    write_to_outbox(agent_name, result.speech.strip(), gaze.get("speech"), "speech")
-                    timer.mark("outbox_done")
-                    if result.thoughts.strip() and gaze.get("thoughts") and result.thoughts.strip() != result.speech.strip():
-                        write_to_outbox(agent_name, result.thoughts.strip(), gaze.get("thoughts"), "thoughts")
-                    print(timer.log_line())
-                    write_profile(agent_name, timer)
-                    detail = f"responded {len(result.speech)} chars"
-                    if has_bells and has_msgs:
-                        detail = f"coalesced response ({len(bells)} bells + {len(in_room_msgs)} msgs), {len(result.speech)} chars"
-                    write_health(agent_name, "active", detail, total_tokens, context_window,
-                                 observer_state=read_observer_state())
-                    # After responding to a user message with speech, default
-                    # to waiting for agent's next delay command — unless the
-                    # agent already wrote an explicit delay in the post-response
-                    # drain (issue_0030: unconditional override silenced agents).
-                    if has_msgs and not agent_wrote_delay:
-                        delay_until_event = True
-                else:
-                    # Empty response tracking (only for doorbell-only prompts)
-                    if has_bells and not has_msgs:
-                        consecutive_empty_doorbell += 1
-                        # Clean up the continue doorbell that produced the
-                        # empty response — prevents re-delivery flood.  Step 3
-                        # will queue a fresh continue on the next iteration
-                        # (after the collection window), so agent continuity
-                        # is preserved without the re-delivery cascade.
-                        _cleanup_continue_doorbells(agent_name)
-                        print(f"[asdaaas] {agent_name} doorbell -> (empty) [consecutive={consecutive_empty_doorbell}]")
-                        write_health(agent_name, "active", f"empty doorbell response (x{consecutive_empty_doorbell})", total_tokens, context_window)
-                        if consecutive_empty_doorbell >= EMPTY_DOORBELL_BACKOFF_AFTER:
-                            backoff = min(EMPTY_DOORBELL_BACKOFF_PER * consecutive_empty_doorbell, EMPTY_DOORBELL_BACKOFF_MAX)
-                            print(f"[asdaaas] Backoff: {backoff}s after {consecutive_empty_doorbell} consecutive empty doorbell responses")
-                            next_turn_delay = backoff
-
-                        # Doom loop check — observer-first, heuristic fallback
-                        obs_doom = read_observer_state()
-                        if obs_doom is not None and obs_doom.get("doom_loop"):
-                            print(f"[asdaaas] *** OBSERVER: DOOM LOOP DETECTED for {agent_name} ***")
-                            print(f"[asdaaas]   Stopping continues.")
-                            delay_until_event = True
-                            write_health(agent_name, "stalled", "observer_doom_loop_detected", total_tokens, context_window)
-                            try:
-                                from localmail import send_mail
-                                send_mail(
-                                    from_agent="asdaaas",
-                                    to_agent="Sr",
-                                    text=f"DOOM LOOP (observer): {agent_name} doom loop detected. Stopping continues.",
-                                )
-                            except Exception:
-                                pass
-                        elif obs_doom is None and (consecutive_empty_doorbell >= CONTINUE_DOOM_CHECK_AFTER
-                                and consecutive_empty_doorbell % CONTINUE_DOOM_CHECK_AFTER == 0):
-                            try:
-                                from fix_orphaned_tool_results import find_doom_loop_corruption, find_session_dir as _find_sd
-                                sd = _find_sd(agent_name)
-                                cp = sd / "chat_history.jsonl"
-                                if cp.exists():
-                                    with open(cp) as _f:
-                                        _msgs = [json.loads(l) for l in _f if l.strip()]
-                                    doom = find_doom_loop_corruption(_msgs)
-                                    if doom["removable"]:
-                                        print(f"[asdaaas] *** DOOM LOOP CORRUPTION DETECTED for {agent_name} ***")
-                                        print(f"[asdaaas]   {len(doom['duplicates'])} duplicate tool_results, {len(doom['synthetics'])} synthetic warnings")
-                                        print(f"[asdaaas]   Stopping continues. Manual repair needed: python3 fix_orphaned_tool_results.py --agent {agent_name}")
-                                        delay_until_event = True
-                                        write_health(agent_name, "stalled", "doom_loop_corruption_detected", total_tokens, context_window)
-                                        try:
-                                            from localmail import send_mail
-                                            send_mail(
-                                                from_agent="asdaaas",
-                                                to_agent="Sr",
-                                                text=f"DOOM LOOP: {agent_name} has corrupted chat_history ({len(doom['duplicates'])} duplicate tool_results). Needs repair: python3 fix_orphaned_tool_results.py --agent {agent_name}",
-                                            )
-                                        except Exception:
-                                            pass
-                            except Exception as e:
-                                print(f"[asdaaas] Doom loop check error: {e}")
-
-                        # Hard cap on consecutive empties
-                        if consecutive_empty_doorbell >= CONTINUE_MAX_CONSECUTIVE:
-                            print(f"[asdaaas] *** CONTINUE CAP ({CONTINUE_MAX_CONSECUTIVE}) hit for {agent_name} ***")
-                            print(f"[asdaaas]   Stopping continues. Agent may be stuck.")
-                            delay_until_event = True
-                            write_health(agent_name, "stalled", f"continue_cap_hit ({consecutive_empty_doorbell})", total_tokens, context_window)
-                            try:
-                                from localmail import send_mail
-                                send_mail(
-                                    from_agent="asdaaas",
-                                    to_agent="Sr",
-                                    text=f"CONTINUE CAP: {agent_name} hit {consecutive_empty_doorbell} consecutive empty responses. Stopped continues. Agent may be stuck.",
-                                )
-                            except Exception:
-                                pass
-                    else:
-                        print(f"[asdaaas] {agent_name} -> (empty)")
-                        print(timer.log_line())
-                        write_profile(agent_name, timer)
-                        write_health(agent_name, "active", "empty response", total_tokens, context_window)
+                # ---- Post-turn processing ----
+                # Extracted to TurnEngine.post_turn() (S4 decomposition)
+                engine.interjection_enabled = interjection_enabled
+                post_result = await engine.post_turn(deliver_result)
+                # Sync engine state back to main() locals
+                next_turn_delay = engine.next_turn_delay
+                delay_until_event = engine.delay_until_event
+                delay_text = engine.delay_text
+                last_response_ts = engine.last_response_ts
+                last_was_foreground = engine.last_was_foreground
+                consecutive_empty_doorbell = engine.consecutive_empty_doorbell
+                gaze = engine.gaze
+                total_tokens = engine.total_tokens
+                agent_wrote_delay = post_result.agent_wrote_delay
 
             # ==== 5. Background doorbell messages (separate delivery) ====
             for msg in bg_doorbell_msgs:
@@ -3019,6 +2833,8 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 turns_since_compaction += 1
                 last_response_ts = time.time()
                 last_was_foreground = False
+                engine.last_response_ts = last_response_ts
+                engine.last_was_foreground = False
                 if bg_result.speech.strip():
                     write_to_outbox(agent_name, bg_result.speech.strip(), gaze.get("speech"), "speech")
                     if bg_result.thoughts.strip() and gaze.get("thoughts") and bg_result.thoughts.strip() != bg_result.speech.strip():

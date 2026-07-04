@@ -485,7 +485,7 @@ class TurnEngine:
         # ---- Interjection drain ----
         if self.interjection_enabled:
             from interjection import drain_interjection_queue
-            leftover = drain_interjection_queue(agent_name)
+            leftover = drain_interjection_queue(agent_name, env=self.env)
             if leftover:
                 for msg_text in leftover:
                     queue_continue_doorbell(agent_name, text=msg_text, env=self.env)

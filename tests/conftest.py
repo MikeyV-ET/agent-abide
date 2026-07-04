@@ -230,6 +230,21 @@ class AsdaaasTestEnv:
             context_window=context_window,
         )
 
+    async def run_turn(self, engine: TurnEngine) -> tuple:
+        """Run one full turn cycle: gather → deliver → post_turn.
+
+        Returns (GatherResult, DeliverResult | None, PostTurnResult | None).
+        If gather has no content, deliver and post_turn are skipped (None, None).
+        """
+        gathered = await engine.gather_pending()
+        if not gathered.has_content:
+            return gathered, None, None
+        dr = await engine.deliver_turn(gathered)
+        if dr is None:
+            return gathered, None, None
+        ptr = await engine.post_turn(dr)
+        return gathered, dr, ptr
+
     # --- Helpers ---
 
     def clear_outbox(self, adapter: str = "tui"):

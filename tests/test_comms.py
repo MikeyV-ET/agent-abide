@@ -28,7 +28,7 @@ def tmp_agents(tmp_path, monkeypatch):
 
     # Patch agent_dir to return our temp path
     import asdaaas
-    monkeypatch.setattr(asdaaas, "agent_dir", lambda name: tmp_path / name / "asdaaas")
+    monkeypatch.setattr(asdaaas, "agent_dir", lambda name, env=None: tmp_path / name / "asdaaas")
 
     return {
         "agent_name": agent_name,

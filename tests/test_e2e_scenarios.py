@@ -182,7 +182,6 @@ class TestInterjectionDrain:
     """Interjections queued mid-turn get drained to doorbells in post_turn."""
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="post_turn calls drain_interjection_queue without env=self.env")
     async def test_leftover_interjections_become_doorbells(self, asdaaas_env):
         """Interjections not delivered mid-turn become continue doorbells."""
         from mock_binary import MockBinary, NormalResponse

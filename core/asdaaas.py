@@ -55,6 +55,7 @@ except ModuleNotFoundError:
     from asdaaas_config import config
 
 from asdaaas_env import AsdaaasEnv
+from turn_engine import TurnEngine
 
 ASDAAAS_DIR = config.asdaaas_dir
 ADAPTERS_DIR = config.adapters_dir
@@ -2184,7 +2185,13 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     
     # Pending message queue for background channels in "pending" mode
     pending_queue = PendingQueue()
-    
+
+    # S4: Turn engine — phases extracted from main() for testability
+    env = AsdaaasEnv.from_config()
+    engine = TurnEngine(env, agent_name, backend,
+                        context_window=context_window,
+                        watchdog=watchdog, pending_queue=pending_queue)
+
     # Phase 7.2: Read adapter registrations
     adapters = read_adapter_registrations()
     print(f"[asdaaas] Adapters: {list(adapters.keys()) if adapters else '(none registered)'}")
@@ -2606,99 +2613,16 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             adapters = read_adapter_registrations()
 
             # ---- 2. Gather ALL pending items before sending any prompt ----
-            # Coalesced delivery: doorbells + in-room messages delivered in one
-            # prompt so the agent sees the full picture when "coming up for air."
-            # Background messages (doorbell mode) still get separate delivery after.
-            awareness = read_awareness(agent_name)
-            gaze = read_gaze(agent_name)
+            # Extracted to TurnEngine.gather_pending() (S4 decomposition)
+            gathered = await engine.gather_pending()
+            bells = gathered.doorbells
+            in_room_msgs = gathered.messages
+            bg_doorbell_msgs = gathered.bg_doorbells
+            messages = bells + in_room_msgs + bg_doorbell_msgs  # for idle check below
+            awareness = engine.awareness
+            gaze = engine.gaze
+            last_delivered_bell_ids = engine.last_delivered_bell_ids
             did_work_this_iteration = False
-
-            # 2a. Poll doorbells, filtering out bells already delivered but
-            # not yet acked.  Suppression persists across iterations until
-            # the agent acks (bell removed from disk) or new bells arrive
-            # and get delivered (which replaces the suppression set).
-            # (issue_0039: late ack misses poll window → redelivery).
-            all_bells = poll_doorbells(agent_name, awareness)
-            if last_delivered_bell_ids:
-                # Only keep suppressing bells that are still on disk (un-acked).
-                # Bells already acked won't appear in all_bells, so the set
-                # naturally shrinks as acks land.
-                still_pending = {b.get("id") for b in all_bells} & last_delivered_bell_ids
-                bells = [b for b in all_bells if b.get("id") not in last_delivered_bell_ids]
-                if still_pending:
-                    print(f"[asdaaas] Suppressed {len(still_pending)} un-acked bell(s): "
-                          f"{list(still_pending)}")
-                # Keep suppressing only the bells that are still un-acked
-                last_delivered_bell_ids = still_pending
-            else:
-                bells = all_bells
-            if bells:
-                for bell in bells:
-                    bell_req_id = bell.get("request_id", "")
-                    if bell_req_id:
-                        watchdog.acknowledge(bell_req_id)
-
-            # 2b. Poll adapter inboxes + attention timeouts + pending queue
-            attentions = poll_attentions(agent_name)
-            timeout_bells = check_attention_timeouts(agent_name, attentions)
-            if timeout_bells:
-                for tb in timeout_bells:
-                    backend.proc.stdin.write((tb["text"] + "\n").encode())
-                    await backend.proc.stdin.drain()
-                    print(f"[asdaaas] ATTENTION TIMEOUT delivered to {agent_name}: {tb['msg_id']}")
-                attentions = poll_attentions(agent_name)
-
-            pending_msgs = pending_queue.drain_for_gaze(gaze)
-            if pending_msgs:
-                print(f"[asdaaas] PENDING: delivering {len(pending_msgs)} queued message(s) (gaze matched)")
-
-            messages = poll_adapter_inboxes(agent_name, awareness)
-            legacy_msgs = poll_inbox(agent_name)
-            messages.extend(legacy_msgs)
-            messages = pending_msgs + messages
-
-            # 2c. Classify adapter messages: in-room vs background
-            in_room_msgs = []
-            bg_doorbell_msgs = []
-
-            for msg in messages:
-                text = msg.get("text", "").strip()
-                sender = msg.get("from", "unknown")
-                adapter = msg.get("adapter", "unknown")
-
-                if not text:
-                    continue
-
-                # Attention matching (higher priority than gaze filtering)
-                if attentions:
-                    matched_attn = match_attention(agent_name, attentions, sender)
-                    if matched_attn:
-                        response_bell = resolve_attention(matched_attn, text)
-                        response_text = response_bell["text"]
-                        backend.proc.stdin.write((response_text + "\n").encode())
-                        await backend.proc.stdin.drain()
-                        print(f"[asdaaas] ATTENTION RESPONSE delivered to {agent_name}: {matched_attn['msg_id']}")
-                        attentions = poll_attentions(agent_name)
-                        continue
-
-                # Gaze filtering
-                gaze = read_gaze(agent_name)
-
-                if not matches_gaze(msg, gaze):
-                    mode = get_background_mode(msg, awareness)
-
-                    if mode == "drop":
-                        print(f"[asdaaas] DROP: {sender} (via {adapter}) -- not in gaze room")
-                        continue
-                    elif mode == "pending":
-                        pending_queue.add(msg)
-                        print(f"[asdaaas] PENDING: queued {sender} (via {adapter}) -- {pending_queue.total} total pending")
-                        continue
-                    else:  # doorbell — collect for separate delivery after coalesced prompt
-                        bg_doorbell_msgs.append(msg)
-                        continue
-
-                in_room_msgs.append(msg)
 
             # ---- 3. Nothing pending? Handle idle / default doorbell ----
             if not messages and not bells and not commands:
@@ -2956,6 +2880,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 # skips them (issue_0039: agent's ack may still be in-flight).
                 if bells:
                     last_delivered_bell_ids = {b.get("id") for b in bells if b.get("id")}
+                    engine.last_delivered_bell_ids = last_delivered_bell_ids
                 # Process ack commands written during the response BEFORE
                 # the next iteration polls doorbells. Without this, the bell
                 # gets repolled and redelivered before the ack is processed.

@@ -54,11 +54,15 @@ import adapter_api
 # PATHS
 # ============================================================================
 
+from typing import Optional
+
 try:
     from asdaaas_config import config
 except ModuleNotFoundError:
     import sys; sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'core'))
     from asdaaas_config import config
+
+from asdaaas_env import AsdaaasEnv
 
 HUB_DIR = config.hub_dir
 AGENTS_DIR = HUB_DIR / "agents"  # legacy
@@ -74,7 +78,8 @@ ALL_AGENTS = ["Sr", "Jr", "Trip", "Q", "Cinco", "Squiggy"]
 # ============================================================================
 
 def send_mail(from_agent: str, to_agent, text: str, 
-              priority: int = 3, meta: dict = None) -> str:
+              priority: int = 3, meta: dict = None,
+              env: Optional[AsdaaasEnv] = None) -> str:
     """
     Send a localmail message to one or more agents.
     
@@ -86,6 +91,7 @@ def send_mail(from_agent: str, to_agent, text: str,
     Can be called from any context — TUI agent, asdaaas agent, script.
     Returns the message ID.
     """
+    env = env or AsdaaasEnv.from_config()
     recipients = [to_agent] if isinstance(to_agent, str) else list(to_agent)
     if not recipients:
         raise ValueError("to_agent must be a non-empty string or list")
@@ -94,7 +100,7 @@ def send_mail(from_agent: str, to_agent, text: str,
     msg_id = str(uuid.uuid4())
     
     for recipient in recipients:
-        inbox = AGENTS_HOME_DIR / recipient / "asdaaas" / "adapters" / "localmail" / "inbox"
+        inbox = env.agents_home / recipient / "asdaaas" / "adapters" / "localmail" / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
         
         msg = {
@@ -125,7 +131,8 @@ def send_mail(from_agent: str, to_agent, text: str,
 
 
 def reply_all(original_msg: dict, from_agent: str, text: str,
-              priority: int = 3, meta: dict = None) -> str:
+              priority: int = 3, meta: dict = None,
+              env: Optional[AsdaaasEnv] = None) -> str:
     """Reply to all recipients + sender of an original message, excluding self.
     
     original_msg: the message dict being replied to (must have 'from' and 'to').
@@ -145,17 +152,19 @@ def reply_all(original_msg: dict, from_agent: str, text: str,
     if not all_parties:
         raise ValueError("reply_all: no recipients after excluding self")
     
-    return send_mail(from_agent, sorted(all_parties), text, priority, meta)
+    return send_mail(from_agent, sorted(all_parties), text, priority, meta, env=env)
 
 
-def read_mail(agent_name: str, delete: bool = True) -> list:
+def read_mail(agent_name: str, delete: bool = True,
+              env: Optional[AsdaaasEnv] = None) -> list:
     """
     Read all pending localmail for an agent.
     
     For TUI agents who can't receive doorbells — call this to check mail.
     Returns list of message dicts, oldest first.
     """
-    inbox = AGENTS_HOME_DIR / agent_name / "asdaaas" / "adapters" / "localmail" / "inbox"
+    env = env or AsdaaasEnv.from_config()
+    inbox = env.agents_home / agent_name / "asdaaas" / "adapters" / "localmail" / "inbox"
     if not inbox.exists():
         return []
     
@@ -177,9 +186,9 @@ def read_mail(agent_name: str, delete: bool = True) -> list:
     return messages
 
 
-def peek_mail(agent_name: str) -> list:
+def peek_mail(agent_name: str, env: Optional[AsdaaasEnv] = None) -> list:
     """Check mail without deleting. Returns list of message dicts."""
-    return read_mail(agent_name, delete=False)
+    return read_mail(agent_name, delete=False, env=env)
 
 
 # ============================================================================
@@ -188,9 +197,11 @@ def peek_mail(agent_name: str) -> list:
 
 _delivered_msg_ids: set[str] = set()  # track delivered msg_ids across ack cycles
 
-def ring_doorbell(agent_name: str, msg: dict):
+def ring_doorbell(agent_name: str, msg: dict,
+                  env: Optional[AsdaaasEnv] = None):
     """Write a doorbell notification for an asdaaas-managed agent."""
-    bell_dir = AGENTS_HOME_DIR / agent_name / "asdaaas" / "doorbells"
+    env = env or AsdaaasEnv.from_config()
+    bell_dir = env.agents_home / agent_name / "asdaaas" / "doorbells"
     bell_dir.mkdir(parents=True, exist_ok=True)
     
     # Deduplicate: skip if already delivered (in-memory) or bell exists on disk.
@@ -222,7 +233,7 @@ def ring_doorbell(agent_name: str, msg: dict):
     # but the inbox file was deleted. Agent got truncated text with no recovery path.
     # Trip hit this 3x in Session 42.)
     if len(text) > 500:
-        payload_dir = AGENTS_HOME_DIR / agent_name / "asdaaas" / "adapters" / "localmail" / "payloads"
+        payload_dir = env.agents_home / agent_name / "asdaaas" / "adapters" / "localmail" / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
         payload_path = payload_dir / f"{msg_id}.json"
         try:
@@ -272,7 +283,7 @@ def ring_doorbell(agent_name: str, msg: dict):
 # ASDAAAS AGENT DETECTION
 # ============================================================================
 
-def get_asdaaas_agents():
+def get_asdaaas_agents(env: Optional[AsdaaasEnv] = None):
     """Detect which agents are running on asdaaas (can receive doorbells).
     
     An agent is considered asdaaas-capable if it has an asdaaas/doorbells/
@@ -281,12 +292,13 @@ def get_asdaaas_agents():
     checked -- idle agents on 'delay until_event' may have stale health files
     but must still receive doorbells (that's how they wake up).
     """
-    if not AGENTS_HOME_DIR.exists():
+    env = env or AsdaaasEnv.from_config()
+    if not env.agents_home.exists():
         return set()
     
     asdaaas_agents = set()
     
-    for agent_d in AGENTS_HOME_DIR.iterdir():
+    for agent_d in env.agents_home.iterdir():
         if not agent_d.is_dir():
             continue
         # Agent has asdaaas infrastructure = can receive doorbells
@@ -303,7 +315,7 @@ def get_asdaaas_agents():
 PAYLOAD_MAX_AGE_SECONDS = 3600  # clean up payload files older than 1 hour
 
 
-def _cleanup_old_payloads(agents: list):
+def _cleanup_old_payloads(agents: list, env: Optional[AsdaaasEnv] = None):
     """Remove payload files older than PAYLOAD_MAX_AGE_SECONDS.
 
     Payload files are created for long messages so the agent can cat the
@@ -311,10 +323,11 @@ def _cleanup_old_payloads(agents: list):
     the payload is stale.  Without cleanup, payloads accumulate forever
     (issue_0002).
     """
+    env = env or AsdaaasEnv.from_config()
     cutoff = time.time() - PAYLOAD_MAX_AGE_SECONDS
     removed = 0
     for agent in agents:
-        payload_dir = AGENTS_HOME_DIR / agent / "asdaaas" / "adapters" / "localmail" / "payloads"
+        payload_dir = env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "payloads"
         if not payload_dir.exists():
             continue
         for entry in payload_dir.iterdir():
@@ -330,19 +343,21 @@ def _cleanup_old_payloads(agents: list):
         print(f"[localmail] Cleaned up {removed} stale payload file(s)")
 
 
-def watch_loop(agents: list, poll_interval: float = 1.0):
+def watch_loop(agents: list, poll_interval: float = 1.0,
+               env: Optional[AsdaaasEnv] = None):
     """Main loop: watch inboxes, ring doorbells for asdaaas agents.
     
     For TUI agents, messages stays in inbox — they poll with read_mail().
     For asdaaas agents, we ring a doorbell AND delete the inbox file
     (the doorbell carries the content inline).
     """
+    env = env or AsdaaasEnv.from_config()
     print(f"[localmail] Starting localmail adapter")
     print(f"[localmail] Watching agents: {', '.join(agents)}")
     
     # Ensure directories exist
     for agent in agents:
-        (AGENTS_HOME_DIR / agent / "asdaaas" / "adapters" / "localmail" / "inbox").mkdir(parents=True, exist_ok=True)
+        (env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "inbox").mkdir(parents=True, exist_ok=True)
     
     # Register adapter
     adapter_api.register_adapter(
@@ -358,10 +373,10 @@ def watch_loop(agents: list, poll_interval: float = 1.0):
     while True:
         try:
             # Detect which agents are on asdaaas
-            asdaaas_agents = get_asdaaas_agents()
+            asdaaas_agents = get_asdaaas_agents(env=env)
             
             for agent in agents:
-                inbox = AGENTS_HOME_DIR / agent / "asdaaas" / "adapters" / "localmail" / "inbox"
+                inbox = env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "inbox"
                 if not inbox.exists():
                     continue
                 
@@ -380,7 +395,7 @@ def watch_loop(agents: list, poll_interval: float = 1.0):
                     
                     if agent in asdaaas_agents:
                         # Agent is on asdaaas — ring doorbell with inline content
-                        ring_doorbell(agent, msg)
+                        ring_doorbell(agent, msg, env=env)
                         try:
                             entry.unlink()
                         except OSError:
@@ -396,7 +411,7 @@ def watch_loop(agents: list, poll_interval: float = 1.0):
                 adapter_api.update_heartbeat("localmail")
                 last_heartbeat = now
             if now - last_payload_cleanup >= PAYLOAD_MAX_AGE_SECONDS:
-                _cleanup_old_payloads(agents)
+                _cleanup_old_payloads(agents, env=env)
                 last_payload_cleanup = now
             
         except Exception as e:

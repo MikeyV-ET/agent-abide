@@ -943,13 +943,13 @@ def poll_adapter_inboxes(agent_name, awareness, env=None):
     return messages
 
 
-def has_pending_adapter_messages(agent_name, awareness):
+def has_pending_adapter_messages(agent_name, awareness, env=None):
     """Non-destructive check: are there any messages in adapter inboxes?
     Used during delay interruption checks where we need to detect new
     messages without consuming them. The actual poll_adapter_inboxes()
     call happens in the main loop after the delay breaks."""
     for adapter in awareness.get("direct_attach", []):
-        inbox = agent_dir(agent_name) / "adapters" / adapter / "inbox"
+        inbox = agent_dir(agent_name, env=env) / "adapters" / adapter / "inbox"
         if not inbox.exists():
             continue
         if any(inbox.glob("*.json")):
@@ -957,7 +957,7 @@ def has_pending_adapter_messages(agent_name, awareness):
     return False
 
 
-async def run_delay_loop(agent_name, delay_seconds, awareness, poll_interval=DELAY_POLL_INTERVAL):
+async def run_delay_loop(agent_name, delay_seconds, awareness, poll_interval=DELAY_POLL_INTERVAL, env=None):
     """Run the delay loop, checking for external events every poll_interval seconds.
     
     Checks doorbells and adapter messages only — NOT pending commands.
@@ -978,9 +978,9 @@ async def run_delay_loop(agent_name, delay_seconds, awareness, poll_interval=DEL
         delay_remaining -= poll_interval
         if _shutdown_requested:
             return True, "shutdown"
-        if has_pending_doorbells(agent_name):
+        if has_pending_doorbells(agent_name, env=env):
             return True, "doorbell"
-        if has_pending_adapter_messages(agent_name, awareness):
+        if has_pending_adapter_messages(agent_name, awareness, env=env):
             return True, "adapter_message"
     return False, "expired"
 
@@ -1187,11 +1187,11 @@ def poll_doorbells(agent_name, awareness=None, env=None):
     return bells
 
 
-def has_pending_doorbells(agent_name):
+def has_pending_doorbells(agent_name, env=None):
     """Check if any doorbell files exist without modifying them.
     Used for delay interruption checks where we need to know if
     events arrived but don't want to increment delivered_count."""
-    bell_dir = agent_dir(agent_name) / "doorbells"
+    bell_dir = agent_dir(agent_name, env=env) / "doorbells"
     if not bell_dir.exists():
         return False
     return any(bell_dir.glob("*.json"))
@@ -2190,7 +2190,9 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     env = AsdaaasEnv.from_config()
     engine = TurnEngine(env, agent_name, backend,
                         context_window=context_window,
-                        watchdog=watchdog, pending_queue=pending_queue)
+                        watchdog=watchdog, pending_queue=pending_queue,
+                        observer_enabled=observer_enabled,
+                        observer_state_file=observer_state_file)
 
     # Phase 7.2: Read adapter registrations
     adapters = read_adapter_registrations()
@@ -2401,162 +2403,19 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             did_work_this_iteration = False
 
             # ---- 3. Nothing pending? Handle idle / default doorbell ----
+            # Extracted to TurnEngine.handle_idle() (S4)
             if not messages and not bells and not commands:
-                awareness = read_awareness(agent_name)
-                default_doorbell_enabled = awareness.get("default_doorbell", False)
-
-                if default_doorbell_enabled and not delay_until_event:
-                    if next_turn_delay > 0:
-                        # Drain straggler commands before sleeping — the agent
-                        # may have written multiple commands during its turn and
-                        # some may not have been consumed by step 1a's poll_commands
-                        # (e.g. written by a late-completing tool call).
-                        stragglers = poll_commands(agent_name)
-                        for cmd in stragglers:
-                            action = cmd.get("action", "")
-                            if action == "delay":
-                                dv = cmd.get("seconds", 0)
-                                delay_text = cmd.get("text") or None
-                                if dv == "until_event":
-                                    delay_until_event = True
-                                    next_turn_delay = 0
-                                    _cleanup_continue_doorbells(agent_name)
-                                else:
-                                    next_turn_delay = float(dv)
-                                    delay_until_event = False
-                            elif action == "ack":
-                                handled = cmd.get("handled", [])
-                                if handled:
-                                    ack_doorbells(agent_name, handled)
-                            piggyback_ack = cmd.get("ack", [])
-                            if piggyback_ack:
-                                ack_doorbells(agent_name, piggyback_ack)
-                        if stragglers:
-                            print(f"[asdaaas] Drained {len(stragglers)} straggler command(s) before delay")
-                        if delay_until_event:
-                            # Straggler set until_event — skip delay loop entirely
-                            continue
-                        if next_turn_delay <= 0:
-                            # Straggler set delay to 0 — fall through to continue doorbell
-                            pass
-                        else:
-                            print(f"[asdaaas] Default doorbell: delaying {next_turn_delay}s")
-                            interrupted, reason = await run_delay_loop(
-                                agent_name, next_turn_delay, awareness
-                            )
-                            next_turn_delay = 0
-                            # Agent was idle during delay — any arriving message
-                            # is a fresh interaction, not midturn.
-                            last_was_foreground = True
-                            engine.last_was_foreground = True
-                            if interrupted:
-                                print(f"[asdaaas] Delay interrupted by {reason}")
-                                continue
-
-                    # Collection window: wait briefly for late-arriving
-                    # messages before committing to a continue.  Messages
-                    # often arrive while the agent is working (user typing
-                    # during agent's turn, binary retry state).  Delivering
-                    # a real message is always better than burning a turn on
-                    # a continue doorbell.  3s balances responsiveness with
-                    # message collection — matches typical human typing gap.
-                    # Observer optimization: if IDLE, reduce window to 1s (4 polls)
-                    # since the binary is done and we're just catching late arrivals.
-                    obs_cw = read_observer_state()
-                    cw_polls = 4 if (obs_cw is not None and obs_cw.get("state") == "IDLE") else 12
-                    collected = False
-                    for _cw in range(cw_polls):  # 4 x 0.25s = 1s (observer) or 12 x 0.25s = 3s
-                        await asyncio.sleep(0.25)
-                        if has_pending_adapter_messages(agent_name, awareness):
-                            collected = True
-                            break
-                    if collected:
-                        print(f"[asdaaas] Message arrived during collection window — skipping continue")
-                        continue  # loop back to step 2 which will poll everything
-                    # Final command poll before queueing continue (issue_0034).
-                    # Agent may have written a late delay command (e.g. delay:600
-                    # after long tool calls) that wasn't on disk during post-response
-                    # drain. The 3s collection window gives filesystem time to sync.
-                    final_cmds = poll_commands(agent_name)
-                    for fc in final_cmds:
-                        fa = fc.get("action", "")
-                        fpiggy = fc.get("ack", [])
-                        if fpiggy:
-                            ack_doorbells(agent_name, fpiggy)
-                        if fa == "delay":
-                            fdv = fc.get("seconds", 0)
-                            delay_text = fc.get("text") or None
-                            if fdv == "until_event":
-                                delay_until_event = True
-                                next_turn_delay = 0
-                            else:
-                                next_turn_delay = float(fdv)
-                                delay_until_event = False
-                            agent_wrote_delay = True
-                        elif fa == "ack":
-                            ack_doorbells(agent_name, fc.get("handled", []))
-                        elif fa in ("compact", "gaze", "awareness"):
-                            cmd_dir = agent_dir(agent_name) / "commands"
-                            cmd_dir.mkdir(parents=True, exist_ok=True)
-                            fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
-                            with os.fdopen(fd, "w") as f:
-                                json.dump(fc, f)
-                    if final_cmds:
-                        print(f"[asdaaas] Pre-continue poll: {len(final_cmds)} command(s)")
-                        if delay_until_event or next_turn_delay > 0:
-                            print(f"[asdaaas] Late delay command found — skipping continue")
-                            continue
-                    # Don't queue continues while binary is busy
-                    # (issue_0041: stale continues during long tool calls).
-                    obs = read_observer_state()
-                    if obs is not None:
-                        obs_st = obs.get("state")
-                        if obs_st == "BUSY":
-                            print(f"[asdaaas] Observer: binary BUSY — skipping continue")
-                            await asyncio.sleep(2.0)
-                            continue
-                        elif obs_st == "GONE":
-                            exit_code = obs.get("exit_code")
-                            print(f"[asdaaas] Observer: binary GONE (exit_code={exit_code}) — stopping continues")
-                            delay_until_event = True
-                            write_health(agent_name, "stalled", f"binary_gone (exit={exit_code})", total_tokens, context_window)
-                            try:
-                                from localmail import send_mail
-                                send_mail(
-                                    from_agent="asdaaas",
-                                    to_agent="Sr",
-                                    text=f"BINARY GONE: {agent_name} process died (exit_code={exit_code}). Stopping continues.",
-                                )
-                            except Exception:
-                                pass
-                            continue
-                        elif obs_st == "RETRYING":
-                            attempt = obs.get("retry_attempt", 0)
-                            reason = obs.get("retry_reason", "unknown")
-                            print(f"[asdaaas] Observer: binary RETRYING (attempt={attempt}, reason={reason}) — waiting")
-                            await asyncio.sleep(2.0)
-                            continue
-                        elif obs_st == "STUCK":
-                            since = obs.get("since", 0)
-                            stuck_dur = time.time() - since if since else 0
-                            print(f"[asdaaas] Observer: binary STUCK ({stuck_dur:.0f}s) — skipping continue")
-                            write_health(agent_name, "active", f"observer_stuck ({stuck_dur:.0f}s)", total_tokens, context_window)
-                            await asyncio.sleep(5.0)
-                            continue
-                    elif obs is None and backend.has_pending_tool_calls:
-                        print(f"[asdaaas] Binary has pending tool calls — skipping continue")
-                        await asyncio.sleep(2.0)
-                        continue
-                    if queue_continue_doorbell(agent_name, text=delay_text):
-                        print(f"[asdaaas] Default doorbell queued for {agent_name}")
-                    delay_text = None
-                    continue
-
-                # Agent idle (until_event or no default_doorbell) — reset
-                # midturn state so arriving messages aren't falsely flagged.
-                last_was_foreground = True
-                engine.last_was_foreground = True
-                await asyncio.sleep(IDLE_POLL_INTERVAL)
+                engine.next_turn_delay = next_turn_delay
+                engine.delay_until_event = delay_until_event
+                engine.delay_text = delay_text
+                engine.total_tokens = total_tokens
+                idle_result = await engine.handle_idle()
+                next_turn_delay = engine.next_turn_delay
+                delay_until_event = engine.delay_until_event
+                delay_text = engine.delay_text
+                last_was_foreground = engine.last_was_foreground
+                if idle_result.action == "sleep":
+                    await asyncio.sleep(IDLE_POLL_INTERVAL)
                 continue
 
             # ==== 4. COALESCED DELIVERY: doorbells + in-room messages ====

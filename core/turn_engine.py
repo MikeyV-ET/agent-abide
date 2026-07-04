@@ -58,6 +58,15 @@ class PostTurnResult:
     speech_delivered: bool = False
 
 
+@dataclass
+class IdleResult:
+    """What happened during idle/delay/continue handling."""
+    action: str = "continue"  # "continue" (loop back), "sleep" (idle poll)
+    delay_interrupted: bool = False
+    continue_queued: bool = False
+    observer_state: Optional[str] = None
+
+
 class TurnEngine:
     """Turn state machine for one asdaaas agent.
 
@@ -68,13 +77,17 @@ class TurnEngine:
     def __init__(self, env: AsdaaasEnv, agent_name: str, backend,
                  context_window: int = 200000,
                  watchdog: 'CommandWatchdog | None' = None,
-                 pending_queue: 'PendingQueue | None' = None):
+                 pending_queue: 'PendingQueue | None' = None,
+                 observer_enabled: bool = False,
+                 observer_state_file: Optional[str] = None):
         self.env = env
         self.agent_name = agent_name
         self.backend = backend
         self.context_window = context_window
         self.watchdog = watchdog
         self.pending_queue = pending_queue
+        self.observer_enabled = observer_enabled
+        self.observer_state_file = observer_state_file
 
         # Per-session state
         self.total_tokens: int = 0
@@ -954,3 +967,184 @@ class TurnEngine:
             delivered += 1
 
         return delivered
+
+    def read_observer_state(self):
+        """Read observer state file. Returns None if observer disabled/dead/stale."""
+        if not self.observer_enabled or not self.observer_state_file:
+            return None
+        try:
+            from binary_state_observer import BinaryStateObserver
+            return BinaryStateObserver.read_state_file(self.observer_state_file)
+        except Exception:
+            return None
+
+    async def handle_idle(self) -> IdleResult:
+        """Handle the idle case: no messages, bells, or commands pending.
+
+        Implements straggler command draining, delay loop, collection window,
+        observer state checks, and continue doorbell queuing.
+        Always results in main() continuing the loop.
+
+        Updates self.delay_until_event, self.next_turn_delay, self.delay_text,
+        self.last_was_foreground as side effects.
+        """
+        import asyncio
+        import json
+        import os
+        import tempfile
+        import time
+        from asdaaas import (
+            read_awareness, poll_commands, ack_doorbells,
+            _cleanup_continue_doorbells, run_delay_loop,
+            has_pending_adapter_messages, queue_continue_doorbell,
+            write_health, IDLE_POLL_INTERVAL,
+        )
+
+        agent_name = self.agent_name
+        result = IdleResult()
+
+        awareness = read_awareness(agent_name, env=self.env)
+        default_doorbell_enabled = awareness.get("default_doorbell", False)
+
+        if default_doorbell_enabled and not self.delay_until_event:
+            if self.next_turn_delay > 0:
+                # Drain straggler commands before sleeping
+                stragglers = poll_commands(agent_name, env=self.env)
+                for cmd in stragglers:
+                    action = cmd.get("action", "")
+                    if action == "delay":
+                        dv = cmd.get("seconds", 0)
+                        self.delay_text = cmd.get("text") or None
+                        if dv == "until_event":
+                            self.delay_until_event = True
+                            self.next_turn_delay = 0
+                            _cleanup_continue_doorbells(agent_name, env=self.env)
+                        else:
+                            self.next_turn_delay = float(dv)
+                            self.delay_until_event = False
+                    elif action == "ack":
+                        handled = cmd.get("handled", [])
+                        if handled:
+                            ack_doorbells(agent_name, handled, env=self.env)
+                    piggyback_ack = cmd.get("ack", [])
+                    if piggyback_ack:
+                        ack_doorbells(agent_name, piggyback_ack, env=self.env)
+                if stragglers:
+                    print(f"[asdaaas] Drained {len(stragglers)} straggler command(s) before delay")
+                if self.delay_until_event:
+                    return result
+                if self.next_turn_delay <= 0:
+                    pass  # fall through to continue doorbell
+                else:
+                    print(f"[asdaaas] Default doorbell: delaying {self.next_turn_delay}s")
+                    interrupted, reason = await run_delay_loop(
+                        agent_name, self.next_turn_delay, awareness, env=self.env
+                    )
+                    self.next_turn_delay = 0
+                    self.last_was_foreground = True
+                    if interrupted:
+                        print(f"[asdaaas] Delay interrupted by {reason}")
+                        result.delay_interrupted = True
+                        return result
+
+            # Collection window: wait briefly for late-arriving messages
+            obs_cw = self.read_observer_state()
+            cw_polls = 4 if (obs_cw is not None and obs_cw.get("state") == "IDLE") else 12
+            collected = False
+            for _cw in range(cw_polls):
+                await asyncio.sleep(0.25)
+                if has_pending_adapter_messages(agent_name, awareness, env=self.env):
+                    collected = True
+                    break
+            if collected:
+                print(f"[asdaaas] Message arrived during collection window — skipping continue")
+                return result
+
+            # Final command poll before queueing continue (issue_0034)
+            from asdaaas import agent_dir as _agent_dir
+            final_cmds = poll_commands(agent_name, env=self.env)
+            agent_wrote_delay = False
+            for fc in final_cmds:
+                fa = fc.get("action", "")
+                fpiggy = fc.get("ack", [])
+                if fpiggy:
+                    ack_doorbells(agent_name, fpiggy, env=self.env)
+                if fa == "delay":
+                    fdv = fc.get("seconds", 0)
+                    self.delay_text = fc.get("text") or None
+                    if fdv == "until_event":
+                        self.delay_until_event = True
+                        self.next_turn_delay = 0
+                    else:
+                        self.next_turn_delay = float(fdv)
+                        self.delay_until_event = False
+                    agent_wrote_delay = True
+                elif fa == "ack":
+                    ack_doorbells(agent_name, fc.get("handled", []), env=self.env)
+                elif fa in ("compact", "gaze", "awareness"):
+                    cmd_dir = _agent_dir(agent_name, env=self.env) / "commands"
+                    cmd_dir.mkdir(parents=True, exist_ok=True)
+                    fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
+                    with os.fdopen(fd, "w") as f:
+                        json.dump(fc, f)
+            if final_cmds:
+                print(f"[asdaaas] Pre-continue poll: {len(final_cmds)} command(s)")
+                if self.delay_until_event or self.next_turn_delay > 0:
+                    print(f"[asdaaas] Late delay command found — skipping continue")
+                    result.action = "continue"
+                    return result
+
+            # Observer state checks
+            obs = self.read_observer_state()
+            if obs is not None:
+                obs_st = obs.get("state")
+                result.observer_state = obs_st
+                if obs_st == "BUSY":
+                    print(f"[asdaaas] Observer: binary BUSY — skipping continue")
+                    await asyncio.sleep(2.0)
+                    return result
+                elif obs_st == "GONE":
+                    exit_code = obs.get("exit_code")
+                    print(f"[asdaaas] Observer: binary GONE (exit_code={exit_code}) — stopping continues")
+                    self.delay_until_event = True
+                    write_health(agent_name, "stalled", f"binary_gone (exit={exit_code})",
+                                self.total_tokens, self.context_window, env=self.env)
+                    try:
+                        from localmail import send_mail
+                        send_mail(
+                            from_agent="asdaaas",
+                            to_agent="Sr",
+                            text=f"BINARY GONE: {agent_name} process died (exit_code={exit_code}). Stopping continues.",
+                        )
+                    except Exception:
+                        pass
+                    return result
+                elif obs_st == "RETRYING":
+                    attempt = obs.get("retry_attempt", 0)
+                    reason = obs.get("retry_reason", "unknown")
+                    print(f"[asdaaas] Observer: binary RETRYING (attempt={attempt}, reason={reason}) — waiting")
+                    await asyncio.sleep(2.0)
+                    return result
+                elif obs_st == "STUCK":
+                    since = obs.get("since", 0)
+                    stuck_dur = time.time() - since if since else 0
+                    print(f"[asdaaas] Observer: binary STUCK ({stuck_dur:.0f}s) — skipping continue")
+                    write_health(agent_name, "active", f"observer_stuck ({stuck_dur:.0f}s)",
+                                self.total_tokens, self.context_window, env=self.env)
+                    await asyncio.sleep(5.0)
+                    return result
+            elif obs is None and self.backend.has_pending_tool_calls:
+                print(f"[asdaaas] Binary has pending tool calls — skipping continue")
+                await asyncio.sleep(2.0)
+                return result
+
+            if queue_continue_doorbell(agent_name, text=self.delay_text, env=self.env):
+                print(f"[asdaaas] Default doorbell queued for {agent_name}")
+                result.continue_queued = True
+            self.delay_text = None
+            return result
+
+        # Agent idle (until_event or no default_doorbell)
+        self.last_was_foreground = True
+        result.action = "sleep"
+        return result

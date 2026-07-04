@@ -229,7 +229,6 @@ class TestDeliverPhase:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="deliver_turn imports read_observer_state (nested in main, not yet module-level)")
     async def test_deliver_doorbell_to_backend(self, asdaaas_env):
         """Doorbells gathered are delivered to MockBinary as prompt."""
         from mock_binary import MockBinary, NormalResponse
@@ -244,7 +243,6 @@ class TestDeliverPhase:
         assert "Hello Trip" in mock.last_prompt
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="deliver_turn imports read_observer_state (nested in main, not yet module-level)")
     async def test_deliver_empty_gather_returns_none(self, asdaaas_env):
         """deliver_turn returns None when gather has no content."""
         from mock_binary import MockBinary, NormalResponse
@@ -256,7 +254,6 @@ class TestDeliverPhase:
         assert mock.prompt_count == 0
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="deliver_turn imports read_observer_state (nested in main, not yet module-level)")
     async def test_deliver_updates_token_count(self, asdaaas_env):
         """After deliver_turn, engine.total_tokens reflects backend tokens."""
         from mock_binary import MockBinary, NormalResponse
@@ -269,7 +266,6 @@ class TestDeliverPhase:
         assert result.total_tokens == 12000
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="deliver_turn imports read_observer_state (nested in main, not yet module-level)")
     async def test_deliver_coalesces_bells_and_messages(self, asdaaas_env):
         """Multiple doorbells coalesce into a single prompt."""
         from mock_binary import MockBinary, NormalResponse
@@ -293,7 +289,6 @@ class TestPostTurnPhase:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="deliver_turn imports read_observer_state (nested in main, not yet module-level)")
     async def test_post_turn_routes_speech_to_outbox(self, asdaaas_env):
         """Speech from deliver is written to outbox by post_turn."""
         from mock_binary import MockBinary, NormalResponse
@@ -308,7 +303,6 @@ class TestPostTurnPhase:
         assert any("Hello world!" in str(m) for m in outbox)
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="deliver_turn imports read_observer_state (nested in main, not yet module-level)")
     async def test_post_turn_processes_delay_command(self, asdaaas_env):
         """Delay command written during turn is processed by post_turn."""
         from mock_binary import MockBinary, NormalResponse
@@ -324,7 +318,6 @@ class TestPostTurnPhase:
         assert engine.next_turn_delay == 300.0
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="deliver_turn imports read_observer_state (nested in main, not yet module-level)")
     async def test_post_turn_processes_ack_command(self, asdaaas_env):
         """Ack command during turn clears the specified doorbells."""
         from mock_binary import MockBinary, NormalResponse
@@ -341,7 +334,6 @@ class TestPostTurnPhase:
         assert not any(d.get("id") == "bell_ack1" for d in remaining)
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="deliver_turn imports read_observer_state (nested in main, not yet module-level)")
     async def test_post_turn_empty_speech_no_outbox(self, asdaaas_env):
         """Empty speech doesn't write to outbox."""
         from mock_binary import MockBinary, NormalResponse

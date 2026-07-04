@@ -46,11 +46,15 @@ from permission_handler import (
 # Graceful shutdown flag — set by SIGTERM/SIGINT or "shutdown" command
 _shutdown_requested = False
 
+from typing import Optional
+
 try:
     from asdaaas_config import config
 except ModuleNotFoundError:
     import sys; sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent / 'core'))
     from asdaaas_config import config
+
+from asdaaas_env import AsdaaasEnv
 
 ASDAAAS_DIR = config.asdaaas_dir
 ADAPTERS_DIR = config.adapters_dir
@@ -63,9 +67,10 @@ INBOX_DIR = config.inbox_dir
 OUTBOX_DIR = config.outbox_dir
 
 
-def agent_dir(agent_name):
+def agent_dir(agent_name, env: Optional[AsdaaasEnv] = None):
     """Return the per-agent runtime directory."""
-    return AGENTS_HOME_DIR / agent_name / "asdaaas"
+    env = env or AsdaaasEnv.from_config()
+    return env.agents_home / agent_name / "asdaaas"
 
 # ============================================================================
 # TUNABLE CONSTANTS — collected here for discoverability (structural-pattern-recognition)
@@ -147,9 +152,10 @@ def _log_startup_event(agent_name, step, status, detail=""):
         pass
 
 
-def _register_running_agent(agent_name, home_path):
+def _register_running_agent(agent_name, home_path, env: Optional[AsdaaasEnv] = None):
     """Register this agent in running_agents.json so adapters can find it."""
-    ASDAAAS_DIR.mkdir(parents=True, exist_ok=True)
+    env = env or AsdaaasEnv.from_config()
+    env.asdaaas_dir.mkdir(parents=True, exist_ok=True)
     agents = load_running_agents()
     agents[agent_name] = {"home": home_path}
     tmp = str(RUNNING_AGENTS_FILE) + ".tmp"
@@ -593,7 +599,7 @@ def get_background_mode(msg, awareness):
     return bg_default
 
 
-def format_background_doorbell(msg, agent_name=None):
+def format_background_doorbell(msg, agent_name=None, env: Optional[AsdaaasEnv] = None):
     """Format a background message as a doorbell notification.
     
     When text exceeds 120 chars and agent_name is provided, the full message
@@ -606,7 +612,8 @@ def format_background_doorbell(msg, agent_name=None):
     
     payload_hint = ""
     if len(text) > 120 and agent_name:
-        payload_dir = AGENTS_HOME_DIR / agent_name / "asdaaas" / "adapters" / adapter / "payloads"
+        env = env or AsdaaasEnv.from_config()
+        payload_dir = env.agents_home / agent_name / "asdaaas" / "adapters" / adapter / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
         msg_id = msg.get("id", secrets.token_hex(8))
         payload_path = payload_dir / f"{msg_id}.json"
@@ -3257,9 +3264,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     print(f"[asdaaas] {agent_name} shut down.")
 
 
-def _unregister_running_agent(agent_name):
+def _unregister_running_agent(agent_name, env: Optional[AsdaaasEnv] = None):
     """Remove agent from running_agents.json on shutdown."""
-    reg_path = ASDAAAS_DIR / "running_agents.json"
+    env = env or AsdaaasEnv.from_config()
+    reg_path = env.asdaaas_dir / "running_agents.json"
     try:
         with open(reg_path) as f:
             reg = json.load(f)

@@ -33,6 +33,7 @@ from asdaaas import (
 )
 import localmail
 from localmail import send_mail, read_mail, ring_doorbell
+from asdaaas_env import AsdaaasEnv
 
 
 # ============================================================================
@@ -68,6 +69,10 @@ def agent_env(tmp_path, monkeypatch):
     # Patch the agents home directory in both modules
     monkeypatch.setattr(asdaaas, "AGENTS_HOME_DIR", tmp_path)
     monkeypatch.setattr(localmail, "AGENTS_HOME_DIR", tmp_path)
+
+    # S1 transition: patch AsdaaasEnv.from_config so env fallback uses tmp_path
+    test_env = AsdaaasEnv(agents_home=tmp_path)
+    monkeypatch.setattr(AsdaaasEnv, "from_config", classmethod(lambda cls: test_env))
 
     return {
         "agent_name": agent_name,

@@ -17,10 +17,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 def tmp_agents(tmp_path):
     """Create a temporary agents home directory and patch localmail to use it."""
     import localmail
+    from asdaaas_env import AsdaaasEnv
     original = localmail.AGENTS_HOME_DIR
     localmail.AGENTS_HOME_DIR = tmp_path
+    # S1 transition: patch AsdaaasEnv.from_config so env fallback uses tmp_path
+    test_env = AsdaaasEnv(agents_home=tmp_path)
+    original_from_config = AsdaaasEnv.from_config
+    AsdaaasEnv.from_config = classmethod(lambda cls: test_env)
     yield tmp_path
     localmail.AGENTS_HOME_DIR = original
+    AsdaaasEnv.from_config = original_from_config
 
 
 class TestSendMail:

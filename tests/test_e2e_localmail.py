@@ -344,3 +344,69 @@ class TestPostTurnPhase:
         dr = await engine.deliver_turn(gathered)
         ptr = await engine.post_turn(dr)
         assert ptr.speech_delivered is False
+
+
+class TestFullTurnCycle:
+    """Test run_turn() convenience method — full gather→deliver→post_turn."""
+
+    @pytest.mark.asyncio
+    async def test_full_turn_with_speech(self, asdaaas_env):
+        """Single doorbell → full turn → speech in outbox."""
+        from mock_binary import MockBinary, NormalResponse
+        mock = MockBinary([NormalResponse(speech="Hello!", tokens=5000)])
+        engine = asdaaas_env.make_engine(backend=mock)
+        asdaaas_env.inject_doorbell("bell_ft1", adapter="tui", sender="eric", text="Hi Trip")
+        gathered, dr, ptr = await asdaaas_env.run_turn(engine)
+        assert gathered.has_content is True
+        assert dr.speech == "Hello!"
+        assert ptr.speech_delivered is True
+        assert mock.prompt_count == 1
+        outbox = asdaaas_env.outbox("tui")
+        assert any("Hello!" in str(m) for m in outbox)
+
+    @pytest.mark.asyncio
+    async def test_full_turn_empty_workspace(self, asdaaas_env):
+        """No input → gather returns empty, deliver/post_turn skipped."""
+        from mock_binary import MockBinary, NormalResponse
+        mock = MockBinary([NormalResponse(speech="Unreachable")])
+        engine = asdaaas_env.make_engine(backend=mock)
+        gathered, dr, ptr = await asdaaas_env.run_turn(engine)
+        assert gathered.has_content is False
+        assert dr is None
+        assert ptr is None
+        assert mock.prompt_count == 0
+
+    @pytest.mark.asyncio
+    async def test_two_consecutive_turns(self, asdaaas_env):
+        """Two turns in sequence, engine state persists."""
+        from mock_binary import MockBinary, NormalResponse
+        mock = MockBinary([
+            NormalResponse(speech="First reply.", tokens=5000),
+            NormalResponse(speech="Second reply.", tokens=10000),
+        ])
+        engine = asdaaas_env.make_engine(backend=mock)
+
+        # Turn 1
+        asdaaas_env.inject_doorbell("bell_t1", adapter="tui", sender="eric", text="Turn one")
+        g1, d1, p1 = await asdaaas_env.run_turn(engine)
+        assert d1.speech == "First reply."
+        assert engine.total_tokens == 5000
+
+        # Turn 2
+        asdaaas_env.inject_doorbell("bell_t2", adapter="tui", sender="eric", text="Turn two")
+        g2, d2, p2 = await asdaaas_env.run_turn(engine)
+        assert d2.speech == "Second reply."
+        assert engine.total_tokens == 10000
+        assert mock.prompt_count == 2
+
+    @pytest.mark.asyncio
+    async def test_turn_with_delay_command(self, asdaaas_env):
+        """Agent writes delay during turn, post_turn picks it up."""
+        from mock_binary import MockBinary, NormalResponse
+        mock = MockBinary([NormalResponse(speech="Waiting now.", tokens=5000)])
+        engine = asdaaas_env.make_engine(backend=mock)
+        asdaaas_env.inject_doorbell("bell_dc", adapter="tui", sender="eric", text="Do stuff")
+        asdaaas_env.inject_command({"action": "delay", "seconds": 600})
+        gathered, dr, ptr = await asdaaas_env.run_turn(engine)
+        assert ptr.agent_wrote_delay is True
+        assert engine.next_turn_delay == 600.0

@@ -14,7 +14,9 @@
     "Sr": {
       "session": "019e2265-96c5-7ab2-9084-0c251b6158db",
       "home": "/home/eric/agents/Sr",
-      "short_id": "58db"
+      "short_id": "58db",
+      "observer_enabled": true,
+      "interjection_enabled": true
     },
     "Cinco": {
       "session": "019d1ec0-5dd0-7e32-8eec-2577d8c541dd",
@@ -69,7 +71,8 @@
       "permission_mode": "auto",
       "deny_rules": [
         "Write(/home/eric/.grok/**)"
-      ]
+      ],
+      "observer_enabled": true
     },
     "MockTestAgent": {
       "home": "/home/eric/agents/MockTestAgent",

@@ -2138,12 +2138,11 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     except Exception as _e:
         print(f"[asdaaas] WARN: failed to update session registry: {_e}")
 
-    # ---- Observer sidecar (Phase 1 scaffold) ----
+    # ---- Observer sidecar (always-on, Phase 5) ----
     observer_process = None
-    observer_enabled = config.agent_observer_enabled(agent_name) if config else False
     observer_state_file = str(config.agent_observer_state_file(agent_name)) if config else None
 
-    if observer_enabled and backend.proc and backend.session_dir:
+    if backend.proc and backend.session_dir:
         try:
             observer_script = os.path.join(os.path.dirname(__file__), "binary_state_observer.py")
             observer_state_file = str(config.agent_observer_state_file(agent_name))
@@ -2162,12 +2161,12 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
         except Exception as e:
             print(f"[asdaaas] WARN: Failed to start observer: {e}")
             observer_process = None
-    elif observer_enabled:
-        print(f"[asdaaas] WARN: Observer enabled but backend not ready (no proc or session_dir)")
+    else:
+        print(f"[asdaaas] WARN: Backend not ready for observer (no proc or session_dir)")
 
     def read_observer_state():
-        """Read observer state file. Returns None if observer disabled/dead/stale."""
-        if not observer_enabled or not observer_state_file:
+        """Read observer state file. Returns None if observer dead/stale."""
+        if not observer_state_file:
             return None
         try:
             from binary_state_observer import BinaryStateObserver
@@ -2191,7 +2190,6 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     engine = TurnEngine(env, agent_name, backend,
                         context_window=context_window,
                         watchdog=watchdog, pending_queue=pending_queue,
-                        observer_enabled=observer_enabled,
                         observer_state_file=observer_state_file)
 
     # Phase 7.2: Read adapter registrations
@@ -2227,7 +2225,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             # from updates.jsonl and updates total_tokens from tokens_after.
             total_tokens = backend.refresh_tokens()
 
-            # ---- 0b. Detect compaction (event-based, heuristic fallback) ----
+            # ---- 0b. Detect compaction (event-based, observer-only) ----
             # Extracted to TurnEngine.handle_compaction_detection() (S4)
             engine.total_tokens = total_tokens
             engine.interjection_enabled = interjection_enabled

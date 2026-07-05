@@ -78,7 +78,6 @@ class TurnEngine:
                  context_window: int = 200000,
                  watchdog: 'CommandWatchdog | None' = None,
                  pending_queue: 'PendingQueue | None' = None,
-                 observer_enabled: bool = False,
                  observer_state_file: Optional[str] = None):
         self.env = env
         self.agent_name = agent_name
@@ -86,7 +85,6 @@ class TurnEngine:
         self.context_window = context_window
         self.watchdog = watchdog
         self.pending_queue = pending_queue
-        self.observer_enabled = observer_enabled
         self.observer_state_file = observer_state_file
 
         # Per-session state
@@ -542,7 +540,7 @@ class TurnEngine:
                           f"{self.consecutive_empty_doorbell} consecutive empty doorbell responses")
                     self.next_turn_delay = backoff
 
-                # Doom loop check — observer-first, heuristic fallback
+                # Doom loop check (observer-only, Phase 5)
                 obs_doom = self.read_observer_state()
                 if obs_doom is not None and obs_doom.get("doom_loop"):
                     print(f"[asdaaas] *** OBSERVER: DOOM LOOP DETECTED for {agent_name} ***")
@@ -556,36 +554,7 @@ class TurnEngine:
                                  text=f"DOOM LOOP (observer): {agent_name} doom loop detected. Stopping continues.")
                     except Exception:
                         pass
-                elif (obs_doom is None
-                      and self.consecutive_empty_doorbell >= CONTINUE_DOOM_CHECK_AFTER
-                      and self.consecutive_empty_doorbell % CONTINUE_DOOM_CHECK_AFTER == 0):
-                    try:
-                        from fix_orphaned_tool_results import find_doom_loop_corruption, find_session_dir as _find_sd
-                        sd = _find_sd(agent_name)
-                        cp = sd / "chat_history.jsonl"
-                        if cp.exists():
-                            with open(cp) as _f:
-                                _msgs = [json.loads(l) for l in _f if l.strip()]
-                            doom = find_doom_loop_corruption(_msgs)
-                            if doom["removable"]:
-                                print(f"[asdaaas] *** DOOM LOOP CORRUPTION DETECTED for {agent_name} ***")
-                                print(f"[asdaaas]   {len(doom['duplicates'])} duplicate tool_results, "
-                                      f"{len(doom['synthetics'])} synthetic warnings")
-                                print(f"[asdaaas]   Stopping continues. Manual repair needed: "
-                                      f"python3 fix_orphaned_tool_results.py --agent {agent_name}")
-                                self.delay_until_event = True
-                                write_health(agent_name, "stalled", "doom_loop_corruption_detected",
-                                            self.total_tokens, self.context_window, env=self.env)
-                                try:
-                                    from localmail import send_mail
-                                    send_mail(from_agent="asdaaas", to_agent="Sr",
-                                             text=f"DOOM LOOP: {agent_name} has corrupted chat_history "
-                                                  f"({len(doom['duplicates'])} duplicate tool_results). "
-                                                  f"Needs repair: python3 fix_orphaned_tool_results.py --agent {agent_name}")
-                                except Exception:
-                                    pass
-                    except Exception as e:
-                        print(f"[asdaaas] Doom loop check error: {e}")
+
 
                 # Hard cap
                 if self.consecutive_empty_doorbell >= CONTINUE_MAX_CONSECUTIVE:
@@ -631,23 +600,16 @@ class TurnEngine:
 
         agent_name = self.agent_name
 
-        # Event-based detection
+        # Event-based detection (observer-only, Phase 5)
         compaction_event, event_tokens, event_tokens_before = self.backend.pop_compaction_event()
-        heuristic_compaction = (
-            not compaction_event
-            and self.total_tokens < self._prev_tokens * 0.6
-            and self._prev_tokens > 0
-        )
-        compaction_detected = compaction_event or heuristic_compaction
 
-        if not (compaction_detected and self.turns_since_compaction > 0):
+        if not (compaction_event and self.turns_since_compaction > 0):
             self._prev_tokens = self.total_tokens
             return False
 
         tokens_before = event_tokens_before or self._prev_tokens
         tokens_after = event_tokens or self.total_tokens
-        source = "event" if compaction_event else "heuristic"
-        print(f"[asdaaas] Compaction detected ({source}): {tokens_before} -> {tokens_after}")
+        print(f"[asdaaas] Compaction detected: {tokens_before} -> {tokens_after}")
 
         self.turns_since_compaction = 0
         self.compact_pending = None
@@ -969,8 +931,8 @@ class TurnEngine:
         return delivered
 
     def read_observer_state(self):
-        """Read observer state file. Returns None if observer disabled/dead/stale."""
-        if not self.observer_enabled or not self.observer_state_file:
+        """Read observer state file. Returns None if observer dead/stale."""
+        if not self.observer_state_file:
             return None
         try:
             from binary_state_observer import BinaryStateObserver
@@ -1049,7 +1011,7 @@ class TurnEngine:
 
             # Collection window: wait briefly for late-arriving messages
             obs_cw = self.read_observer_state()
-            cw_polls = 4 if (obs_cw is not None and obs_cw.get("state") == "IDLE") else 12
+            cw_polls = 4 if (obs_cw and obs_cw.get("state") == "IDLE") else 12
             collected = False
             for _cw in range(cw_polls):
                 await asyncio.sleep(0.25)
@@ -1094,9 +1056,9 @@ class TurnEngine:
                     result.action = "continue"
                     return result
 
-            # Observer state checks
+            # Observer state checks (observer-only, Phase 5)
             obs = self.read_observer_state()
-            if obs is not None:
+            if obs:
                 obs_st = obs.get("state")
                 result.observer_state = obs_st
                 if obs_st == "BUSY":
@@ -1133,10 +1095,6 @@ class TurnEngine:
                                 self.total_tokens, self.context_window, env=self.env)
                     await asyncio.sleep(5.0)
                     return result
-            elif obs is None and self.backend.has_pending_tool_calls:
-                print(f"[asdaaas] Binary has pending tool calls — skipping continue")
-                await asyncio.sleep(2.0)
-                return result
 
             if queue_continue_doorbell(agent_name, text=self.delay_text, env=self.env):
                 print(f"[asdaaas] Default doorbell queued for {agent_name}")

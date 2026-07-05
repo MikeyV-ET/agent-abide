@@ -252,3 +252,36 @@ class TestDelayUntilEvent:
         # After responding to a user message with speech, should default to until_event
         # (issue_0030 behavior) unless agent wrote explicit delay
         assert engine.delay_until_event is True
+
+
+class TestPostCompactionContinue:
+    """After compaction + orientation, agent should get a continue doorbell."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(reason="handle_compaction_detection doesn't queue continue after orientation (bug found in smoke test)")
+    async def test_continue_queued_after_orientation(self, asdaaas_env):
+        """After compaction detection and orientation turn, a continue doorbell is queued."""
+        from mock_binary import MockBinary, NormalResponse
+        mock = MockBinary([
+            NormalResponse(speech="Normal turn.", tokens=100000),
+            NormalResponse(speech="Resuming after compaction.", tokens=30000),
+        ])
+        engine = asdaaas_env.make_engine(backend=mock)
+
+        # Turn 1: establish token count
+        asdaaas_env.inject_doorbell("bell_pc1", adapter="tui", sender="eric", text="First turn")
+        await asdaaas_env.run_turn(engine)
+        assert engine.turns_since_compaction > 0
+
+        # Simulate compaction event
+        mock._compaction_event = True
+        mock._compaction_tokens_before = 100000
+        mock._compaction_tokens_after = 30000
+
+        detected = await engine.handle_compaction_detection()
+        assert detected is True
+
+        # After orientation, a continue doorbell should exist so agent gets next turn
+        doorbells = asdaaas_env.doorbells()
+        has_continue = any("continue" in str(d).lower() for d in doorbells)
+        assert has_continue, f"No continue doorbell after orientation. Doorbells: {doorbells}"

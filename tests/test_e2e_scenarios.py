@@ -258,7 +258,6 @@ class TestPostCompactionContinue:
     """After compaction + orientation, agent should get a continue doorbell."""
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason="handle_compaction_detection doesn't queue continue after orientation (bug found in smoke test)")
     async def test_continue_queued_after_orientation(self, asdaaas_env):
         """After compaction detection and orientation turn, a continue doorbell is queued."""
         from mock_binary import MockBinary, NormalResponse

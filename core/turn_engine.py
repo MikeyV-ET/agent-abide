@@ -647,7 +647,8 @@ class TurnEngine:
         )
         print(f"[asdaaas] Immediate orientation turn for {agent_name}")
         write_health(agent_name, "working", "post-compaction orientation",
-                    tokens_after, self.context_window, env=self.env)
+                    tokens_after, self.context_window,
+                    observer_state=self.read_observer_state(), env=self.env)
         await self.backend.drain_stale()
         orient_handle = await self.backend.send_prompt(orientation_text)
 
@@ -677,6 +678,10 @@ class TurnEngine:
         if orient_result.speech.strip():
             write_to_outbox(agent_name, orient_result.speech.strip(),
                            self.gaze.get("speech"), "speech", env=self.env)
+
+        # Wake agent for next turn after orientation
+        from asdaaas import queue_continue_doorbell
+        queue_continue_doorbell(agent_name, env=self.env)
 
         return True
 

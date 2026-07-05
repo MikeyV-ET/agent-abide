@@ -149,33 +149,33 @@ class TestGazeRouting:
 
 
 class TestCompactionDetection:
-    """Compaction detection via token drop heuristic."""
+    """Compaction detection via backend event (observer-only, Phase 5)."""
 
     @pytest.mark.asyncio
-    async def test_heuristic_compaction_detected(self, asdaaas_env):
-        """Token count dropping >40% triggers compaction detection."""
+    async def test_event_compaction_detected(self, asdaaas_env):
+        """Backend compaction event triggers compaction detection."""
         from mock_binary import MockBinary, NormalResponse
         mock = MockBinary([
             NormalResponse(speech="Before compaction.", tokens=100000),
+            NormalResponse(speech="Resuming after compaction.", tokens=30000),
         ])
         engine = asdaaas_env.make_engine(backend=mock)
 
-        # Turn 1: establish high token count + set _prev_tokens
+        # Turn 1: establish token count and turns_since_compaction > 0
         asdaaas_env.inject_doorbell("bell_c1", adapter="tui", sender="eric", text="First turn")
         await asdaaas_env.run_turn(engine)
         assert engine.total_tokens == 100000
-        # Call handle_compaction_detection to set _prev_tokens
-        await engine.handle_compaction_detection()
-        assert engine._prev_tokens == 100000
+        assert engine.turns_since_compaction > 0
 
-        # Simulate token drop (as if binary compacted)
-        engine.total_tokens = 30000
-        engine.backend._total_tokens = 30000
+        # Simulate compaction event from backend
+        mock._compaction_event = True
+        mock._compaction_tokens_before = 100000
+        mock._compaction_tokens_after = 30000
 
-        # Heuristic should detect: 30000 < 100000 * 0.6
         detected = await engine.handle_compaction_detection()
         assert detected is True
         assert engine.turns_since_compaction == 0
+        assert engine.total_tokens == 30000
 
 
 class TestInterjectionDrain:

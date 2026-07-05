@@ -72,7 +72,9 @@
       "deny_rules": [
         "Write(/home/eric/.grok/**)"
       ],
-      "observer_enabled": true
+      "observer_enabled": true,
+      "interjection_enabled": true,
+      "model": "grok-composer-2.5-fast"
     },
     "MockTestAgent": {
       "home": "/home/eric/agents/MockTestAgent",

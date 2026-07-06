@@ -217,8 +217,10 @@ class GrokBackend(AgentBackend):
                         await self._handle_permission_request(frame)
                     elif method == "_x.ai/exit_plan_mode":
                         await self._handle_plan_review(frame)
+                    elif method == "_x.ai/ask_user_question":
+                        await self._handle_ask_user(frame)
                     elif "id" in frame and method:
-                        print(f"[grok_backend] unhandled request: method={method} id={frame['id']}")
+                        print(f"[grok_backend] unhandled request: method={method} id={frame['id']} params={json.dumps(frame.get('params', {}))[:300]}")
         except (asyncio.CancelledError, OSError):
             pass
 
@@ -266,6 +268,26 @@ class GrokBackend(AgentBackend):
         rpc_id = frame.get("id")
         params = frame.get("params", {})
         print(f"[grok_backend] plan review requested (id={rpc_id}, params={json.dumps(params)[:200]}) — auto-approving")
+        response = json.dumps({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "outcome": {"outcome": "selected", "optionId": "approve"}
+            }
+        }) + "\n"
+        await self._send(response)
+
+    async def _handle_ask_user(self, frame: dict):
+        """Auto-respond to ask_user_question requests.
+
+        The binary sends _x.ai/ask_user_question when the model calls
+        ask_user_question, blocking until the user selects an option.
+        In headless mode, we auto-select the first option (typically
+        the recommended one) and note it was auto-selected.
+        """
+        rpc_id = frame.get("id")
+        params = frame.get("params", {})
+        print(f"[grok_backend] ask_user_question requested (id={rpc_id}, params={json.dumps(params)[:300]}) — auto-selecting first option")
         response = json.dumps({
             "jsonrpc": "2.0",
             "id": rpc_id,

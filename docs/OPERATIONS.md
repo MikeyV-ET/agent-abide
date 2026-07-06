@@ -150,7 +150,7 @@ ls agents/<Name>/asdaaas/doorbells/ | wc -l
 ## Sending Localmail
 
 ```python
-import sys; sys.path.insert(0, '/home/eric/projects/agent-abide/core')
+import sys; sys.path.insert(0, '/path/to/agent-abide/core')
 from localmail import send_mail
 send_mail('AgentOne', 'AgentTwo', 'Status update please')
 ```

@@ -2166,7 +2166,7 @@ Type anything else to send a message to the agent.
 
         # Send via localmail
         try:
-            sys.path.insert(0, '/home/eric/projects/agent-abide/core')
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'core'))
             from localmail import send_mail
             sent = []
             for agent in targets:

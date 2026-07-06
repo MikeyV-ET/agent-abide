@@ -7,7 +7,7 @@ On-demand Slack channel reading for agents. Control adapter -- you send commands
 The adapter is not always running. Start it when you need it:
 
 ```bash
-setsid nohup python3 /home/eric/projects/agent-abide/adapters/slack_research_adapter.py \
+setsid nohup python3 /path/to/agent-abide/adapters/slack_research_adapter.py \
   --agents Cinco --poll-interval 1.0 > /tmp/slack_research_cinco.log 2>&1
 ```
 

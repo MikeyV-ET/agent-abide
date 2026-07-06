@@ -7,7 +7,7 @@ Read this on boot (per boot protocol). Covers localmail, remind, issue tracker, 
 ## Localmail
 
 ```python
-import sys; sys.path.insert(0, '/home/eric/projects/agent-abide/core')
+import sys; sys.path.insert(0, '/path/to/agent-abide/core')
 from localmail import send_mail
 send_mail(from_agent='<Name>', to_agent='<Target>', text='message')
 ```
@@ -36,7 +36,7 @@ with open(path, 'w') as f:
 
 **Filing issues:**
 ```python
-import sys; sys.path.insert(0, '/home/eric/projects/agent-abide/core')
+import sys; sys.path.insert(0, '/path/to/agent-abide/core')
 from issue_tracker import file_issue
 file_issue(filed_by='<Name>', title='...', description='...', type='bug', severity='P2', tags=['config-scatter'])
 ```

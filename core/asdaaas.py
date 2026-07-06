@@ -22,7 +22,7 @@ Does NOT:
   - Decide what's worth sending (adapter responsibility)
 
 Usage:
-    python3 asdaaas.py --agent Trip --session <session-id> --cwd /home/eric/MikeyV-Trip
+    python3 asdaaas.py --agent Trip --session <session-id> --cwd ~/agents/Trip
     python3 asdaaas.py --agent Test   # new session
 """
 

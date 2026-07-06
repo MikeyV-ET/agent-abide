@@ -53,6 +53,12 @@ class FileEventSource:
             if self._updates_path.exists() and self._events_path.exists():
                 break
             time.sleep(0.5)
+        # Create files if they don't exist yet (new sessions may not have
+        # updates.jsonl/events.jsonl until the first prompt is sent).
+        for p in (self._updates_path, self._events_path):
+            if not p.exists():
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.touch()
         self._updates_fp = open(self._updates_path, "r")
         self._events_fp = open(self._events_path, "r")
         self._updates_fp.seek(0, 2)

@@ -48,8 +48,4 @@ RUN cd /home/testuser/agent-abide \
     && mkdir -p /home/testuser/agents/SmokeTestAgent \
     && mkdir -p /tmp/asdaaas_logs
 
-# Run smoke test
-COPY --chown=testuser:testuser scripts/smoke_test.sh /home/testuser/smoke_test.sh
-RUN chmod +x /home/testuser/smoke_test.sh
-
-CMD ["/home/testuser/smoke_test.sh"]
+CMD ["bash", "/home/testuser/agent-abide/scripts/smoke_test.sh"]

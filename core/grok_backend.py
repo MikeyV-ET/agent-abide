@@ -212,8 +212,13 @@ class GrokBackend(AgentBackend):
                         frame = json.loads(line)
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         continue
-                    if frame.get("method") == "session/request_permission":
+                    method = frame.get("method", "")
+                    if method == "session/request_permission":
                         await self._handle_permission_request(frame)
+                    elif method == "session/request_plan_review":
+                        await self._handle_plan_review(frame)
+                    elif "id" in frame and method:
+                        print(f"[grok_backend] unhandled request: method={method} id={frame['id']}")
         except (asyncio.CancelledError, OSError):
             pass
 
@@ -247,6 +252,24 @@ class GrokBackend(AgentBackend):
             "id": rpc_id,
             "result": {
                 "outcome": {"outcome": "selected", "optionId": option_id}
+            }
+        }) + "\n"
+        await self._send(response)
+
+    async def _handle_plan_review(self, frame: dict):
+        """Auto-approve plan review requests.
+
+        The binary sends session/request_plan_review when exit_plan_mode is
+        called, blocking until the user approves/rejects. In headless mode
+        (asdaaas), we auto-approve since no human is at the keyboard.
+        """
+        rpc_id = frame.get("id")
+        print(f"[grok_backend] plan review requested (id={rpc_id}) — auto-approving")
+        response = json.dumps({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "outcome": {"outcome": "selected", "optionId": "approve"}
             }
         }) + "\n"
         await self._send(response)

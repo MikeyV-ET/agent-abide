@@ -1,6 +1,6 @@
 """Tests for plan review auto-approval in GrokBackend.
 
-Verifies that when the grok binary sends a session/request_plan_review
+Verifies that when the grok binary sends _x.ai/exit_plan_mode
 JSON-RPC request, GrokBackend auto-approves it (headless mode).
 Also tests the unhandled-request catch-all logging.
 """
@@ -80,8 +80,8 @@ def _jsonrpc_request(method: str, rpc_id: int, params: dict = None) -> bytes:
 
 @pytest.mark.asyncio
 async def test_plan_review_auto_approves():
-    """When binary sends session/request_plan_review, backend responds with approve."""
-    lines = [_jsonrpc_request("session/request_plan_review", 42)]
+    """When binary sends _x.ai/exit_plan_mode, backend responds with approve."""
+    lines = [_jsonrpc_request("_x.ai/exit_plan_mode", 42)]
     backend, fake_proc = _make_backend_with_fake_proc(lines)
 
     await backend._process_stdout()
@@ -96,7 +96,7 @@ async def test_plan_review_auto_approves():
 @pytest.mark.asyncio
 async def test_plan_review_with_params():
     """Plan review request with params is still auto-approved."""
-    lines = [_jsonrpc_request("session/request_plan_review", 99,
+    lines = [_jsonrpc_request("_x.ai/exit_plan_mode", 99,
                               {"planFile": "/tmp/plan.md"})]
     backend, fake_proc = _make_backend_with_fake_proc(lines)
 
@@ -114,7 +114,7 @@ async def test_permission_and_plan_review_both_handled():
     lines = [
         _jsonrpc_request("session/request_permission", 10,
                          {"toolCall": {"kind": "bash"}}),
-        _jsonrpc_request("session/request_plan_review", 11),
+        _jsonrpc_request("_x.ai/exit_plan_mode", 11),
     ]
     backend, fake_proc = _make_backend_with_fake_proc(lines)
     # No permission handler set — defaults to reject-once
@@ -169,7 +169,7 @@ async def test_malformed_json_skipped():
     """Malformed JSON lines are skipped without crashing."""
     lines = [
         b"not json at all\n",
-        _jsonrpc_request("session/request_plan_review", 5),
+        _jsonrpc_request("_x.ai/exit_plan_mode", 5),
     ]
     backend, fake_proc = _make_backend_with_fake_proc(lines)
 

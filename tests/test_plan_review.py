@@ -177,3 +177,73 @@ async def test_malformed_json_skipped():
 
     assert len(fake_proc.responses_sent) == 1
     assert fake_proc.responses_sent[0]["id"] == 5
+
+
+# ---- ask_user_question tests ----
+
+@pytest.mark.asyncio
+async def test_ask_user_auto_selects():
+    """When binary sends _x.ai/ask_user_question, backend auto-responds."""
+    lines = [_jsonrpc_request("_x.ai/ask_user_question", 50,
+                              {"question": "Which approach?", "options": ["A", "B"]})]
+    backend, fake_proc = _make_backend_with_fake_proc(lines)
+
+    await backend._process_stdout()
+
+    assert len(fake_proc.responses_sent) == 1
+    resp = fake_proc.responses_sent[0]
+    assert resp["id"] == 50
+    assert resp["result"]["outcome"]["outcome"] == "selected"
+    assert resp["result"]["outcome"]["optionId"] == "approve"
+
+
+@pytest.mark.asyncio
+async def test_ask_user_with_no_params():
+    """ask_user_question with no params still auto-responds."""
+    lines = [_jsonrpc_request("_x.ai/ask_user_question", 60)]
+    backend, fake_proc = _make_backend_with_fake_proc(lines)
+
+    await backend._process_stdout()
+
+    assert len(fake_proc.responses_sent) == 1
+    assert fake_proc.responses_sent[0]["id"] == 60
+    assert fake_proc.responses_sent[0]["result"]["outcome"]["optionId"] == "approve"
+
+
+@pytest.mark.asyncio
+async def test_all_three_gates_in_stream():
+    """Permission, plan review, and ask_user all handled in one stream."""
+    lines = [
+        _jsonrpc_request("session/request_permission", 1,
+                         {"toolCall": {"kind": "bash"}}),
+        _jsonrpc_request("_x.ai/exit_plan_mode", 2),
+        _jsonrpc_request("_x.ai/ask_user_question", 3,
+                         {"question": "Continue?"}),
+    ]
+    backend, fake_proc = _make_backend_with_fake_proc(lines)
+
+    await backend._process_stdout()
+
+    assert len(fake_proc.responses_sent) == 3
+    assert fake_proc.responses_sent[0]["id"] == 1  # permission
+    assert fake_proc.responses_sent[0]["result"]["outcome"]["optionId"] == "reject-once"
+    assert fake_proc.responses_sent[1]["id"] == 2  # plan review
+    assert fake_proc.responses_sent[1]["result"]["outcome"]["optionId"] == "approve"
+    assert fake_proc.responses_sent[2]["id"] == 3  # ask user
+    assert fake_proc.responses_sent[2]["result"]["outcome"]["optionId"] == "approve"
+
+
+@pytest.mark.asyncio
+async def test_unhandled_request_includes_params(capsys):
+    """Unhandled request log includes truncated params."""
+    lines = [_jsonrpc_request("_x.ai/unknown_gate", 88,
+                              {"detail": "some context"})]
+    backend, fake_proc = _make_backend_with_fake_proc(lines)
+
+    await backend._process_stdout()
+
+    assert len(fake_proc.responses_sent) == 0
+    captured = capsys.readouterr()
+    assert "unhandled request" in captured.out
+    assert "_x.ai/unknown_gate" in captured.out
+    assert "some context" in captured.out

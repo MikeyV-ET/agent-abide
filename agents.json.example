@@ -1,0 +1,46 @@
+{
+  "_comment": "Agent configuration for asdaaas. Copy to agents.json and edit for your machine. DO NOT commit agents.json — it contains local paths and session IDs.",
+  "settings": {
+    "asdaaas_dir": "/home/YOURUSER/projects/agent-abide",
+    "agents_dir": "/home/YOURUSER/agents",
+    "log_dir": "/tmp",
+    "running_agents_file": "/home/YOURUSER/asdaaas/running_agents.json",
+    "timezone": "America/Los_Angeles",
+    "debug": false,
+    "grok_binary": "/home/YOURUSER/.grok/bin/grok"
+  },
+  "agents": {
+    "ExampleAgent": {
+      "session": "",
+      "home": "/home/YOURUSER/agents/ExampleAgent",
+      "observer_enabled": true,
+      "interjection_enabled": true
+    }
+  },
+  "adapters": {
+    "context": {
+      "script": "adapters/context_adapter.py",
+      "log": "context_adapter.log"
+    },
+    "session": {
+      "script": "adapters/session_adapter.py",
+      "log": "session_adapter.log"
+    },
+    "heartbeat": {
+      "script": "adapters/heartbeat_adapter.py",
+      "log": "heartbeat_adapter.log"
+    },
+    "irc": {
+      "script": "scripts/launch_irc_adapter.sh",
+      "log": "irc_adapter.log"
+    },
+    "localmail": {
+      "script": "adapters/localmail_adapter.py",
+      "log": "localmail_adapter.log"
+    },
+    "remind": {
+      "script": "scripts/launch_remind.sh",
+      "log": "remind_adapter.log"
+    }
+  }
+}

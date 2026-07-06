@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .env
+# Live config — contains local paths and session IDs
+# Copy agents.json.example to agents.json and edit for your machine
+agents.json
+running_agents.json

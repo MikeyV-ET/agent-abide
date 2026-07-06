@@ -1,0 +1,22 @@
+{
+  "name": "remind",
+  "pid": 3655,
+  "started": 1783531665.1654856,
+  "capabilities": [
+    "remind"
+  ],
+  "config": {
+    "type": "control",
+    "agents": [
+      "Sr",
+      "Jr",
+      "Trip",
+      "Q",
+      "Cinco"
+    ],
+    "commands": [
+      "remind"
+    ]
+  },
+  "heartbeat": 1783546232.8905294
+}

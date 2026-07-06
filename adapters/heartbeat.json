@@ -1,0 +1,20 @@
+{
+  "name": "heartbeat",
+  "pid": 3533,
+  "started": 1783531647.3734162,
+  "capabilities": [
+    "notify"
+  ],
+  "config": {
+    "type": "notify",
+    "agents": [
+      "Cinco",
+      "Trip",
+      "Q"
+    ],
+    "default_idle_threshold": 900,
+    "default_nudge_interval": 600,
+    "per_agent": true
+  },
+  "heartbeat": 1783546244.268202
+}

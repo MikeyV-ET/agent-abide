@@ -102,12 +102,6 @@ _AGENT_TZ = None
 try:
     from zoneinfo import ZoneInfo
     _tz_name = getattr(config, "timezone", None)
-    if not _tz_name:
-        # Fall back to agents.json settings
-        _agents_json = Path(__file__).parent / "agents.json"
-        if _agents_json.exists():
-            with open(_agents_json) as _f:
-                _tz_name = json.load(_f).get("settings", {}).get("timezone")
     if _tz_name:
         _AGENT_TZ = ZoneInfo(_tz_name)
 except Exception:
@@ -117,7 +111,7 @@ except Exception:
 def human_time(epoch_ts=None):
     """Format a timestamp as human-readable local time (e.g. 'Sat May 16 23:03 PDT').
 
-    Uses the timezone from agents.json settings. Falls back to system local time.
+    Uses the timezone from config. Falls back to system local time.
     If epoch_ts is None, uses current time.
     """
     from datetime import datetime

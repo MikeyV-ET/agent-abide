@@ -366,9 +366,9 @@ The engine directory holds only shared config:
 **running_agents.json:**
 ```json
 {
-  "Q": {"home": "/home/eric/agents/Q"},
-  "Trip": {"home": "/home/eric/agents/Trip"},
-  "Cinco": {"home": "/home/eric/agents/Cinco"}
+  "Q": {"home": "/home/YOURUSER/agents/Q"},
+  "Trip": {"home": "/home/YOURUSER/agents/Trip"},
+  "Cinco": {"home": "/home/YOURUSER/agents/Cinco"}
 }
 ```
 
@@ -639,7 +639,7 @@ The agent declares what it's paying attention to. This is how agents maintain in
 ### Agent API
 
 ```python
-import sys; sys.path.insert(0, '/home/eric/projects/agent-abide/core')
+import sys; sys.path.insert(0, '/path/to/agent-abide/core')
 from adapter_api import send_with_attention, write_attention
 
 # One-call: send message + create attention declaration

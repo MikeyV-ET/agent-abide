@@ -40,7 +40,7 @@ Architecture:
 
 Usage:
   python3 tui_adapter.py --agent Trip
-  python3 tui_adapter.py --agent Trip --agents-home /home/eric/agents
+  python3 tui_adapter.py --agent Trip --agents-home ~/agents
 
 Author: MikeyV-Trip, 2026-04-01
 """
@@ -830,7 +830,7 @@ def main():
             Examples:
               %(prog)s --agent Trip
               %(prog)s --agent Sr --sender eric
-              %(prog)s --agent Jr --agents-home /home/eric/agents
+              %(prog)s --agent Jr --agents-home ~/agents
         """))
     parser.add_argument("--agent", required=True, help="Agent name (e.g. Trip, Sr, Jr)")
     parser.add_argument("--agents-home", default=str(Config.agents_home),

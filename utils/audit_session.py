@@ -28,9 +28,10 @@ from pathlib import Path
 PDT = timezone(timedelta(hours=-7))
 
 
-def find_session_dir(agent_name: str) -> Path:
+def find_session_dir(agent_name: str, agents_home: str | None = None) -> Path:
     """Find the active (most recently modified) session directory for an agent."""
-    encoded = "%2F" + "%2F".join(f"/home/eric/agents/{agent_name}".strip("/").split("/"))
+    home = agents_home or str(Path.home() / "agents")
+    encoded = "%2F" + "%2F".join(f"{home}/{agent_name}".strip("/").split("/"))
     base = Path.home() / ".grok" / "sessions" / encoded
     if not base.exists():
         print(f"No sessions found for agent '{agent_name}' at {base}", file=sys.stderr)

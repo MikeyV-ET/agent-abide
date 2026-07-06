@@ -381,9 +381,9 @@ def test_agent_initiated_compaction():
         # Give agent substantial work — ask it to read files
         work_prompt = (
             "Please read the following files and summarize the first 5 lines of each:\n"
-            "1. /home/eric/agents/AGENTS.md\n"
-            "2. /home/eric/agents/Trip/AGENTS.md\n"
-            "3. /home/eric/agents/docs/PRINCIPLES.md\n"
+            "1. ~/agents/AGENTS.md\n"
+            "2. ~/agents/Trip/AGENTS.md\n"
+            "3. ~/agents/docs/PRINCIPLES.md\n"
             "Then tell me what each file is about in one sentence each."
         )
         send_doorbell(work_prompt)
@@ -500,8 +500,8 @@ def test_auto_compaction():
             big_prompt = (
                 f"Task {i+1}: Please read and summarize the contents of the following files. "
                 f"For each file, list every function name you find:\n"
-                f"1. /home/eric/projects/agent-abide/core/asdaaas.py\n"
-                f"2. /home/eric/projects/agent-abide/core/grok_backend.py\n"
+                f"1. core/asdaaas.py\n"
+                f"2. core/grok_backend.py\n"
                 f"Give a detailed summary with line numbers."
             )
             send_doorbell(big_prompt)

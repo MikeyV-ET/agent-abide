@@ -27,7 +27,7 @@ bash scripts/backup_agents.sh --list
 
 ## Full Home Backup (manual, to USB)
 
-Full `/home/eric` backup to USB drive D. ~5-6GB compressed. Run when needed for disaster recovery.
+Full home directory backup to USB drive. ~5-6GB compressed. Run when needed for disaster recovery.
 
 ### 1. Mount USB drive
 

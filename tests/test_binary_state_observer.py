@@ -60,10 +60,12 @@ def turn_completed():
     return make_frame("turn_completed")
 
 
-def tool_call(tool_id="t1", tool_name="run_terminal_command", raw_input=None):
+def tool_call(tool_id="t1", tool_name="run_terminal_command", raw_input=None, kind=None):
     extra = {"toolCallId": tool_id, "title": tool_name}
     if raw_input:
         extra["rawInput"] = raw_input
+    if kind:
+        extra["_meta"] = {"x.ai/tool": {"kind": kind}}
     return make_frame("tool_call", extra)
 
 
@@ -861,3 +863,87 @@ class TestServiceOrientation:
         service.orient()
 
         assert service.observer.state == ObserverState.STARTING
+
+
+# ============================================================================
+# GATE state — interactive binary gates
+# ============================================================================
+
+class TestGateDetection:
+    """GATE fires instead of STUCK when a pending tool is an interactive gate."""
+
+    def test_exit_plan_tool_triggers_gate(self, observer):
+        """exit_plan tool kind → GATE instead of STUCK on silence."""
+        observer.process_event(user_message())
+        observer.process_event(tool_call("t1", "exit_plan_mode", kind="exit_plan"))
+
+        observer._last_event_ts = time.time() - 120
+        observer.check_heartbeat()
+        assert observer.state == ObserverState.GATE
+
+    def test_ask_user_tool_triggers_gate(self, observer):
+        """ask_user tool kind → GATE instead of STUCK on silence."""
+        observer.process_event(user_message())
+        observer.process_event(tool_call("t1", "ask_user_question", kind="ask_user"))
+
+        observer._last_event_ts = time.time() - 120
+        observer.check_heartbeat()
+        assert observer.state == ObserverState.GATE
+
+    def test_non_gate_tool_still_stuck(self, observer):
+        """Regular tool kind → STUCK, not GATE."""
+        observer.process_event(user_message())
+        observer.process_event(tool_call("t1", "run_terminal_command", kind="bash"))
+
+        observer._last_event_ts = time.time() - 120
+        observer.check_heartbeat()
+        assert observer.state == ObserverState.STUCK
+
+    def test_unknown_kind_still_stuck(self, observer):
+        """Tool with no kind metadata → STUCK, not GATE."""
+        observer.process_event(user_message())
+        observer.process_event(tool_call("t1", "run_terminal_command"))
+
+        observer._last_event_ts = time.time() - 120
+        observer.check_heartbeat()
+        assert observer.state == ObserverState.STUCK
+
+    def test_gate_clears_on_tool_complete(self, observer):
+        """Tool completion clears GATE → back to BUSY."""
+        observer.process_event(user_message())
+        observer.process_event(tool_call("t1", "exit_plan_mode", kind="exit_plan"))
+
+        observer._last_event_ts = time.time() - 120
+        observer.check_heartbeat()
+        assert observer.state == ObserverState.GATE
+
+        observer.process_event(tool_call_update("t1", "completed"))
+        observer.process_event(agent_message())
+        assert observer.state == ObserverState.BUSY
+
+    def test_mixed_tools_gate_wins(self, observer):
+        """If any pending tool is a gate kind, report GATE not STUCK."""
+        observer.process_event(user_message())
+        observer.process_event(tool_call("t1", "run_terminal_command", kind="bash"))
+        observer.process_event(tool_call("t2", "exit_plan_mode", kind="exit_plan"))
+
+        observer._last_event_ts = time.time() - 120
+        observer.check_heartbeat()
+        assert observer.state == ObserverState.GATE
+
+    def test_pending_tools_in_state_dict(self, observer):
+        """state_dict includes pending_tools when non-empty."""
+        observer.process_event(user_message())
+        observer.process_event(tool_call("t1", "exit_plan_mode", kind="exit_plan"))
+
+        state = observer.state_dict()
+        assert state["pending_tools"] is not None
+        assert state["pending_tools"]["t1"] == "exit_plan"
+
+    def test_no_pending_tools_is_none(self, observer):
+        """state_dict pending_tools is None when empty."""
+        observer.process_event(user_message())
+        observer.process_event(agent_message())
+
+        state = observer.state_dict()
+        assert state["pending_tools"] is None

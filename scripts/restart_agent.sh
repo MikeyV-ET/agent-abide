@@ -31,7 +31,7 @@ if [ ! -f "$CONFIG" ]; then
 fi
 
 # Read settings from config
-ASDAAAS_DIR=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings']['asdaaas_dir'])")
+ASDAAAS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG_DIR=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings']['log_dir'])")
 RUNNING_AGENTS_FILE=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings']['running_agents_file'])")
 DEBUG=$(python3 -c "import json; c=json.load(open('$CONFIG')); print('1' if c['settings'].get('debug', False) else '')")

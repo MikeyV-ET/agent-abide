@@ -26,8 +26,15 @@ TUI adapter (interactive terminal)
 
 ## Configuration
 
-All components read from `agents.json` (in the repo root). Edit this file to set paths and agent definitions.
-See `docs/config.json.template` for a starter example (note: template is outdated and does not reflect current agents.json schema).
+All components read from `agents.json` (in the repo root). This file is **not tracked in version control** — it contains local paths and session IDs.
+
+**First-time setup:**
+```bash
+cp agents.json.example agents.json
+# Edit agents.json with your paths, session IDs, and agent definitions
+```
+
+See `agents.json.example` for the current schema and placeholder values.
 
 ## Startup Order
 

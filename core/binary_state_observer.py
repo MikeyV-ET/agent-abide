@@ -33,8 +33,14 @@ class ObserverState(enum.Enum):
     BUSY = "BUSY"
     RETRYING = "RETRYING"
     STUCK = "STUCK"
+    GATE = "GATE"
     GONE = "GONE"
     UNKNOWN = "UNKNOWN"
+
+# Tool kinds that represent interactive gates (binary blocks on stdio waiting
+# for user input). When a pending tool has one of these kinds, report GATE
+# instead of STUCK.
+GATE_TOOL_KINDS = {"exit_plan", "ask_user"}
 
 
 # Default fallback silence window (seconds). From timing report: P99 = 30s.
@@ -75,7 +81,7 @@ class BinaryStateObserver:
         self._since = time.time()
         self._last_event_type: Optional[str] = None
         self._last_event_ts: Optional[float] = None
-        self._pending_tools: set[str] = set()
+        self._pending_tools: dict[str, str] = {}  # tool_id -> kind
         self._expected_silence: float = DEFAULT_SILENCE_WINDOW
         self._turn_event_count: int = 0
 
@@ -238,8 +244,11 @@ class BinaryStateObserver:
 
         elif event_type == "tool_call":
             tool_id = update.get("toolCallId")
+            meta = update.get("_meta", {})
+            tool_info = meta.get("x.ai/tool", {})
+            kind = tool_info.get("kind", "unknown")
             if tool_id:
-                self._pending_tools.add(tool_id)
+                self._pending_tools[tool_id] = kind
             self._expected_silence = self._compute_expected_silence(update)
             # Stay BUSY (or transition to BUSY from RETRYING/UNKNOWN)
             if self._state not in (ObserverState.BUSY,):
@@ -249,7 +258,7 @@ class BinaryStateObserver:
             tool_id = update.get("toolCallId")
             status = update.get("status", "")
             if tool_id and status in ("completed", "failed"):
-                self._pending_tools.discard(tool_id)
+                self._pending_tools.pop(tool_id, None)
             # Stay BUSY
             if self._state not in (ObserverState.BUSY,):
                 self._set_state(ObserverState.BUSY)
@@ -308,11 +317,16 @@ class BinaryStateObserver:
             self._set_state(ObserverState.GONE)
             return
 
-        # STUCK check: only when BUSY and silence exceeds expected window
+        # STUCK/GATE check: only when BUSY and silence exceeds expected window
         if self._state == ObserverState.BUSY and self._last_event_ts is not None:
             silence = time.time() - self._last_event_ts
             if silence > self._expected_silence:
-                self._set_state(ObserverState.STUCK)
+                # Check if any pending tool is a known interactive gate
+                pending_kinds = set(self._pending_tools.values())
+                if pending_kinds & GATE_TOOL_KINDS:
+                    self._set_state(ObserverState.GATE)
+                else:
+                    self._set_state(ObserverState.STUCK)
 
     # -- Orientation --
 
@@ -342,6 +356,7 @@ class BinaryStateObserver:
             "unknown_event": self._unknown_event,
             "doom_loop": self._doom_loop,
             "turn_event_count": self._turn_event_count,
+            "pending_tools": {tid: kind for tid, kind in self._pending_tools.items()} if self._pending_tools else None,
             "written_at": now,
             "expires_at": now + STATE_TTL,
         }

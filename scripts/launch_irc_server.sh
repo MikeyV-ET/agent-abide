@@ -1,6 +1,6 @@
 #!/bin/bash
 # Launch miniircd IRC server on localhost:6667.
-# Usage: bash ~/projects/agent-abide/launch_irc_server.sh
+# Usage: bash scripts/launch_irc_server.sh
 #
 # Kills existing instance first, then starts fresh.
 

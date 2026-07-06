@@ -29,7 +29,7 @@ fi
 AGENT_NAME="$1"
 AGENTS_HOME="${2:-$HOME/agents}"
 AGENT_HOME="$AGENTS_HOME/$AGENT_NAME"
-ASDAAAS_DIR="${ASDAAAS_DIR:-$HOME/asdaaas}"
+ASDAAAS_DIR="${ASDAAAS_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 echo "=== Setting up agent: $AGENT_NAME ==="
 echo "  Agent home: $AGENT_HOME"

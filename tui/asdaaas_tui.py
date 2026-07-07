@@ -650,6 +650,7 @@ class SlashMenu(OptionList):
         {"name": "/mail", "description": "Send localmail to an agent"},
         {"name": "/mail all", "description": "Broadcast to all agents"},
         {"name": "/whoami", "description": "Show/change operator name"},
+        {"name": "/theme", "description": "Change color theme"},
         {"name": "/help", "description": "Show help"},
         {"name": "/exit", "description": "Quit the TUI"},
     ]
@@ -2126,6 +2127,9 @@ class AsdaaasTUI(App):
                 m.append_chunk("Usage: `/awareness` | `/awareness add <channel> [doorbell|pending|drop]` | `/awareness rm <channel>`")
                 self._scroll_to_bottom()
             return
+        elif cmd == "/theme":
+            self.action_toggle_theme_selector()
+            return
         elif cmd == "/help":
             help_text = """## TUI Commands
 
@@ -2143,11 +2147,13 @@ class AsdaaasTUI(App):
 | `/mail <agent> <msg>` | Send localmail to an agent |
 | `/mail all <msg>` | Broadcast to all agents |
 | `/whoami` | Show/change operator name |
+| `/theme` | Change color theme |
 | `/help` | Show this help |
 | `Ctrl+C` | Interrupt agent |
 | `Ctrl+Q` | Quit TUI |
 | `Ctrl+L` | Clear screen |
 | `Ctrl+G` | Gaze selector |
+| `Ctrl+T` | Theme selector |
 | `Ctrl+N` | Next agent tab |
 | `F1` | Toggle thinking blocks |
 

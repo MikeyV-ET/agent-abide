@@ -247,3 +247,70 @@ async def test_unhandled_request_includes_params(capsys):
     assert "unhandled request" in captured.out
     assert "_x.ai/unknown_gate" in captured.out
     assert "some context" in captured.out
+
+
+# ---- stdout logging (Y-channel tap) tests ----
+
+@pytest.mark.asyncio
+async def test_stdout_log_captures_all_frames(tmp_path):
+    """All stdout frames are logged to stdout_log.jsonl with timestamps."""
+    lines = [
+        _jsonrpc_request("_x.ai/exit_plan_mode", 1),
+        _jsonrpc_request("_x.ai/ask_user_question", 2),
+        b"not json\n",
+    ]
+    backend, fake_proc = _make_backend_with_fake_proc(lines)
+    backend._session_dir = tmp_path
+
+    await backend._process_stdout()
+
+    log_path = tmp_path / "stdout_log.jsonl"
+    assert log_path.exists()
+    log_lines = [json.loads(l) for l in log_path.read_text().strip().split("\n")]
+    # All 3 lines logged (including malformed one)
+    assert len(log_lines) == 3
+    # Each has ts and raw fields
+    for entry in log_lines:
+        assert "ts" in entry
+        assert "raw" in entry
+        assert isinstance(entry["ts"], float)
+    # Content matches
+    assert "_x.ai/exit_plan_mode" in log_lines[0]["raw"]
+    assert "_x.ai/ask_user_question" in log_lines[1]["raw"]
+    assert "not json" in log_lines[2]["raw"]
+
+
+@pytest.mark.asyncio
+async def test_stdout_log_skipped_without_session_dir():
+    """No crash when _session_dir is not set — logging silently skipped."""
+    lines = [_jsonrpc_request("_x.ai/exit_plan_mode", 1)]
+    backend, fake_proc = _make_backend_with_fake_proc(lines)
+    # No _session_dir set
+
+    await backend._process_stdout()
+
+    # Gate still handled despite no logging
+    assert len(fake_proc.responses_sent) == 1
+    assert fake_proc.responses_sent[0]["result"]["outcome"]["optionId"] == "approve"
+
+
+@pytest.mark.asyncio
+async def test_stdout_log_gates_still_handled(tmp_path):
+    """Logging doesn't interfere with gate handling."""
+    lines = [
+        _jsonrpc_request("session/request_permission", 10,
+                         {"toolCall": {"kind": "bash"}}),
+        _jsonrpc_request("_x.ai/exit_plan_mode", 11),
+        _jsonrpc_request("_x.ai/ask_user_question", 12),
+    ]
+    backend, fake_proc = _make_backend_with_fake_proc(lines)
+    backend._session_dir = tmp_path
+
+    await backend._process_stdout()
+
+    # All 3 gates handled
+    assert len(fake_proc.responses_sent) == 3
+    # Log captured all 3
+    log_path = tmp_path / "stdout_log.jsonl"
+    log_lines = log_path.read_text().strip().split("\n")
+    assert len(log_lines) == 3

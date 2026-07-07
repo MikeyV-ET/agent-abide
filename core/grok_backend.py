@@ -197,11 +197,20 @@ class GrokBackend(AgentBackend):
         self._permission_handler = handler
 
     async def _process_stdout(self):
-        """Read stdout, handle permission requests, discard the rest.
+        """Read stdout, log all frames, and handle interactive gates.
 
-        Replaces the old _drain_stdout. Still prevents pipe buffer from filling,
-        but now parses JSON-RPC frames to intercept session/request_permission.
+        Every line from the binary's stdout is logged to stdout_log.jsonl
+        before any parsing. This gives the observer (and post-mortem analysis)
+        full visibility into the control channel — gates, permissions,
+        session updates — not just what lands in updates.jsonl.
         """
+        stdout_log_fp = None
+        if hasattr(self, '_session_dir') and self._session_dir:
+            stdout_log_path = self._session_dir / "stdout_log.jsonl"
+            try:
+                stdout_log_fp = open(stdout_log_path, "a")
+            except OSError:
+                pass
         try:
             buf = b""
             while self._proc and self._proc.stdout:
@@ -214,6 +223,15 @@ class GrokBackend(AgentBackend):
                     line = line.strip()
                     if not line:
                         continue
+                    # Log raw line before any parsing
+                    if stdout_log_fp:
+                        ts = time.time()
+                        try:
+                            log_entry = json.dumps({"ts": ts, "raw": line.decode("utf-8", errors="replace")})
+                            stdout_log_fp.write(log_entry + "\n")
+                            stdout_log_fp.flush()
+                        except Exception:
+                            pass
                     try:
                         frame = json.loads(line)
                     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -229,6 +247,12 @@ class GrokBackend(AgentBackend):
                         print(f"[grok_backend] unhandled request: method={method} id={frame['id']} params={json.dumps(frame.get('params', {}))[:300]}")
         except (asyncio.CancelledError, OSError):
             pass
+        finally:
+            if stdout_log_fp:
+                try:
+                    stdout_log_fp.close()
+                except Exception:
+                    pass
 
     async def _handle_permission_request(self, frame: dict):
         """Handle a session/request_permission JSON-RPC request from the binary."""

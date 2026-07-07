@@ -12,7 +12,7 @@
 #   bash setup_agent.sh Rook /projects/agents    # custom path
 #
 # After running this, launch the agent with:
-#   bash scripts/launch_asdaaas.sh <agent_name>
+#   bash scripts/launch_asdaaas.sh --wait <agent_name>
 
 set -euo pipefail
 
@@ -66,15 +66,8 @@ done
 
 if [ -n "$SAMPLE" ]; then
     cp "$SAMPLE" "$AGENT_HOME/AGENTS.md"
-    # Append agent instructions if available
-    for instructions in "$SCRIPT_DIR/../ASDAAAS_AGENT_INSTRUCTIONS.md" "$SCRIPT_DIR/../../ASDAAAS_AGENT_INSTRUCTIONS.md"; do
-        if [ -f "$instructions" ]; then
-            echo "" >> "$AGENT_HOME/AGENTS.md"
-            cat "$instructions" >> "$AGENT_HOME/AGENTS.md"
-            break
-        fi
-    done
-    echo "  Created AGENTS.md (from template + agent instructions)"
+    sed -i "s/AGENT_NAME/$AGENT_NAME/g" "$AGENT_HOME/AGENTS.md"
+    echo "  Created AGENTS.md (from template)"
 else
     echo "  WARNING: SAMPLE_AGENTS.md not found, skipping AGENTS.md"
 fi
@@ -161,4 +154,4 @@ echo "Next steps:"
 echo "  1. Add $AGENT_NAME to agents.json (see AGENT_START_HERE.md Step 3)"
 echo "  2. Edit $AGENT_HOME/AGENTS.md — set agent name and role"
 echo "  3. Authenticate grok: grok login --device-auth"
-echo "  4. Launch: bash scripts/launch_asdaaas.sh $AGENT_NAME"
+echo "  4. Launch: bash scripts/launch_asdaaas.sh --wait $AGENT_NAME"

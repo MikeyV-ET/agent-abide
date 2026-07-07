@@ -3928,9 +3928,7 @@ def main():
     # Discover agents from agents.json (authoritative) or fall back to filesystem
     agents_home = Path(Config.AGENTS_HOME)
     all_agents = []
-    agents_json_path = Path(os.path.expanduser(
-        "~/projects/agent-abide/agents.json"
-    ))
+    agents_json_path = Path(__file__).resolve().parent.parent / "agents.json"
     try:
         with open(agents_json_path) as f:
             agents_cfg = json.load(f)

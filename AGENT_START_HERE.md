@@ -22,7 +22,7 @@ Edit `agents.json` — replace all `/home/YOURUSER` paths with your actual home 
 {
   "settings": {
     "log_dir": "/tmp",
-    "running_agents_file": "/home/YOURUSER/agents/running_agents.json",
+    "running_agents_file": "/home/YOURUSER/asdaaas/running_agents.json",
     "timezone": "America/Los_Angeles"
   },
   "agents": {}

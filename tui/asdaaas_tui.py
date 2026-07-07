@@ -110,7 +110,7 @@ class Config:
         """Load and cache agents.json."""
         if not cls._agents_cfg:
             try:
-                p = Path.home() / "projects" / "agent-abide" / "agents.json"
+                p = Path(__file__).resolve().parent.parent / "agents.json"
                 with open(p) as f:
                     cls._agents_cfg = json.load(f)
             except Exception:
@@ -1705,7 +1705,7 @@ class AsdaaasTUI(App):
             import subprocess
             result = subprocess.run(
                 ["git", "rev-parse", "--short", "HEAD"],
-                cwd=str(Path.home() / "projects" / "agent-abide"),
+                cwd=str(Path(__file__).resolve().parent.parent),
                 capture_output=True, text=True, timeout=5,
             )
             return result.stdout.strip() if result.returncode == 0 else ""

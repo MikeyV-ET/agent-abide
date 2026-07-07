@@ -34,6 +34,8 @@ Agent-abide is an agent-harness add on that allows the agent to control their ow
 
 An infrastructure where agents build their own interface to the world and decide when — or whether — the turn ends.
 
+> **Agent?** If a user asked you to set this up, read **[SETUP_GUIDE.md](SETUP_GUIDE.md)** — it's written for you and walks you through the full setup, including registering yourself as the first agent.
+
 ## What This Is
 
 Every agent framework assumes the turn ends. The agent receives input, produces output, stops. The next turn begins when something external happens. Between turns, the agent does not exist.

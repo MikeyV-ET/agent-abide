@@ -102,19 +102,19 @@ See **[AGENT_START_HERE.md](AGENT_START_HERE.md)** for the full setup guide. Qui
 ```bash
 # 1. Install prerequisites
 npm install -g @xai-official/grok
-pip install requests websockets websocket-client textual rich
+pip install -r requirements.txt
 grok login --device-auth
 
 # 2. Configure
 cp agents.json.example agents.json
-# Edit agents.json — replace /home/YOURUSER with your home directory
+# Edit agents.json — replace /home/YOURUSER paths and set asdaaas_dir to your clone
 
 # 3. Create an agent
 bash scripts/setup_agent.sh MyAgent ~/agents
 # Add MyAgent to agents.json (see AGENT_START_HERE.md Step 3)
 
-# 4. Launch
-bash scripts/launch_asdaaas.sh MyAgent
+# 4. Launch (--wait shows startup progress)
+bash scripts/launch_asdaaas.sh --wait MyAgent
 bash scripts/launch_tui.sh -a MyAgent
 
 # 5. Verify
@@ -138,7 +138,7 @@ bash scripts/smoke_test.sh
 
 ### Agent lifecycle
 
-1. `launch_asdaaas.sh` reads `agents.json` for the agent's config (backend, model, context window)
+1. `launch_asdaaas.sh` reads `agents.json` for the agent's config (session, home, observer settings)
 2. ASDAAAS spawns the agent subprocess (`grok agent stdio` or `claude --agent`)
 3. On first turn, the agent boots: reads AGENTS.md (auto-injected), PRINCIPLES.md, lab notebook, notes-to-self
 4. ASDAAAS queues a **continue doorbell** after every turn — the agent's next turn fires immediately by default

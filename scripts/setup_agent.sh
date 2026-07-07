@@ -1,7 +1,7 @@
 #!/bin/bash
 # setup_agent.sh — Create a new agent directory with all required files.
 # ======================================================================
-# This is the scripted version of AGENT_START_HERE.md steps 2-7.
+# This is the scripted version of AGENT_START_HERE.md Step 2.
 # Run once per agent to set up their directory structure.
 #
 # Usage:

@@ -9,14 +9,7 @@
     "debug": false,
     "grok_binary": "/home/YOURUSER/.grok/bin/grok"
   },
-  "agents": {
-    "ExampleAgent": {
-      "session": "",
-      "home": "/home/YOURUSER/agents/ExampleAgent",
-      "observer_enabled": true,
-      "interjection_enabled": true
-    }
-  },
+  "agents": {},
   "adapters": {
     "context": {
       "script": "adapters/context_adapter.py",

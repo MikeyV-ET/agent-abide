@@ -8,7 +8,7 @@ Set up your first agent in 5 steps.
 - **Node.js 20+** and **npm**
 - **grok CLI**: `npm install -g @xai-official/grok`
 - **grok auth**: `grok login --device-auth` (or set `XAI_API_KEY` env var)
-- **Python packages**: `pip install requests websockets websocket-client textual rich`
+- **Python packages**: `pip install -r requirements.txt` (or: `pip install requests websockets websocket-client textual rich`)
 
 ## Step 1: Configure agents.json
 
@@ -16,18 +16,23 @@ Set up your first agent in 5 steps.
 cp agents.json.example agents.json
 ```
 
-Edit `agents.json` — replace all `/home/YOURUSER` paths with your actual home directory:
+Edit `agents.json` — replace all `/home/YOURUSER` paths with your actual home directory, and set `asdaaas_dir` to the absolute path of your agent-abide clone:
 
 ```json
 {
   "settings": {
+    "asdaaas_dir": "/home/YOURUSER/agent-abide",
+    "agents_dir": "/home/YOURUSER/agents",
     "log_dir": "/tmp",
-    "running_agents_file": "/home/YOURUSER/asdaaas/running_agents.json",
-    "timezone": "America/Los_Angeles"
+    "running_agents_file": "/home/YOURUSER/agents/running_agents.json",
+    "timezone": "America/Los_Angeles",
+    "grok_binary": "/home/YOURUSER/.grok/bin/grok"
   },
   "agents": {}
 }
 ```
+
+`asdaaas_dir` must point to your clone of this repo. If it's wrong, the engine will crash on launch.
 
 ## Step 2: Create an agent
 

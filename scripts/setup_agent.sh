@@ -123,7 +123,7 @@ cat > "$AGENT_HOME/notes_to_self.md" << EOF
 EOF
 echo "  Created notes_to_self.md"
 
-# Step 6: Register in running_agents.json
+# Step 6: Register in running_agents.json (launch scripts overwrite this on startup)
 RUNNING="$ASDAAAS_DIR/running_agents.json"
 if [ -f "$RUNNING" ]; then
     # Add to existing file
@@ -151,7 +151,7 @@ echo ""
 echo "=== Agent $AGENT_NAME is ready ==="
 echo ""
 echo "Next steps:"
-echo "  1. Edit $AGENT_HOME/AGENTS.md — set agent name and role"
-echo "  2. Authenticate grok: grok login --device-auth"
-echo "  3. Launch: bash ops/launch_asdaaas.sh $AGENT_NAME"
-echo "     (or: python3 core/asdaaas.py --agent $AGENT_NAME --cwd $AGENT_HOME)"
+echo "  1. Add $AGENT_NAME to agents.json (see AGENT_START_HERE.md Step 3)"
+echo "  2. Edit $AGENT_HOME/AGENTS.md — set agent name and role"
+echo "  3. Authenticate grok: grok login --device-auth"
+echo "  4. Launch: bash scripts/launch_asdaaas.sh $AGENT_NAME"

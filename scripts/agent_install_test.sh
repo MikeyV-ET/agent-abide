@@ -39,6 +39,6 @@ echo "    (this may take a few minutes)"
 echo ""
 
 docker run --rm \
-  -v "$HOME/.grok/auth.json:/home/testuser/.grok/auth.json:ro" \
+  -v "$HOME/.grok/auth.json:/tmp/host_auth.json:ro" \
   agent-abide-agent-test \
-  bash -c "grok -p $(printf '%q' "$PROMPT") --yolo --max-turns 30 --cwd /home/testuser/agent-abide --output-format plain 2>&1; echo '---REPORT---'; cat /home/testuser/install_report.txt 2>/dev/null || echo 'No report generated'"
+  bash -c "mkdir -p /home/testuser/.grok && cp /tmp/host_auth.json /home/testuser/.grok/auth.json && grok -p $(printf '%q' "$PROMPT") --yolo --max-turns 30 --cwd /home/testuser/agent-abide --output-format plain 2>&1; echo '---REPORT---'; cat /home/testuser/install_report.txt 2>/dev/null || echo 'No report generated'"

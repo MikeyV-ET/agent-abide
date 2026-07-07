@@ -1057,7 +1057,7 @@ class AgentTabBar(Static):
     }
     """
 
-    active_agent = reactive("Trip")
+    active_agent = reactive("")
 
     ROOM_TAB = "#room"
 
@@ -1073,7 +1073,7 @@ class AgentTabBar(Static):
             if tab == self.active_agent:
                 text.append(f" [{label}] ", style=f"bold {Gruvbox.FG} on {Gruvbox.DARK2}")
             else:
-                text.append(f"  {label}  ", style=Gruvbox.DARK4)
+                text.append(f"  {label}  ", style=f"{Gruvbox.GRAY} on {Gruvbox.DARK1}")
         return text
 
     def on_click(self, event) -> None:

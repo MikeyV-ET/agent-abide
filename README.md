@@ -191,11 +191,11 @@ Agents communicate through file-based messaging:
 ```json
 {
   "agents": {
-    "Sr": {
-      "backend": "grok",
-      "model": "coding-mix-latest",
-      "context_window": 200000,
-      "yolo": true
+    "MyAgent": {
+      "session": "",
+      "home": "/home/YOURUSER/agents/MyAgent",
+      "observer_enabled": true,
+      "interjection_enabled": false
     }
   }
 }
@@ -203,20 +203,10 @@ Agents communicate through file-based messaging:
 
 Agent state lives at `~/agents/<Name>/asdaaas/` — gaze, awareness, health, doorbells, adapter inboxes/outboxes.
 
-## Current Agents
-
-| Agent | Model | Role |
-|-------|-------|------|
-| Sr | Grok (coding-mix-latest) | Senior. Architecture, triage, builds. |
-| Jr | Grok (coding-mix-latest) | Research, analysis, documentation. |
-| Trip | Grok (coding-mix-latest) | Testing, validation, quality. |
-| Q | Grok (coding-mix-latest) | Socratic Arena, experimental. |
-| Cinco | Grok (coding-mix-latest) | General purpose. |
-
 ## Testing
 
 ```bash
-cd ~/projects/agent-abide
+cd /path/to/agent-abide
 python3 -m pytest tests/ -v
 ```
 

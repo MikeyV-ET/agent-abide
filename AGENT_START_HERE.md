@@ -55,7 +55,7 @@ Add your agent to the `"agents"` section of `agents.json`:
 }
 ```
 
-- `session`: leave empty for a new agent (a session ID is assigned on first launch)
+- `session`: leave empty for a new agent (a session ID is assigned on first launch and stored in `~/.grok/session_registry.json` — the `agents.json` field stays empty)
 - `home`: path to the agent directory created in Step 2
 - `observer_enabled`: enables the binary state observer (recommended)
 - `interjection_enabled`: enables mid-turn interjection (optional)
@@ -79,6 +79,8 @@ You should see `UP` with a status of `ready` or `working`.
 ```bash
 bash scripts/launch_tui.sh -a MyAgent
 ```
+
+On first launch, the TUI will ask **"Who are you?"** for an operator name — enter your name or handle. This identifies you in logs and is remembered for future sessions.
 
 Type a message and press Enter. The agent responds in the TUI.
 

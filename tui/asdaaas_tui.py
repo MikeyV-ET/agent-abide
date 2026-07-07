@@ -64,8 +64,9 @@ from rich.console import Group
 # Color Palette — Gruvbox Dark
 # =============================================================================
 
-class Gruvbox:
+class GruvboxDark:
     """Gruvbox dark mode color palette."""
+    NAME = "Gruvbox Dark"
     BG = "#282828"
     FG = "#ebdbb2"
     GRAY = "#928374"
@@ -76,7 +77,6 @@ class Gruvbox:
     PURPLE = "#b16286"
     AQUA = "#689d6a"
     ORANGE = "#d65d0e"
-    # Bright variants
     BR_RED = "#fb4934"
     BR_GREEN = "#b8bb26"
     BR_YELLOW = "#fabd2f"
@@ -84,11 +84,91 @@ class Gruvbox:
     BR_PURPLE = "#d3869b"
     BR_AQUA = "#8ec07c"
     BR_ORANGE = "#fe8019"
-    # Darks
     DARK1 = "#3c3836"
     DARK2 = "#504945"
     DARK3 = "#665c54"
     DARK4 = "#7c6f64"
+
+
+class GruvboxLight:
+    """Gruvbox light mode color palette."""
+    NAME = "Gruvbox Light"
+    BG = "#fbf1c7"
+    FG = "#3c3836"
+    GRAY = "#928374"
+    RED = "#cc241d"
+    GREEN = "#98971a"
+    YELLOW = "#d79921"
+    BLUE = "#458588"
+    PURPLE = "#b16286"
+    AQUA = "#689d6a"
+    ORANGE = "#d65d0e"
+    BR_RED = "#9d0006"
+    BR_GREEN = "#79740e"
+    BR_YELLOW = "#b57614"
+    BR_BLUE = "#076678"
+    BR_PURPLE = "#8f3f71"
+    BR_AQUA = "#427b58"
+    BR_ORANGE = "#af3a03"
+    DARK1 = "#ebdbb2"
+    DARK2 = "#d5c4a1"
+    DARK3 = "#bdae93"
+    DARK4 = "#a89984"
+
+
+class SolarizedDark:
+    """Solarized dark color palette."""
+    NAME = "Solarized Dark"
+    BG = "#002b36"
+    FG = "#839496"
+    GRAY = "#586e75"
+    RED = "#dc322f"
+    GREEN = "#859900"
+    YELLOW = "#b58900"
+    BLUE = "#268bd2"
+    PURPLE = "#6c71c4"
+    AQUA = "#2aa198"
+    ORANGE = "#cb4b16"
+    BR_RED = "#dc322f"
+    BR_GREEN = "#859900"
+    BR_YELLOW = "#b58900"
+    BR_BLUE = "#268bd2"
+    BR_PURPLE = "#6c71c4"
+    BR_AQUA = "#2aa198"
+    BR_ORANGE = "#cb4b16"
+    DARK1 = "#073642"
+    DARK2 = "#094959"
+    DARK3 = "#586e75"
+    DARK4 = "#657b83"
+
+
+THEMES = {
+    "gruvbox-dark": GruvboxDark,
+    "gruvbox-light": GruvboxLight,
+    "solarized-dark": SolarizedDark,
+}
+
+THEME_CONFIG_FILE = Path.home() / ".config" / "abidetui" / "theme.json"
+
+
+def _load_saved_theme() -> str:
+    """Load saved theme name from config file."""
+    try:
+        with open(THEME_CONFIG_FILE) as f:
+            return json.load(f).get("theme", "gruvbox-dark")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return "gruvbox-dark"
+
+
+def _save_theme(name: str) -> None:
+    """Save theme selection to config file."""
+    THEME_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(THEME_CONFIG_FILE, "w") as f:
+        json.dump({"theme": name}, f)
+
+
+# Module-level active theme — all widgets reference this
+Theme = THEMES.get(_load_saved_theme(), GruvboxDark)
 
 
 # =============================================================================
@@ -270,42 +350,42 @@ class AgentHeader(Static):
     def render(self) -> Text:
         text = Text()
         # Agent name
-        text.append(f" {self.agent_name} ", style=f"bold {Gruvbox.FG} on {Gruvbox.DARK2}")
+        text.append(f" {self.agent_name} ", style=f"bold {Theme.FG} on {Theme.DARK2}")
         text.append("  ")
 
         # Context usage with color coding
         pct = self.context_pct
         if pct < 50:
-            ctx_style = Gruvbox.BR_GREEN
+            ctx_style = Theme.BR_GREEN
         elif pct < 70:
-            ctx_style = Gruvbox.BR_YELLOW
+            ctx_style = Theme.BR_YELLOW
         elif pct < 85:
-            ctx_style = Gruvbox.BR_ORANGE
+            ctx_style = Theme.BR_ORANGE
         else:
-            ctx_style = f"bold {Gruvbox.BR_RED}"
-        text.append("ctx: ", style=Gruvbox.GRAY)
+            ctx_style = f"bold {Theme.BR_RED}"
+        text.append("ctx: ", style=Theme.GRAY)
         text.append(f"{pct}%", style=ctx_style)
 
         if self.compaction_count > 0:
-            text.append(f" (c:{self.compaction_count})", style=Gruvbox.GRAY)
+            text.append(f" (c:{self.compaction_count})", style=Theme.GRAY)
 
         # Compaction phase indicator
         cp = self.compaction_phase
         if cp in ("in_flight", "pending"):
-            text.append(" ⟳ compacting", style=f"bold {Gruvbox.BR_ORANGE}")
+            text.append(" ⟳ compacting", style=f"bold {Theme.BR_ORANGE}")
         elif cp == "complete" and self.compaction_detail:
-            text.append(f" ✓ compacted {self.compaction_detail}", style=Gruvbox.BR_GREEN)
+            text.append(f" ✓ compacted {self.compaction_detail}", style=Theme.BR_GREEN)
         elif cp == "complete":
-            text.append(" ✓ compacted", style=Gruvbox.BR_GREEN)
+            text.append(" ✓ compacted", style=Theme.BR_GREEN)
         elif cp == "failed":
-            text.append(" ✗ compact fail", style=f"bold {Gruvbox.BR_RED}")
+            text.append(" ✗ compact fail", style=f"bold {Theme.BR_RED}")
 
         text.append("  ")
 
         # Gaze (clickable)
-        text.append("gaze: ", style=Gruvbox.GRAY)
-        text.append(f"[{self.gaze_target}]", style=f"bold underline {Gruvbox.BR_AQUA}")
-        text.append(" ▾", style=Gruvbox.GRAY)
+        text.append("gaze: ", style=Theme.GRAY)
+        text.append(f"[{self.gaze_target}]", style=f"bold underline {Theme.BR_AQUA}")
+        text.append(" ▾", style=Theme.GRAY)
         text.append("  ")
 
         # Health + spinner
@@ -315,56 +395,56 @@ class AgentHeader(Static):
             spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
             import time as _time
             frame = spinner_frames[int(_time.time() * 8) % len(spinner_frames)]
-            text.append(frame, style=f"bold {Gruvbox.BR_AQUA}")
-            text.append(" generating", style=Gruvbox.GRAY)
+            text.append(frame, style=f"bold {Theme.BR_AQUA}")
+            text.append(" generating", style=Theme.GRAY)
         elif h == "working":
-            text.append("●", style=Gruvbox.BR_GREEN)
-            text.append(f" {h}", style=Gruvbox.GRAY)
+            text.append("●", style=Theme.BR_GREEN)
+            text.append(f" {h}", style=Theme.GRAY)
         elif h in ("ready", "active"):
-            text.append("●", style=Gruvbox.BR_AQUA)
-            text.append(f" {h}", style=Gruvbox.GRAY)
+            text.append("●", style=Theme.BR_AQUA)
+            text.append(f" {h}", style=Theme.GRAY)
         elif h == "idle":
-            text.append("○", style=Gruvbox.BR_YELLOW)
-            text.append(f" {h}", style=Gruvbox.GRAY)
+            text.append("○", style=Theme.BR_YELLOW)
+            text.append(f" {h}", style=Theme.GRAY)
         elif h == "stalled":
-            text.append("⚠", style=f"bold {Gruvbox.BR_RED}")
-            text.append(f" {h}", style=Gruvbox.BR_RED)
+            text.append("⚠", style=f"bold {Theme.BR_RED}")
+            text.append(f" {h}", style=Theme.BR_RED)
         elif h == "restarting":
-            text.append("↻", style=Gruvbox.BR_YELLOW)
-            text.append(f" {h}", style=Gruvbox.GRAY)
+            text.append("↻", style=Theme.BR_YELLOW)
+            text.append(f" {h}", style=Theme.GRAY)
         elif h == "error":
-            text.append("✗", style=f"bold {Gruvbox.BR_RED}")
-            text.append(f" {h}", style=Gruvbox.BR_RED)
+            text.append("✗", style=f"bold {Theme.BR_RED}")
+            text.append(f" {h}", style=Theme.BR_RED)
         elif h in ("shutdown", "waiting"):
-            text.append("◌", style=Gruvbox.GRAY)
-            text.append(f" {h}", style=Gruvbox.GRAY)
+            text.append("◌", style=Theme.GRAY)
+            text.append(f" {h}", style=Theme.GRAY)
         else:
-            text.append("?", style=Gruvbox.BR_RED)
-            text.append(f" {h}", style=Gruvbox.GRAY)
+            text.append("?", style=Theme.BR_RED)
+            text.append(f" {h}", style=Theme.GRAY)
 
         # Turn reporting (physical turns = asdaaas-level prompt deliveries)
         if self.turn_physical > 0:
             text.append("  ")
-            text.append("t:", style=Gruvbox.GRAY)
-            text.append(f"{self.turn_physical}", style=Gruvbox.BR_AQUA)
+            text.append("t:", style=Theme.GRAY)
+            text.append(f"{self.turn_physical}", style=Theme.BR_AQUA)
 
         # Delay pattern
         if self.delay_pattern:
             text.append(" ")
-            text.append(f"[{self.delay_pattern}]", style=Gruvbox.DARK4)
+            text.append(f"[{self.delay_pattern}]", style=Theme.DARK4)
 
         # Model name (right side)
         if self.model_name:
             text.append("  ")
-            text.append(self.model_name, style=Gruvbox.DARK4)
+            text.append(self.model_name, style=Theme.DARK4)
 
         # Code version
         if self.code_version:
             text.append("  ")
             if self.code_version_stale:
-                text.append(f"⚠ {self.code_version}", style=f"bold {Gruvbox.BR_YELLOW}")
+                text.append(f"⚠ {self.code_version}", style=f"bold {Theme.BR_YELLOW}")
             else:
-                text.append(self.code_version, style=Gruvbox.DARK4)
+                text.append(self.code_version, style=Theme.DARK4)
 
         return text
 
@@ -626,14 +706,14 @@ class SystemAlert(Static):
     def render(self) -> Text:
         text = Text()
         if self.severity == "error":
-            text.append(" ⚠ ", style=f"bold {Gruvbox.BR_RED}")
-            text.append(self.alert_message, style=Gruvbox.BR_RED)
+            text.append(" ⚠ ", style=f"bold {Theme.BR_RED}")
+            text.append(self.alert_message, style=Theme.BR_RED)
         elif self.severity == "warning":
-            text.append(" ⚠ ", style=f"bold {Gruvbox.BR_YELLOW}")
-            text.append(self.alert_message, style=Gruvbox.BR_YELLOW)
+            text.append(" ⚠ ", style=f"bold {Theme.BR_YELLOW}")
+            text.append(self.alert_message, style=Theme.BR_YELLOW)
         else:
-            text.append(" ℹ ", style=f"bold {Gruvbox.BR_BLUE}")
-            text.append(self.alert_message, style=Gruvbox.BR_BLUE)
+            text.append(" ℹ ", style=f"bold {Theme.BR_BLUE}")
+            text.append(self.alert_message, style=Theme.BR_BLUE)
         return text
 
 
@@ -900,16 +980,16 @@ class ToolCallPanel(Static):
         # Status indicator
         if self.tool_status == "completed":
             status_icon = "✓"
-            border_style = Gruvbox.BR_GREEN
+            border_style = Theme.BR_GREEN
         elif self.tool_status == "failed":
             status_icon = "✗"
-            border_style = Gruvbox.BR_RED
+            border_style = Theme.BR_RED
         elif self.tool_status == "in_progress":
             status_icon = "⟳"
-            border_style = Gruvbox.BR_YELLOW
+            border_style = Theme.BR_YELLOW
         else:
             status_icon = "…"
-            border_style = Gruvbox.BR_BLUE
+            border_style = Theme.BR_BLUE
 
         # Kind icon
         kind_icons = {
@@ -925,7 +1005,7 @@ class ToolCallPanel(Static):
             text = Text()
             text.append(f"  {title}", style=border_style)
             if self.tool_output:
-                text.append("  ▸ click to expand", style=Gruvbox.DARK4)
+                text.append("  ▸ click to expand", style=Theme.DARK4)
             return text
 
         # Expanded: full panel
@@ -938,16 +1018,16 @@ class ToolCallPanel(Static):
                 # Active panel: show last MAX lines with "click for more"
                 display = "\n".join(lines[-self.MAX_ACTIVE_LINES:])
                 header = f"... ({len(lines) - self.MAX_ACTIVE_LINES} more lines above, click to expand) ...\n"
-                content = Text(header, style=Gruvbox.DARK4)
-                content.append(display, style=Gruvbox.GRAY)
+                content = Text(header, style=Theme.DARK4)
+                content.append(display, style=Theme.GRAY)
             elif not is_active and len(output) > 2000:
                 # Completed: truncate middle
                 display = output[:1000] + "\n... (truncated) ...\n" + output[-500:]
-                content = Text(display, style=Gruvbox.GRAY)
+                content = Text(display, style=Theme.GRAY)
             else:
-                content = Text(output, style=Gruvbox.GRAY)
+                content = Text(output, style=Theme.GRAY)
         else:
-            content = Text("(no output)", style=f"italic {Gruvbox.DARK4}")
+            content = Text("(no output)", style=f"italic {Theme.DARK4}")
 
         return Panel(
             content,
@@ -971,10 +1051,10 @@ class PlanPanel(Static):
         table.add_column("task")
 
         status_icons = {
-            "completed": f"[{Gruvbox.BR_GREEN}]✓[/]",
-            "in_progress": f"[{Gruvbox.BR_YELLOW}]▶[/]",
-            "pending": f"[{Gruvbox.GRAY}]○[/]",
-            "cancelled": f"[{Gruvbox.GRAY}]✗[/]",
+            "completed": f"[{Theme.BR_GREEN}]✓[/]",
+            "in_progress": f"[{Theme.BR_YELLOW}]▶[/]",
+            "pending": f"[{Theme.GRAY}]○[/]",
+            "cancelled": f"[{Theme.GRAY}]✗[/]",
         }
 
         for entry in self.entries:
@@ -984,7 +1064,7 @@ class PlanPanel(Static):
             table.add_row(icon, Text(content, style=style))
 
         return Panel(table, title="📋 Plan", title_align="left",
-                     border_style=Gruvbox.BR_PURPLE, padding=(0, 1))
+                     border_style=Theme.BR_PURPLE, padding=(0, 1))
 
 
 class RoomMessage(Static):
@@ -998,8 +1078,8 @@ class RoomMessage(Static):
     """
 
     NICK_COLORS = [
-        Gruvbox.BR_YELLOW, Gruvbox.BR_GREEN, Gruvbox.BR_BLUE,
-        Gruvbox.BR_PURPLE, Gruvbox.BR_AQUA, Gruvbox.BR_ORANGE, Gruvbox.BR_RED,
+        Theme.BR_YELLOW, Theme.BR_GREEN, Theme.BR_BLUE,
+        Theme.BR_PURPLE, Theme.BR_AQUA, Theme.BR_ORANGE, Theme.BR_RED,
     ]
 
     def __init__(self, timestamp: str, nick: str, message: str, is_action: bool = False, **kwargs):
@@ -1011,16 +1091,16 @@ class RoomMessage(Static):
 
     def render(self) -> Text:
         color = self.NICK_COLORS[hash(self._nick.lower()) % len(self.NICK_COLORS)]
-        ts_style = Gruvbox.DARK4
+        ts_style = Theme.DARK4
 
         text = Text()
         text.append(f"{self._timestamp} ", style=ts_style)
         if self._is_action:
             text.append(f"* {self._nick} ", style=f"italic {color}")
-            text.append(self._message, style=f"italic {Gruvbox.FG}")
+            text.append(self._message, style=f"italic {Theme.FG}")
         else:
             text.append(f"<{self._nick}> ", style=f"bold {color}")
-            text.append(self._message, style=Gruvbox.FG)
+            text.append(self._message, style=Theme.FG)
         return text
 
 
@@ -1041,8 +1121,8 @@ class RoomSystemMessage(Static):
 
     def render(self) -> Text:
         text = Text()
-        text.append(f"{self._timestamp} ", style=Gruvbox.DARK4)
-        text.append(self._message, style=f"italic {Gruvbox.DARK3}")
+        text.append(f"{self._timestamp} ", style=Theme.DARK4)
+        text.append(self._message, style=f"italic {Theme.DARK3}")
         return text
 
 
@@ -1071,9 +1151,9 @@ class AgentTabBar(Static):
         for tab in self._tabs:
             label = "Room" if tab == self.ROOM_TAB else tab
             if tab == self.active_agent:
-                text.append(f" [{label}] ", style=f"bold {Gruvbox.FG} on {Gruvbox.DARK2}")
+                text.append(f" [{label}] ", style=f"bold {Theme.FG} on {Theme.DARK2}")
             else:
-                text.append(f"  {label}  ", style=f"{Gruvbox.GRAY} on {Gruvbox.DARK1}")
+                text.append(f"  {label}  ", style=f"{Theme.GRAY} on {Theme.DARK1}")
         return text
 
     def on_click(self, event) -> None:
@@ -1092,6 +1172,44 @@ class AgentTabBar(Static):
                         self.app.action_switch_agent(tab)
                 return
             pos += tab_width
+
+
+class ThemeSelector(OptionList):
+    """Dropdown overlay for selecting color theme."""
+
+    DEFAULT_CSS = """
+    ThemeSelector {
+        layer: overlay;
+        dock: top;
+        margin: 2 0 0 0;
+        width: 30;
+        max-height: 10;
+        border: solid $accent;
+        background: $surface;
+        display: none;
+        offset-x: 50;
+    }
+    """
+
+    def on_blur(self, event) -> None:
+        self.display = False
+
+    def populate(self) -> None:
+        """Refresh the option list with available themes."""
+        self.clear_options()
+        for key, palette in THEMES.items():
+            current = " *" if palette is Theme else ""
+            self.add_option(Option(f"  {palette.NAME}{current}", id=key))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Apply selected theme."""
+        global Theme
+        theme_key = event.option.id
+        if theme_key and theme_key in THEMES:
+            Theme = THEMES[theme_key]
+            _save_theme(theme_key)
+            self.display = False
+            self.app.refresh(layout=True)
 
 
 class DynamicFooter(Static):
@@ -1119,8 +1237,8 @@ class DynamicFooter(Static):
         text = Text()
         bindings = self.GENERATING_BINDINGS if self.is_generating else self.IDLE_BINDINGS
         for key, label in bindings:
-            text.append(f" {key} ", style=f"bold {Gruvbox.BR_ORANGE}")
-            text.append(f"{label} ", style=Gruvbox.FG)
+            text.append(f" {key} ", style=f"bold {Theme.BR_ORANGE}")
+            text.append(f"{label} ", style=Theme.FG)
         return text
 
 
@@ -1166,7 +1284,7 @@ class HookAnnotation(Static):
         self.annotation_message = message
 
     def render(self) -> Text:
-        return Text(f"  {self.annotation_message}", style=f"italic {Gruvbox.DARK4}")
+        return Text(f"  {self.annotation_message}", style=f"italic {Theme.DARK4}")
 
 
 class TurnSeparator(Static):
@@ -1181,14 +1299,14 @@ class TurnSeparator(Static):
     def render(self) -> Text:
         text = Text()
         # Thin horizontal rule with turn info
-        text.append(" T", style=f"bold {Gruvbox.DARK4}")
-        text.append(f"{self._turn_num}", style=f"bold {Gruvbox.BR_AQUA}")
-        text.append(f" {self._trigger}", style=Gruvbox.DARK4)
+        text.append(" T", style=f"bold {Theme.DARK4}")
+        text.append(f"{self._turn_num}", style=f"bold {Theme.BR_AQUA}")
+        text.append(f" {self._trigger}", style=Theme.DARK4)
         if self._timestamp:
-            text.append(f"  {self._timestamp}", style=Gruvbox.DARK3)
+            text.append(f"  {self._timestamp}", style=Theme.DARK3)
         # Fill remaining width with thin line
         pad = max(0, 60 - len(text.plain))
-        text.append(" " + "\u2500" * pad, style=Gruvbox.DARK3)
+        text.append(" " + "\u2500" * pad, style=Theme.DARK3)
         return text
 
 
@@ -1238,8 +1356,8 @@ class UserMessage(Static):
 
     def render(self) -> Text:
         text = Text()
-        text.append("❯ ", style=f"bold {Gruvbox.BR_BLUE}")
-        text.append(self.user_text, style=Gruvbox.FG)
+        text.append("❯ ", style=f"bold {Theme.BR_BLUE}")
+        text.append(self.user_text, style=Theme.FG)
         return text
 
 
@@ -1327,10 +1445,10 @@ class ThinkingBlock(Static):
             title_str += " [expanded — click to collapse]"
 
         return Panel(
-            Text(display, style=Gruvbox.DARK4),
+            Text(display, style=Theme.DARK4),
             title=title_str,
             title_align="left",
-            border_style=Gruvbox.DARK3,
+            border_style=Theme.DARK3,
             padding=(0, 1),
         )
 
@@ -1344,10 +1462,10 @@ class InterjectionBlock(Static):
 
     def render(self) -> Panel:
         return Panel(
-            Text(self._message, style=Gruvbox.BR_ORANGE),
+            Text(self._message, style=Theme.BR_ORANGE),
             title="🔔 Interjection",
             title_align="left",
-            border_style=Gruvbox.BR_ORANGE,
+            border_style=Theme.BR_ORANGE,
             padding=(0, 1),
         )
 
@@ -1439,11 +1557,11 @@ class PersistenceScreen(ModalScreen[None]):
         agent = self._agent_name
         d = self._agent_dir
 
-        text.append(f" Persistence: {agent} ", style=f"bold {Gruvbox.FG} on {Gruvbox.DARK2}")
+        text.append(f" Persistence: {agent} ", style=f"bold {Theme.FG} on {Theme.DARK2}")
         text.append("\n")
 
         # --- Health ---
-        text.append("\n Health ", style=f"bold {Gruvbox.BR_AQUA}")
+        text.append("\n Health ", style=f"bold {Theme.BR_AQUA}")
         text.append("\n")
         health_path = d / "asdaaas" / "health.json"
         try:
@@ -1452,15 +1570,15 @@ class PersistenceScreen(ModalScreen[None]):
             tokens = h.get("totalTokens", "?")
             ctx_win = h.get("contextWindow", "?")
             pct = int(tokens / ctx_win * 100) if isinstance(tokens, int) and isinstance(ctx_win, int) else "?"
-            text.append(f"  Context: {tokens}/{ctx_win} ({pct}%)\n", style=Gruvbox.FG)
-            text.append(f"  Status: {h.get('status', '?')}  Detail: {h.get('detail', '')}\n", style=Gruvbox.FG)
-            text.append(f"  Model: {h.get('model', '?')}\n", style=Gruvbox.FG)
-            text.append(f"  Last activity: {h.get('last_activity', '?')}\n", style=Gruvbox.FG)
+            text.append(f"  Context: {tokens}/{ctx_win} ({pct}%)\n", style=Theme.FG)
+            text.append(f"  Status: {h.get('status', '?')}  Detail: {h.get('detail', '')}\n", style=Theme.FG)
+            text.append(f"  Model: {h.get('model', '?')}\n", style=Theme.FG)
+            text.append(f"  Last activity: {h.get('last_activity', '?')}\n", style=Theme.FG)
         except Exception as e:
-            text.append(f"  (could not read: {e})\n", style=Gruvbox.BR_RED)
+            text.append(f"  (could not read: {e})\n", style=Theme.BR_RED)
 
         # --- Lab Notebook ---
-        text.append("\n Lab Notebook ", style=f"bold {Gruvbox.BR_GREEN}")
+        text.append("\n Lab Notebook ", style=f"bold {Theme.BR_GREEN}")
         text.append("\n")
         notebook = d / f"lab_notebook_{agent.lower()}.md"
         if notebook.exists():
@@ -1468,8 +1586,8 @@ class PersistenceScreen(ModalScreen[None]):
             stat = _os.stat(notebook)
             size_kb = stat.st_size / 1024
             mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
-            text.append(f"  File: {notebook.name}\n", style=Gruvbox.FG)
-            text.append(f"  Size: {size_kb:.0f} KB  Modified: {mtime}\n", style=Gruvbox.FG)
+            text.append(f"  File: {notebook.name}\n", style=Theme.FG)
+            text.append(f"  Size: {size_kb:.0f} KB  Modified: {mtime}\n", style=Theme.FG)
             # Find last ### entry header
             try:
                 with open(notebook, "rb") as f:
@@ -1477,14 +1595,14 @@ class PersistenceScreen(ModalScreen[None]):
                     tail = f.read().decode("utf-8", errors="replace")
                 entries = [l for l in tail.split("\n") if l.startswith("### ")]
                 if entries:
-                    text.append(f"  Last entry: {entries[-1][:60]}\n", style=Gruvbox.FG)
+                    text.append(f"  Last entry: {entries[-1][:60]}\n", style=Theme.FG)
             except Exception:
                 pass
         else:
-            text.append(f"  (not found: {notebook})\n", style=Gruvbox.BR_RED)
+            text.append(f"  (not found: {notebook})\n", style=Theme.BR_RED)
 
         # --- Notes to Self ---
-        text.append("\n Notes to Self ", style=f"bold {Gruvbox.BR_YELLOW}")
+        text.append("\n Notes to Self ", style=f"bold {Theme.BR_YELLOW}")
         text.append("\n")
         # Try common naming patterns
         notes = None
@@ -1498,13 +1616,13 @@ class PersistenceScreen(ModalScreen[None]):
             stat = _os.stat(notes)
             size_kb = stat.st_size / 1024
             mtime = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
-            text.append(f"  File: {notes.name}\n", style=Gruvbox.FG)
-            text.append(f"  Size: {size_kb:.0f} KB  Modified: {mtime}\n", style=Gruvbox.FG)
+            text.append(f"  File: {notes.name}\n", style=Theme.FG)
+            text.append(f"  Size: {size_kb:.0f} KB  Modified: {mtime}\n", style=Theme.FG)
         else:
-            text.append("  (not found)\n", style=Gruvbox.DARK4)
+            text.append("  (not found)\n", style=Theme.DARK4)
 
         # --- Git ---
-        text.append("\n Git ", style=f"bold {Gruvbox.BR_PURPLE}")
+        text.append("\n Git ", style=f"bold {Theme.BR_PURPLE}")
         text.append("\n")
         try:
             import subprocess
@@ -1514,28 +1632,28 @@ class PersistenceScreen(ModalScreen[None]):
             )
             if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().split("\n")[:3]:
-                    text.append(f"  {line}\n", style=Gruvbox.FG)
+                    text.append(f"  {line}\n", style=Theme.FG)
             else:
-                text.append("  (no recent commits)\n", style=Gruvbox.DARK4)
+                text.append("  (no recent commits)\n", style=Theme.DARK4)
         except Exception as e:
-            text.append(f"  (git error: {e})\n", style=Gruvbox.BR_RED)
+            text.append(f"  (git error: {e})\n", style=Theme.BR_RED)
 
         # --- Compaction History ---
-        text.append("\n Compaction ", style=f"bold {Gruvbox.BR_ORANGE}")
+        text.append("\n Compaction ", style=f"bold {Theme.BR_ORANGE}")
         text.append("\n")
         try:
             with open(health_path) as f:
                 h = json.load(f)
             detail = h.get("detail", "")
             if "compacted" in detail:
-                text.append(f"  {detail}\n", style=Gruvbox.FG)
+                text.append(f"  {detail}\n", style=Theme.FG)
             else:
-                text.append(f"  Detail: {detail}\n", style=Gruvbox.FG)
+                text.append(f"  Detail: {detail}\n", style=Theme.FG)
         except Exception:
-            text.append("  (unknown)\n", style=Gruvbox.DARK4)
+            text.append("  (unknown)\n", style=Theme.DARK4)
 
         # --- Session Profile ---
-        text.append("\n Session ", style=f"bold {Gruvbox.BR_BLUE}")
+        text.append("\n Session ", style=f"bold {Theme.BR_BLUE}")
         text.append("\n")
         profile_dir = d / "asdaaas" / "profile"
         if profile_dir.exists():
@@ -1545,15 +1663,15 @@ class PersistenceScreen(ModalScreen[None]):
                 try:
                     with open(jsonl, "rb") as f:
                         turn_count = sum(1 for _ in f)
-                    text.append(f"  Physical turns: {turn_count}\n", style=Gruvbox.FG)
+                    text.append(f"  Physical turns: {turn_count}\n", style=Theme.FG)
                 except Exception:
                     pass
             if latest.exists():
                 try:
                     with open(latest) as f:
                         lp = json.load(f)
-                    text.append(f"  Last turn: {lp.get('ts', '?')}\n", style=Gruvbox.FG)
-                    text.append(f"  Duration: {lp.get('wall_seconds', '?')}s\n", style=Gruvbox.FG)
+                    text.append(f"  Last turn: {lp.get('ts', '?')}\n", style=Theme.FG)
+                    text.append(f"  Duration: {lp.get('wall_seconds', '?')}s\n", style=Theme.FG)
                 except Exception:
                     pass
 
@@ -1562,10 +1680,10 @@ class PersistenceScreen(ModalScreen[None]):
         if bells_dir.exists():
             bell_files = list(bells_dir.glob("*.json"))
             if bell_files:
-                text.append(f"\n  Pending doorbells: {len(bell_files)}\n", style=Gruvbox.BR_YELLOW)
+                text.append(f"\n  Pending doorbells: {len(bell_files)}\n", style=Theme.BR_YELLOW)
 
         text.append("\n")
-        text.append(" Press Esc or F2 to close ", style=Gruvbox.DARK4)
+        text.append(" Press Esc or F2 to close ", style=Theme.DARK4)
         return text
 
     def action_dismiss_panel(self) -> None:
@@ -1661,6 +1779,7 @@ class AsdaaasTUI(App):
         Binding("ctrl+q", "quit", "Quit", show=False),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
         Binding("ctrl+g", "toggle_gaze_selector", "Gaze", show=True),
+        Binding("ctrl+t", "toggle_theme_selector", "Theme", show=True),
         Binding("escape", "dismiss_overlay", "Dismiss", show=False),
         Binding("f1", "toggle_thinking", "Toggle Thinking", show=True),
         Binding("end", "scroll_bottom", "Bottom", show=False),
@@ -1751,6 +1870,7 @@ class AsdaaasTUI(App):
                 yield AgentTabBar(self._agents, id="agent-tab-bar")
             yield AgentHeader(id="agent-header")
         yield GazeSelector(id="gaze-selector")
+        yield ThemeSelector(id="theme-selector")
         yield SlashMenu(id="slash-menu")
         # One content scroll per agent
         for agent in self._agents:
@@ -2336,10 +2456,32 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
+    def action_toggle_theme_selector(self) -> None:
+        """Toggle the theme selector dropdown."""
+        try:
+            selector = self.query_one("#theme-selector", ThemeSelector)
+            if selector.display:
+                selector.display = False
+                self.query_one("#input-bar", MessageInput).focus()
+            else:
+                selector.populate()
+                selector.display = True
+                selector.focus()
+        except NoMatches:
+            pass
+
     def action_dismiss_overlay(self) -> None:
         """Dismiss any open overlay, or focus input."""
         try:
             selector = self.query_one("#gaze-selector", GazeSelector)
+            if selector.display:
+                selector.display = False
+                self.query_one("#input-bar", MessageInput).focus()
+                return
+        except NoMatches:
+            pass
+        try:
+            selector = self.query_one("#theme-selector", ThemeSelector)
             if selector.display:
                 selector.display = False
                 self.query_one("#input-bar", MessageInput).focus()

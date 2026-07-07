@@ -1,10 +1,10 @@
 {
   "_comment": "Agent configuration for asdaaas. Copy to agents.json and edit for your machine. DO NOT commit agents.json — it contains local paths and session IDs.",
   "settings": {
-    "asdaaas_dir": "/home/YOURUSER/projects/agent-abide",
+    "asdaaas_dir": "/path/to/agent-abide",
     "agents_dir": "/home/YOURUSER/agents",
     "log_dir": "/tmp",
-    "running_agents_file": "/home/YOURUSER/asdaaas/running_agents.json",
+    "running_agents_file": "/home/YOURUSER/agents/running_agents.json",
     "timezone": "America/Los_Angeles",
     "debug": false,
     "grok_binary": "/home/YOURUSER/.grok/bin/grok"

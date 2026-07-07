@@ -2126,7 +2126,12 @@ Type anything else to send a message to the agent.
 
     def _handle_mail_command(self, arg: str, content: VerticalScroll) -> None:
         """Handle /mail <agent> <message> and /mail all <message>."""
-        KNOWN_AGENTS = ["Sr", "Jr", "Trip", "Q", "Cinco", "Astro"]
+        cfg = Config.load_agents_cfg()
+        agents_dict = cfg.get("agents", {})
+        KNOWN_AGENTS = [
+            name for name, acfg in agents_dict.items()
+            if acfg.get("session")
+        ]
 
         if not arg.strip():
             m = AgentMessage(); content.mount(m)

@@ -68,8 +68,10 @@ Add your agent to the `"agents"` section of `agents.json`:
 ## Step 4: Launch
 
 ```bash
-bash scripts/launch_asdaaas.sh MyAgent
+bash scripts/launch_asdaaas.sh --wait MyAgent
 ```
+
+The `--wait` flag shows startup progress and waits until the agent reaches Ready (typically 30-60 seconds). Without `--wait`, the script returns immediately after spawning.
 
 Check that it started:
 

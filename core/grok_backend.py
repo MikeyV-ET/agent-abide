@@ -362,6 +362,7 @@ class GrokBackend(AgentBackend):
             if hook_path.exists():
                 proc_env = {**os.environ, "BASH_ENV": str(hook_path), "AGENT_NAME": agent_name}
 
+        print(f"[asdaaas] Spawning grok binary...")
         self._proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
@@ -372,6 +373,7 @@ class GrokBackend(AgentBackend):
         )
 
         # Initialize JSON-RPC
+        print(f"[asdaaas] Initializing protocol...")
         await self._send(self._rpc_request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -382,12 +384,14 @@ class GrokBackend(AgentBackend):
 
         # Create or load session
         if session_id:
+            print(f"[asdaaas] Loading session {session_id[:12]}...")
             await self._send(self._rpc_request("session/load", {
                 "sessionId": session_id,
                 "cwd": agent_cwd,
                 "mcpServers": [],
             }))
         else:
+            print(f"[asdaaas] Creating new session...")
             await self._send(self._rpc_request("session/new", {
                 "cwd": agent_cwd,
                 "mcpServers": [],
@@ -407,6 +411,8 @@ class GrokBackend(AgentBackend):
                 self._model_id = summary.get("current_model_id", "unknown")
             except (FileNotFoundError, json.JSONDecodeError, TypeError):
                 pass
+
+        print(f"[asdaaas] Session ready: {self._session_id[:12]}")
 
         # Open file event source for output reading
         encoded_cwd = agent_cwd.replace("/", "%2F")

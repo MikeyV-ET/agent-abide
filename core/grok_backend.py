@@ -199,10 +199,22 @@ class GrokBackend(AgentBackend):
     async def _process_stdout(self):
         """Read stdout, log all frames, and handle interactive gates.
 
-        Every line from the binary's stdout is logged to stdout_log.jsonl
-        before any parsing. This gives the observer (and post-mortem analysis)
-        full visibility into the control channel — gates, permissions,
-        session updates — not just what lands in updates.jsonl.
+        This is the Y-channel tap: every line from the binary's stdout is
+        logged to stdout_log.jsonl before any parsing, giving the observer
+        full visibility into the control channel (gates, permissions, session
+        updates) — not just what lands in updates.jsonl.
+
+        Design constraints (from LSP proxy experience — see
+        docs/Y_CHANNEL_LSP_LESSONS.md for full analysis):
+
+        1. NEVER BLOCK THIS LOOP. All tap work (logging, parsing) must be
+           non-blocking. Blocking here risks pipe buffer deadlock — both
+           directions fill their OS buffers (~64KB), permanent hang.
+        2. Y is a PROXY, not a tee. Gate auto-responses inject data on stdin;
+           this method is an active participant in the protocol, not passive.
+        3. Validate complete messages (newline-delimited) before forwarding.
+        4. Logging volume: flush() per write is correct for debugging but
+           may need filtering/sampling in production.
         """
         stdout_log_fp = None
         if hasattr(self, '_session_dir') and self._session_dir:

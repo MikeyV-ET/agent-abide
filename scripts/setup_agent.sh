@@ -12,7 +12,7 @@
 #   bash setup_agent.sh Rook /projects/agents    # custom path
 #
 # After running this, launch the agent with:
-#   bash ops/launch_asdaaas.sh <agent_name>
+#   bash scripts/launch_asdaaas.sh <agent_name>
 
 set -euo pipefail
 
@@ -124,7 +124,14 @@ EOF
 echo "  Created notes_to_self.md"
 
 # Step 6: Register in running_agents.json (launch scripts overwrite this on startup)
-RUNNING="$ASDAAAS_DIR/running_agents.json"
+# Read path from agents.json settings if available; fall back to ASDAAAS_DIR
+CONFIG="$ASDAAAS_DIR/agents.json"
+if [ -f "$CONFIG" ]; then
+    RUNNING=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c.get('settings',{}).get('running_agents_file','$ASDAAAS_DIR/running_agents.json'))" 2>/dev/null || echo "$ASDAAAS_DIR/running_agents.json")
+else
+    RUNNING="$ASDAAAS_DIR/running_agents.json"
+fi
+mkdir -p "$(dirname "$RUNNING")"
 if [ -f "$RUNNING" ]; then
     # Add to existing file
     python3 -c "

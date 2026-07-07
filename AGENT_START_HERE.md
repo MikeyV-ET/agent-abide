@@ -73,6 +73,8 @@ bash scripts/launch_asdaaas.sh --wait MyAgent
 
 The `--wait` flag shows startup progress and waits until the agent reaches Ready (typically 30-60 seconds). Without `--wait`, the script returns immediately after spawning.
 
+**Note:** Launching a named agent starts only that agent's process. Supporting adapters (context monitoring, heartbeat, etc.) start when you launch all agents with `bash scripts/launch_asdaaas.sh` (no args). For a single-agent setup this is fine — adapters are optional. See `docs/OPERATIONS.md` for the full startup order.
+
 Check that it started:
 
 ```bash
@@ -103,10 +105,21 @@ All checks should pass.
 
 ## What's next
 
-- **Give your agent identity**: create `~/agents/MyAgent/AGENTS.md` with the agent's name, role, and instructions. See `SAMPLE_AGENTS.md` for a template.
+- **Give your agent identity**: edit `~/agents/MyAgent/AGENTS.md` (created by setup_agent.sh) with the agent's name, role, and instructions. See `SAMPLE_AGENTS.md` for the template it was created from.
 - **Add adapters**: launch localmail (`scripts/launch_localmail.sh`), IRC (`scripts/launch_irc_adapter.sh`), or other adapters for multi-agent communication.
 - **Read the architecture**: `docs/ARCHITECTURE.md` explains gaze, awareness, delay, and how adapters work.
 - **Operations guide**: `docs/OPERATIONS.md` covers startup order, monitoring, and troubleshooting.
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Launch crashes with `PermissionError` on `/path/to/...` | `asdaaas_dir` in agents.json still has the placeholder | Set it to the absolute path of your agent-abide clone |
+| `check_agent.sh` shows "no health file" | Agent is still starting up (~30-60s) | Wait and check again; look at the log file for progress |
+| Agent process exits immediately | Agent name not in agents.json `"agents"` section | Add the agent entry per Step 3 |
+| `grok` command not found | grok CLI not installed | `npm install -g @xai-official/grok` |
+| Session fails to load | grok not authenticated | Run `grok login --device-auth` or set `XAI_API_KEY` env var |
+| TUI asks "Who are you?" | First TUI launch requires an operator name | Enter your name, or use `--operator NAME` to skip the prompt |
 
 ## Stopping an agent
 

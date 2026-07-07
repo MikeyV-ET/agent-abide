@@ -4,6 +4,7 @@
 # Usage:
 #   bash launch_asdaaas.sh              # launch all agents from agents.json
 #   bash launch_asdaaas.sh Sr Trip      # launch specific agents only
+#   bash launch_asdaaas.sh --wait Sr    # wait for agent to reach Ready before returning
 #
 # Reads configuration from agents.json (same directory as this script).
 # Edit agents.json to add/remove agents, change paths, or modify settings.
@@ -28,6 +29,18 @@ RUNNING_AGENTS_FILE=$(python3 -c "import json; c=json.load(open('$CONFIG')); pri
 DEBUG=$(python3 -c "import json; c=json.load(open('$CONFIG')); print('1' if c['settings'].get('debug', False) else '')")
 GROK_BINARY=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c['settings'].get('grok_binary', ''))")
 ASDAAAS="$ASDAAAS_DIR/core/asdaaas.py"
+
+# Parse --wait flag
+WAIT_FOR_READY=false
+ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--wait" ]; then
+        WAIT_FOR_READY=true
+    else
+        ARGS+=("$arg")
+    fi
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 # Determine which agents to launch
 if [ $# -gt 0 ]; then
@@ -106,6 +119,20 @@ for agent in "${AGENTS[@]}"; do
         AGENT_NAMES_CSV="$agent"
     fi
 done
+
+# --wait: tail each agent's log until "Ready." appears (90s timeout)
+if [ "$WAIT_FOR_READY" = true ]; then
+    echo ""
+    for agent in "${AGENTS[@]}"; do
+        log_file="$LOG_DIR/asdaaas_$(echo "$agent" | tr '[:upper:]' '[:lower:]').log"
+        echo "Waiting for $agent..."
+        if timeout 90 bash -c "tail -n +1 -f '$log_file' 2>/dev/null | while IFS= read -r line; do echo \"  \$line\"; echo \"\$line\" | grep -q '\\[asdaaas\\] Ready\\.' && exit 0; done"; then
+            echo "$agent: Ready"
+        else
+            echo "$agent: Timed out after 90s (check $log_file)"
+        fi
+    done
+fi
 
 if [ "$STOP_ALL" = true ]; then
     echo ""

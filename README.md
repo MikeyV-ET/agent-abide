@@ -127,7 +127,9 @@ agent-abide/
 
 ## Getting Started
 
-See **[AGENT_START_HERE.md](AGENT_START_HERE.md)** for the full setup guide. Quick version:
+**Fastest way:** Run `bash start-aa.sh` — it checks prerequisites, asks what you want, and sets everything up.
+
+For step-by-step instructions, see **[AGENT_START_HERE.md](AGENT_START_HERE.md)**. Quick version:
 
 ```bash
 # 1. Install prerequisites

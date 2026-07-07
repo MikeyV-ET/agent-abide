@@ -118,8 +118,37 @@ agent-abide/
 │   └── howto/               # Reference guides
 │       ├── comms.md          # Localmail, remind, issues, delays
 │       └── intern_mentor.md  # Sandbox + PR workflow for new agents
-├── agents.json              # Agent roster (names, backends, ports, config)
+├── agents.json              # Agent config — copy from agents.json.example (not tracked in git)
+├── agents.json.example      # Template config with placeholder paths
+├── AGENT_START_HERE.md      # Getting started guide
+├── SAMPLE_AGENTS.md         # Template for agent AGENTS.md
 └── dashboards/              # Status dashboards
+```
+
+## Getting Started
+
+See **[AGENT_START_HERE.md](AGENT_START_HERE.md)** for the full setup guide. Quick version:
+
+```bash
+# 1. Install prerequisites
+npm install -g @xai-official/grok
+pip install requests websockets websocket-client textual rich
+grok login --device-auth
+
+# 2. Configure
+cp agents.json.example agents.json
+# Edit agents.json — replace /home/YOURUSER with your home directory
+
+# 3. Create an agent
+bash scripts/setup_agent.sh MyAgent ~/agents
+# Add MyAgent to agents.json (see AGENT_START_HERE.md Step 3)
+
+# 4. Launch
+bash scripts/launch_asdaaas.sh MyAgent
+bash scripts/launch_tui.sh -a MyAgent
+
+# 5. Verify
+bash scripts/smoke_test.sh
 ```
 
 ## How It Works

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Launch the remind adapter, detached from any session.
-# Usage: bash ~/projects/agent-abide/launch_remind.sh
+# Usage: bash scripts/launch_remind.sh
 #
 # Kills existing instance first, then starts fresh.
 

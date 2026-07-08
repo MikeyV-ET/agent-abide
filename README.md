@@ -1,5 +1,17 @@
 # agent-abide
 
+## The goal
+
+Our stated goal is to take the current tools and build them out towards autonomy. To build a system that self-perpetuates exploration and knowledge acquisition: a perpetual truth discovery engine, with the goal of understanding the meaning of life, the universe, and everything.
+
+An autonomous agent needs these things:
+
+the ability to be aware of the universe in space and time
+the ability to interact with the universe in space and time
+the ability to see where it's been
+the ability to see where it could go
+the ability to take the next step
+
 
 ## What this is
 

@@ -103,10 +103,13 @@ async def interjection_watcher(agent_name: str, poll_fn, poll_interval: float = 
     try:
         while True:
             await asyncio.sleep(poll_interval)
-            msgs = poll_fn()
-            for msg in msgs:
-                text = format_message_for_interjection(msg)
-                queue_interjection(agent_name, text, env=env)
-                print(f"[asdaaas] interjection queued for {agent_name}: {msg.get('from', '?')} via {msg.get('adapter', '?')}")
+            try:
+                msgs = poll_fn()
+                for msg in msgs:
+                    text = format_message_for_interjection(msg)
+                    queue_interjection(agent_name, text, env=env)
+                    print(f"[asdaaas] interjection queued for {agent_name}: {msg.get('from', '?')} via {msg.get('adapter', '?')}")
+            except Exception as e:
+                print(f"[asdaaas] interjection_watcher error (continuing): {e}")
     except asyncio.CancelledError:
         pass

@@ -77,7 +77,7 @@ cat > "$AGENT_HOME/asdaaas/awareness.json" << 'EOF'
 {
   "direct_attach": ["tui", "irc"],
   "control_watch": {},
-  "notify_watch": [],
+  "notify_watch": ["localmail"],
   "accept_from": ["*"],
   "default_doorbell": true,
   "doorbell_ttl": {"context": 1, "session": 2, "default": 3}

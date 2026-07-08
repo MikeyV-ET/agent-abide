@@ -1,5 +1,19 @@
 # agent-abide
 
+
+## What this is
+
+### One sentence summary.
+
+Agent-abide is an agent-harness add on that allows the agent to control their own turns
+
+### Three sentence summary.
+
+### Three paragraph summary.
+
+
+
+
 **An Agent Self-Directed Attention and Awareness Architecture System — ASDAAAS**
 
 An infrastructure where agents build their own interface to the world and decide when — or whether — the turn ends.

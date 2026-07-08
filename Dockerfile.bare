@@ -1,0 +1,24 @@
+# Bare container for agent-as-installer testing.
+# Just prerequisites + grok. No repo, no config, nothing.
+#
+# Usage:
+#   docker build -f Dockerfile.bare -t aa-bare .
+#   docker run -it -v "$HOME/.grok/auth.json:/tmp/host_auth.json:ro" aa-bare
+
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git bash procps \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @xai-official/grok
+
+RUN useradd -m -s /bin/bash testuser
+USER testuser
+WORKDIR /home/testuser
+
+CMD ["bash", "-c", "mkdir -p ~/.grok && cp /tmp/host_auth.json ~/.grok/auth.json 2>/dev/null; echo 'Ready. grok installed. No repo cloned.'; exec bash"]

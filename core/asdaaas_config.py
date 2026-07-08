@@ -36,11 +36,19 @@ class AsdaaasConfig:
             self._data.get("grok_sessions_dir"))
 
     def _load(self):
-        # 1. Env var
+        # 1. Env var — accepts a file or directory
         env_path = os.environ.get("ASDAAAS_CONFIG")
-        if env_path and os.path.isfile(env_path):
-            with open(env_path) as f:
-                return self._normalize(json.load(f))
+        if env_path:
+            p = Path(env_path)
+            if p.is_dir():
+                for name in ("config.json", "agents.json"):
+                    candidate = p / name
+                    if candidate.is_file():
+                        with open(candidate) as f:
+                            return self._normalize(json.load(f))
+            elif p.is_file():
+                with open(p) as f:
+                    return self._normalize(json.load(f))
 
         # 2. config.json next to this file
         here = Path(__file__).parent

@@ -11,7 +11,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG="$SCRIPT_DIR/../agents.json"
+# Config resolution: ASDAAAS_CONFIG env var (dir or file), then repo root
+if [ -n "${ASDAAAS_CONFIG:-}" ] && [ -d "$ASDAAAS_CONFIG" ]; then
+    CONFIG="$ASDAAAS_CONFIG/agents.json"
+elif [ -n "${ASDAAAS_CONFIG:-}" ] && [ -f "$ASDAAAS_CONFIG" ]; then
+    CONFIG="$ASDAAAS_CONFIG"
+else
+    CONFIG="$SCRIPT_DIR/../agents.json"
+fi
 
 if [ ! -f "$CONFIG" ]; then
     echo "FAIL: Config file not found: $CONFIG"

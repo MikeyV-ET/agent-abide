@@ -190,7 +190,15 @@ class Config:
         """Load and cache agents.json."""
         if not cls._agents_cfg:
             try:
-                p = Path(__file__).resolve().parent.parent / "agents.json"
+                # Config resolution: ASDAAAS_CONFIG env var, then repo root
+                env = os.environ.get("ASDAAAS_CONFIG", "")
+                ep = Path(env) if env else None
+                if ep and ep.is_dir():
+                    p = ep / "agents.json"
+                elif ep and ep.is_file():
+                    p = ep
+                else:
+                    p = Path(__file__).resolve().parent.parent / "agents.json"
                 with open(p) as f:
                     cls._agents_cfg = json.load(f)
             except Exception:
@@ -4081,7 +4089,15 @@ def main():
     # Discover agents from agents.json (authoritative) or fall back to filesystem
     agents_home = Path(Config.AGENTS_HOME)
     all_agents = []
-    agents_json_path = Path(__file__).resolve().parent.parent / "agents.json"
+    # Config resolution: ASDAAAS_CONFIG env var, then repo root
+    _env = os.environ.get("ASDAAAS_CONFIG", "")
+    _ep = Path(_env) if _env else None
+    if _ep and _ep.is_dir():
+        agents_json_path = _ep / "agents.json"
+    elif _ep and _ep.is_file():
+        agents_json_path = _ep
+    else:
+        agents_json_path = Path(__file__).resolve().parent.parent / "agents.json"
     try:
         with open(agents_json_path) as f:
             agents_cfg = json.load(f)

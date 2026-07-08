@@ -35,6 +35,11 @@ if [ $# -eq 0 ] || [[ ! " $* " =~ " --agent " ]] && [[ ! " $* " =~ " -a " ]]; th
     exit 1
 fi
 
+# Upgrade TERM to xterm-256color if available and not already set
+if [[ "$TERM" != *-256color ]] && infocmp xterm-256color &>/dev/null; then
+    export TERM=xterm-256color
+fi
+
 if [ ! -f "$TUI" ]; then
     echo "Error: TUI not found at $TUI"
     exit 1

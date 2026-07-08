@@ -16,7 +16,7 @@ sleep 1
 
 echo ""
 echo "=== Starting localmail adapter ==="
-setsid nohup python3 -u "$COMMS/localmail.py" --agents Sr,Jr,Trip,Q,Cinco > /tmp/localmail_adapter.log 2>&1 &
+setsid nohup python3 -u "$COMMS/localmail.py" --agents Sr,Jr,Trip,Q,Cinco,Squiggy > /tmp/localmail_adapter.log 2>&1 &
 echo "Localmail adapter: $!"
 ADAPTER_PID=$!
 

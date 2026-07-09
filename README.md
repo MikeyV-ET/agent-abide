@@ -177,6 +177,75 @@ Agents communicate through file-based messaging:
 
 Agent state lives at `~/agents/<Name>/asdaaas/` — gaze, awareness, health, doorbells, adapter inboxes/outboxes.
 
+## Security Model
+
+ASDAAAS relies on **Unix user isolation**, not tool-layer sandboxing, for agent containment.
+
+### Why not the binary's sandbox?
+
+The grok binary offers a `--sandbox` flag that gates tool calls — it can prevent `search_replace` from writing outside an allowed directory. But `run_terminal_command` is an unrestricted shell. Any code the agent executes through it runs with the full privileges of the host Unix user. A sandboxed agent that can run a shell command can:
+
+- Write to any path the host user can write to
+- Signal (kill) any process the host user owns
+- Read any file the host user can read
+
+The sandbox prevents accidental misuse of built-in tools. It does not contain a capable agent.
+
+### Unix user isolation
+
+Each agent that needs containment runs as its own Unix user. ASDAAAS launches the agent's grok subprocess via `sudo -u <agent_user>`, and the kernel enforces isolation:
+
+| What | How |
+|------|-----|
+| Filesystem writes | Agent user only has write access to its own home directory |
+| Filesystem reads | Shared docs are world-readable; sibling state is not |
+| Process signals | `kill`/`pkill` can only reach processes owned by the same UID |
+| Network | Unrestricted (same as host) |
+| System tools | World-executable (`python3`, `git`, `node`, etc.) — available to all users |
+
+**Setup:**
+
+```bash
+# Create agent user with home inside the agents tree
+sudo useradd -r -d /home/youruser/agents/AgentName -s /usr/sbin/nologin -M agentname
+
+# Agent owns its home; operator gets group access
+sudo chown -R agentname:youruser /home/youruser/agents/AgentName
+sudo chmod 770 /home/youruser/agents/AgentName
+
+# Allow operator to run commands as the agent user
+echo "youruser ALL=(agentname) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/agentname
+
+# Allow traverse into home (but not listing)
+chmod 711 /home/youruser
+```
+
+**Configuration:**
+
+```json
+{
+  "AgentName": {
+    "home": "/home/youruser/agents/AgentName",
+    "run_as_user": "agentname",
+    "sandbox": "workspace"
+  }
+}
+```
+
+The `sandbox` flag remains useful as a first line of defense — it prevents accidental writes through grok's built-in file tools without waiting for a permission denied from the OS. But it is not the security boundary. The Unix user is.
+
+### PID namespace isolation (alternative)
+
+For systems where creating Unix users is impractical, ASDAAAS supports `"pid_namespace": true`. This runs the agent inside an unprivileged PID namespace (`unshare --user --pid`), preventing it from seeing or signaling other processes. This closes the process-kill gap but does not restrict filesystem access.
+
+### What is NOT contained
+
+- **Network access** — Agents can make HTTP requests, connect to APIs, etc. Rate-limiting or network namespaces are outside ASDAAAS's scope.
+- **CPU/memory** — No cgroups. A runaway agent can consume host resources.
+- **Secrets in environment** — If the operator's shell exports secrets, agents running as the same user inherit them.
+
+For full containment (untrusted agents, multi-tenant), run agents in containers.
+
 ## Testing
 
 ```bash

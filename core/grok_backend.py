@@ -126,6 +126,7 @@ class GrokBackend(AgentBackend):
         self._permission_handler: Optional[Callable] = None
         self._allowed_always: set[str] = set()  # tool kinds auto-approved
         self._permission_pending: bool = False  # set while awaiting mentor decision
+        self._start_kwargs: dict = {}  # cached kwargs for cancel_and_restart
 
     def _rpc_request(self, method: str, params: Optional[dict] = None) -> str:
         self._rpc_id += 1
@@ -349,9 +350,19 @@ class GrokBackend(AgentBackend):
                     permission_mode: Optional[str] = None,
                     reasoning_effort: Optional[str] = None,
                     interjection_enabled: bool = False,
-                    agent_name: Optional[str] = None) -> str:
-        # Top-level grok flags go before "agent stdio"
-        cmd = [self._grok_binary]
+                    agent_name: Optional[str] = None,
+                    pid_namespace: bool = False) -> str:
+        # Cache kwargs for cancel_and_restart
+        self._start_kwargs = dict(model=model, yolo=yolo, sandbox=sandbox,
+                                  allow_rules=allow_rules, deny_rules=deny_rules,
+                                  permission_mode=permission_mode, reasoning_effort=reasoning_effort,
+                                  interjection_enabled=interjection_enabled, agent_name=agent_name,
+                                  pid_namespace=pid_namespace)
+        # PID namespace isolation: agent can only see/signal its own processes
+        cmd = []
+        if pid_namespace:
+            cmd = ["unshare", "--user", "--pid", "--fork", "--mount-proc", "--"]
+        cmd.append(self._grok_binary)
         if sandbox:
             cmd.extend(["--sandbox", sandbox])
         if permission_mode:
@@ -832,8 +843,10 @@ class GrokBackend(AgentBackend):
         # Kill the current process (also closes file source)
         await self.shutdown()
         
-        # Restart with the same session (re-opens file source)
-        return await self.start(agent_cwd, session_id=session_id)
+        # Restart with the same session and original launch params
+        kwargs = dict(self._start_kwargs)
+        kwargs["session_id"] = session_id
+        return await self.start(agent_cwd, **kwargs)
 
     async def shutdown(self):
         if self._stdout_task:

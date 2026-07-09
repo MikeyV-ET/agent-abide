@@ -2049,6 +2049,9 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
         print(f"[asdaaas] Allow rules: {agent_allow_rules}, Deny rules: {agent_deny_rules}")
     if agent_permission_mode:
         print(f"[asdaaas] Permission mode: {agent_permission_mode}")
+    agent_pid_namespace = config.agent_pid_namespace(agent_name)
+    if agent_pid_namespace:
+        print(f"[asdaaas] PID namespace isolation: enabled")
 
     # ---- Reasoning effort ----
     agent_reasoning_effort = os.environ.get("ASDAAAS_REASONING_EFFORT") or config.agent_reasoning_effort(agent_name)
@@ -2065,7 +2068,8 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                                   deny_rules=agent_deny_rules, permission_mode=agent_permission_mode,
                                   reasoning_effort=agent_reasoning_effort,
                                   interjection_enabled=interjection_enabled,
-                                  agent_name=agent_name)
+                                  agent_name=agent_name,
+                                  pid_namespace=agent_pid_namespace)
     except Exception as e:
         _log_startup_event(agent_name, "backend_start", "fail", str(e)[:200])
         raise

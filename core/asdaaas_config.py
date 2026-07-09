@@ -210,6 +210,10 @@ class AsdaaasConfig:
         """Whether the binary state observer sidecar is enabled for this agent."""
         return self._agents.get(agent_name, {}).get("observer_enabled", False)
 
+    def agent_pid_namespace(self, agent_name: str) -> bool:
+        """Whether to run this agent in an isolated PID namespace (prevents signaling other processes)."""
+        return self._agents.get(agent_name, {}).get("pid_namespace", False)
+
     def agent_interjection_enabled(self, agent_name: str) -> bool:
         """Whether mid-turn message interjection via BASH_ENV is enabled for this agent."""
         return self._agents.get(agent_name, {}).get("interjection_enabled", False)

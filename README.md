@@ -179,7 +179,7 @@ Agent state lives at `~/agents/<Name>/asdaaas/` — gaze, awareness, health, doo
 
 ## Security Model
 
-ASDAAAS relies on **Unix user isolation**, not tool-layer sandboxing, for agent containment.
+ASDAAAS relies on **Unix user isolation**, not tool-layer sandboxing, for agent containment. The threat model assumes a capable but not adversarial agent on a single-operator machine — this contains mistakes and misbehavior, not a motivated attacker with local-privilege-escalation exploits (all users share a kernel). For untrusted agents or multi-tenant deployments, run agents in containers.
 
 ### Why not the binary's sandbox?
 
@@ -197,17 +197,25 @@ Each agent that needs containment runs as its own Unix user. ASDAAAS launches th
 
 | What | How |
 |------|-----|
-| Filesystem writes | Agent user only has write access to its own home directory |
-| Filesystem reads | Shared docs are world-readable; sibling state is not |
+| Filesystem writes | Agent user has write access to its own home directory, plus world-writable dirs (`/tmp`, `/var/tmp`, `/dev/shm` — sticky bits prevent tampering with others' files, but the agent can plant files or fill disk) |
+| Filesystem reads | Shared docs are world-readable; sibling state is not. **Note:** the agent can read any `o+r` file on the system — with the default umask of 022, most files the operator has ever created are world-readable. See "Read exposure" below. |
 | Process signals | `kill`/`pkill` can only reach processes owned by the same UID |
-| Network | Unrestricted (same as host) |
+| Process visibility | Other users' processes are visible via `ps aux` by default (command lines, arguments). See "What is NOT contained" for mitigation. |
+| Network | Unrestricted (same as host), including localhost services. See "What is NOT contained." |
 | System tools | World-executable (`python3`, `git`, `node`, etc.) — available to all users |
+
+**Read exposure.** With `chmod 711 /home/youruser`, the agent can't *list* your home directory, but it can open any file under it whose path it can guess if that file is world-readable. With the default umask (022), that includes most files you've ever created: dotfiles, project configs, `.gitconfig` (which sometimes contains tokens). Mitigations:
+
+- Set `umask 077` going forward (new files default to `600`/`700`)
+- Sweep existing sensitive files: `find ~ -maxdepth 2 -perm -o=r -type f` and tighten what shouldn't be public
+- Or keep `chmod 750 /home/youruser` and grant traverse only into the agents tree via ACLs: `setfacl -m u:agentname:x /home/youruser`
 
 **Setup:**
 
 ```bash
 # Create agent user with home inside the agents tree
 sudo useradd -r -d /home/youruser/agents/AgentName -s /usr/sbin/nologin -M agentname
+sudo mkdir -p /home/youruser/agents/AgentName
 
 # Agent owns its home; operator gets group access
 sudo chown -R agentname:youruser /home/youruser/agents/AgentName
@@ -218,7 +226,15 @@ echo "youruser ALL=(agentname) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/agentnam
 
 # Allow traverse into home (but not listing)
 chmod 711 /home/youruser
+
+# Optional: process limits (fork-bomb insurance)
+echo "agentname hard nproc 256" | sudo tee /etc/security/limits.d/agentname.conf
 ```
+
+**Passing secrets to the agent.** `sudo` with default `env_reset` strips most of the operator's environment — agents launched via `sudo -u` do *not* inherit exported secrets (this is a feature). ASDAAAS must deliberately pass what the grok subprocess needs. Two options:
+
+- Write a config file into the agent's home: `/home/youruser/agents/AgentName/.grok/config.toml` (owned by the agent user, readable only by it)
+- Use `--preserve-env=ANTHROPIC_API_KEY` in the sudoers entry — but this exposes the key in `ps` output to all users on the system. Prefer the config file.
 
 **Configuration:**
 
@@ -234,15 +250,27 @@ chmod 711 /home/youruser
 
 The `sandbox` flag remains useful as a first line of defense — it prevents accidental writes through grok's built-in file tools without waiting for a permission denied from the OS. But it is not the security boundary. The Unix user is.
 
+**Process lifecycle.** For clean session-end cleanup, use `systemd-run` to launch agents inside a cgroup scope:
+
+```bash
+systemd-run --uid=agentname --scope -- grok agent stdio
+```
+
+This gives you `MemoryMax=` and `CPUQuota=` for free, and `systemctl stop` reliably kills the entire process tree — no orphaned `nohup` daemons or background processes surviving the session. Without this, use `pkill -u agentname` at session end and consider restricting cron access via `/etc/cron.allow`.
+
 ### PID namespace isolation (alternative)
 
-For systems where creating Unix users is impractical, ASDAAAS supports `"pid_namespace": true`. This runs the agent inside an unprivileged PID namespace (`unshare --user --pid`), preventing it from seeing or signaling other processes. This closes the process-kill gap but does not restrict filesystem access.
+For systems where creating Unix users is impractical, ASDAAAS supports `"pid_namespace": true`. This runs the agent inside an unprivileged PID namespace (`unshare --user --pid --fork --mount-proc`), preventing it from seeing or signaling other processes. This closes the process-kill gap but does not restrict filesystem access.
+
+**Note:** Some distributions restrict unprivileged user namespaces (Ubuntu 23.10+ via AppArmor, hardened kernels), so this fallback can fail on exactly the systems where creating users was impractical.
 
 ### What is NOT contained
 
-- **Network access** — Agents can make HTTP requests, connect to APIs, etc. Rate-limiting or network namespaces are outside ASDAAAS's scope.
-- **CPU/memory** — No cgroups. A runaway agent can consume host resources.
-- **Secrets in environment** — If the operator's shell exports secrets, agents running as the same user inherit them.
+- **Localhost services** — A different UID doesn't stop the agent from connecting to anything listening on loopback without auth: dev databases, debug ports, local LLM servers, metrics endpoints. Any TCP service that trusts localhost is accessible to the agent.
+- **Process visibility** — `ps aux` shows every user's command lines and arguments (URLs with tokens, API keys passed as flags). Mitigate with `mount -o remount,hidepid=2 /proc` (with a gid exemption for the operator).
+- **CPU/memory** — No cgroups by default. Use `systemd-run --scope` with `MemoryMax=`/`CPUQuota=` to cap resource usage.
+- **Persistence** — Nothing prevents the agent from `nohup`-ing daemons or registering crontabs unless restricted via `/etc/cron.allow` or `systemd-run --scope`.
+- **Kernel** — All users share a kernel. A local privilege escalation exploit breaks all containment. This is not unique to ASDAAAS — it is true of all non-VM isolation.
 
 For full containment (untrusted agents, multi-tenant), run agents in containers.
 

@@ -255,8 +255,21 @@ class Config:
             json.dump({"name": name}, f)
 
     @classmethod
+    def agent_home(cls, agent_name: str) -> Path:
+        """Return home directory for an agent, using agents.json 'home' field.
+
+        Falls back to AGENTS_HOME/agent_name if no 'home' field exists.
+        """
+        cfg = cls.load_agents_cfg()
+        agent_cfg = cfg.get("agents", {}).get(agent_name, {})
+        home = agent_cfg.get("home")
+        if home:
+            return Path(home)
+        return Path(cls.AGENTS_HOME) / agent_name
+
+    @classmethod
     def agent_dir(cls) -> Path:
-        return Path(cls.AGENTS_HOME) / cls.AGENT_NAME
+        return cls.agent_home(cls.AGENT_NAME)
 
     @classmethod
     def asdaaas_dir(cls) -> Path:
@@ -591,7 +604,7 @@ class GazeSelector(OptionList):
             gaze_str = f"irc/{room}"
         else:
             # Check if room matches a known non-IRC adapter
-            adapter_dir = Path(Config.AGENTS_HOME) / Config.AGENT_NAME / "asdaaas" / "adapters" / room
+            adapter_dir = Config.agent_home(Config.AGENT_NAME) / "asdaaas" / "adapters" / room
             if adapter_dir.exists() and room != "irc":
                 try:
                     self.app._ensure_adapter_attached(room)
@@ -2045,7 +2058,7 @@ class AsdaaasTUI(App):
 
     def _send_to_adapter(self, text: str):
         """Write user message to the active agent's TUI adapter inbox."""
-        agent_dir = Path(Config.AGENTS_HOME) / self._active_agent
+        agent_dir = Config.agent_home(self._active_agent)
         inbox = agent_dir / "asdaaas" / "adapters" / "tui" / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
         ts = int(time.time() * 1000)
@@ -2178,7 +2191,7 @@ Type anything else to send a message to the agent.
 
     def _todo_file(self) -> Path:
         """Path to the persistent todo file for the active agent."""
-        return Path(Config.AGENTS_HOME) / self._active_agent / "tui_todos.json"
+        return Config.agent_home(self._active_agent) / "tui_todos.json"
 
     def _load_todos(self) -> list[dict]:
         """Load todos from disk."""
@@ -2352,7 +2365,7 @@ Type anything else to send a message to the agent.
             gaze_str = f"irc/{room}"
         else:
             # Check if room matches a known non-IRC adapter
-            adapter_dir = Path(Config.AGENTS_HOME) / self._active_agent / "asdaaas" / "adapters" / room
+            adapter_dir = Config.agent_home(self._active_agent) / "asdaaas" / "adapters" / room
             if adapter_dir.exists() and room != "irc":
                 self._ensure_adapter_attached(room)
                 gaze = {
@@ -2514,7 +2527,7 @@ Type anything else to send a message to the agent.
 
     def action_interrupt_agent(self) -> None:
         """Send an interrupt to the active agent (like Ctrl+C in grok TUI)."""
-        agent_dir = Path(Config.AGENTS_HOME) / self._active_agent
+        agent_dir = Config.agent_home(self._active_agent)
         cmd_dir = agent_dir / "asdaaas" / "commands"
         cmd_dir.mkdir(parents=True, exist_ok=True)
         ts = int(time.time() * 1000)
@@ -2973,7 +2986,7 @@ Type anything else to send a message to the agent.
             try:
                 header = self.query_one("#agent-header", AgentHeader)
                 active = self._active_agent
-                agent_dir = Path(Config.AGENTS_HOME) / active
+                agent_dir = Config.agent_home(active)
                 asdaaas_dir = agent_dir / "asdaaas"
 
                 # Refresh git HEAD every ~30 polls (~60s)
@@ -3104,7 +3117,7 @@ Type anything else to send a message to the agent.
 
     def _find_conversation_jsonl(self, agent_name: str) -> Optional[Path]:
         """Find conversation.jsonl for an agent (written by asdaaas)."""
-        convo = Path(Config.AGENTS_HOME) / agent_name / "asdaaas" / "conversation.jsonl"
+        convo = Config.agent_home(agent_name) / "asdaaas" / "conversation.jsonl"
         return convo if convo.exists() else None
 
     def _convo_to_event(self, entry: dict) -> Optional[dict]:
@@ -3140,7 +3153,7 @@ Type anything else to send a message to the agent.
         """Background thread: tail conversation.jsonl for an agent."""
         worker = get_current_worker()
         state = self._agent_state[agent_name]
-        convo_path = Path(Config.AGENTS_HOME) / agent_name / "asdaaas" / "conversation.jsonl"
+        convo_path = Config.agent_home(agent_name) / "asdaaas" / "conversation.jsonl"
 
         while not worker.is_cancelled and not convo_path.exists():
             time.sleep(2)
@@ -3232,7 +3245,7 @@ Type anything else to send a message to the agent.
     def _find_updates_for_agent(self, agent_name: str) -> Optional[Path]:
         """Find updates.jsonl for a specific agent."""
         sessions_root = Config.sessions_root()
-        agent_path = Path(Config.AGENTS_HOME) / agent_name
+        agent_path = Config.agent_home(agent_name)
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
         if session_dir.exists():
@@ -4101,10 +4114,10 @@ def main():
     try:
         with open(agents_json_path) as f:
             agents_cfg = json.load(f)
-        all_agents = [
-            name for name in agents_cfg.get("agents", {})
-            if (agents_home / name / "asdaaas").exists()
-        ]
+        for name, acfg in agents_cfg.get("agents", {}).items():
+            home = Path(acfg.get("home", str(agents_home / name)))
+            if (home / "asdaaas").exists():
+                all_agents.append(name)
     except Exception:
         # Fallback: discover from filesystem
         if agents_home.exists():

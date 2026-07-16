@@ -59,6 +59,9 @@ from rich.text import Text
 from rich.table import Table
 from rich.console import Group
 
+from tui.ephact_parser import extract_ephacts, has_partial_ephact
+from tui.ephact_viewer import EphactViewer, archive_ephact, EphactEntry
+
 
 # =============================================================================
 # Color Palette — Gruvbox Dark
@@ -1794,6 +1797,12 @@ class AsdaaasTUI(App):
         margin: 0 0 0 0;
         height: auto;
     }
+
+    #ephact-viewer {
+        height: auto;
+        max-height: 50%;
+        margin: 0 0 0 0;
+    }
     """
 
     BINDINGS = [
@@ -1804,6 +1813,9 @@ class AsdaaasTUI(App):
         Binding("ctrl+t", "toggle_theme_selector", "Theme", show=True),
         Binding("escape", "dismiss_overlay", "Dismiss", show=False),
         Binding("f1", "toggle_thinking", "Toggle Thinking", show=True),
+        Binding("f3", "close_ephact", "Close Artifact", show=False),
+        Binding("left", "ephact_prev", "Prev Artifact", show=False, priority=True),
+        Binding("right", "ephact_next", "Next Artifact", show=False, priority=True),
         Binding("end", "scroll_bottom", "Bottom", show=False),
         Binding("home", "scroll_top", "Top", show=False, priority=True),
         Binding("pageup", "load_history", "Load History", show=False, priority=True),
@@ -1894,6 +1906,10 @@ class AsdaaasTUI(App):
         yield GazeSelector(id="gaze-selector")
         yield ThemeSelector(id="theme-selector")
         yield SlashMenu(id="slash-menu")
+        # Ephemeral artifact viewer (hidden until an ephact arrives)
+        viewer = EphactViewer(id="ephact-viewer")
+        viewer.display = False
+        yield viewer
         # One content scroll per agent
         for agent in self._agents:
             vs = ContentScroll(id=f"content-{agent}")
@@ -2523,7 +2539,42 @@ Type anything else to send a message to the agent.
                 return
         except NoMatches:
             pass
+        # Close ephact viewer if open
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            if viewer.display:
+                viewer.close()
+                self.query_one("#input-bar", MessageInput).focus()
+                return
+        except NoMatches:
+            pass
         self.query_one("#input-bar", MessageInput).focus()
+
+    def action_close_ephact(self) -> None:
+        """Close the ephact viewer panel."""
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            viewer.close()
+        except NoMatches:
+            pass
+
+    def action_ephact_prev(self) -> None:
+        """Navigate to older ephact in the stack."""
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            if viewer.display:
+                viewer.navigate(-1)
+        except NoMatches:
+            pass
+
+    def action_ephact_next(self) -> None:
+        """Navigate to newer ephact in the stack."""
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            if viewer.display:
+                viewer.navigate(1)
+        except NoMatches:
+            pass
 
     def action_interrupt_agent(self) -> None:
         """Send an interrupt to the active agent (like Ctrl+C in grok TUI)."""
@@ -2591,6 +2642,13 @@ Type anything else to send a message to the agent.
         try:
             tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
             tab_bar.active_agent = agent_name
+        except NoMatches:
+            pass
+
+        # Switch ephact viewer to new agent's stack
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            viewer.set_active_agent(agent_name)
         except NoMatches:
             pass
 
@@ -3616,6 +3674,26 @@ Type anything else to send a message to the agent.
             content.refresh(layout=True)
 
         self._current_agent_msg.append_chunk(text)
+
+        # Check for complete ephact tags in accumulated text
+        full_text = self._current_agent_msg.full_text
+        cleaned, ephacts = extract_ephacts(full_text)
+        if ephacts:
+            # Replace the widget's text with the cleaned version
+            self._current_agent_msg._chunks = [cleaned]
+            self._current_agent_msg._text = cleaned
+            self._current_agent_msg.refresh(layout=True)
+            # Push to viewer and archive
+            try:
+                viewer = self.query_one("#ephact-viewer", EphactViewer)
+                for eph in ephacts:
+                    viewer.push(self._active_agent, eph)
+                    entry = EphactEntry(data=eph, agent=self._active_agent)
+                    archive_ephact(self._active_agent, entry)
+                    self._debug(f"EPHACT type={eph.type} title={eph.title} agent={self._active_agent}")
+            except NoMatches:
+                pass
+
         self._debug(f"MSG_CHUNK len={len(text)} total={len(self._current_agent_msg._text)} new_widget={was_none}")
         self._scroll_to_bottom()
 

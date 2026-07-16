@@ -59,8 +59,8 @@ from rich.text import Text
 from rich.table import Table
 from rich.console import Group
 
-from tui.ephact_parser import extract_ephacts, has_partial_ephact
-from tui.ephact_viewer import EphactViewer, archive_ephact, EphactEntry
+from ephact_parser import extract_ephacts, has_partial_ephact
+from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
 
 
 # =============================================================================

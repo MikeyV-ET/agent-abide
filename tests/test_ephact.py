@@ -1,13 +1,17 @@
 """Tests for ephemeral artifact (ephact) parser, viewer, and archive."""
 
 import json
+import os
+import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tui'))
+
 import pytest
 
-from tui.ephact_parser import extract_ephacts, has_partial_ephact, EphactData
-from tui.ephact_viewer import EphactViewer, EphactEntry, archive_ephact
+from ephact_parser import extract_ephacts, has_partial_ephact, EphactData
+from ephact_viewer import EphactViewer, EphactEntry, archive_ephact
 
 
 # ── Parser tests ──────────────────────────────────────────────────────

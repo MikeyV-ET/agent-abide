@@ -20,7 +20,7 @@ from rich.markdown import Markdown as RichMarkdown
 from rich.panel import Panel
 from rich.text import Text
 
-from tui.ephact_parser import EphactData
+from ephact_parser import EphactData
 
 
 @dataclass

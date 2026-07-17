@@ -3104,29 +3104,22 @@ Type anything else to send a message to the agent.
                 except Exception:
                     pass
 
-                # Read compaction state
+                # Read compaction state from binary_state.json (hook-written)
                 try:
-                    compact_path = asdaaas_dir / "compaction_state.json"
-                    if compact_path.exists():
-                        with open(compact_path) as f:
-                            cstate = json.load(f)
+                    bstate_path = asdaaas_dir / "binary_state.json"
+                    if bstate_path.exists():
+                        with open(bstate_path) as f:
+                            bstate = json.load(f)
+                        cstate = bstate.get("compaction", {})
                         phase = cstate.get("phase", "")
                         # Auto-hide complete phase after 2 minutes
                         if phase == "complete":
-                            last_done = cstate.get("last_completed") or cstate.get("ts", 0)
+                            last_done = cstate.get("completed_at", 0)
                             if time.time() - last_done > 120:
                                 phase = ""
-                        # Build detail string for token savings
-                        detail = ""
-                        if phase == "complete" and cstate.get("tokens_before") and cstate.get("tokens_after"):
-                            saved = cstate["tokens_before"] - cstate["tokens_after"]
-                            if saved > 0:
-                                detail = f"-{round(saved / 1000)}k"
                         self.call_from_thread(setattr, header, "compaction_phase", phase)
-                        self.call_from_thread(setattr, header, "compaction_detail", detail)
                     else:
                         self.call_from_thread(setattr, header, "compaction_phase", "")
-                        self.call_from_thread(setattr, header, "compaction_detail", "")
                 except Exception:
                     pass
 

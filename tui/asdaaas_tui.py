@@ -1907,10 +1907,6 @@ class AsdaaasTUI(App):
         yield GazeSelector(id="gaze-selector")
         yield ThemeSelector(id="theme-selector")
         yield SlashMenu(id="slash-menu")
-        # Ephemeral artifact viewer (hidden until an ephact arrives)
-        viewer = EphactViewer(id="ephact-viewer")
-        viewer.display = False
-        yield viewer
         # One content scroll per agent
         for agent in self._agents:
             vs = ContentScroll(id=f"content-{agent}")
@@ -1921,6 +1917,10 @@ class AsdaaasTUI(App):
         room_vs = ContentScroll(id="content-room")
         room_vs.display = False
         yield room_vs
+        # Ephemeral artifact viewer — between chat and input for visual proximity
+        viewer = EphactViewer(id="ephact-viewer")
+        viewer.display = False
+        yield viewer
         with Vertical(id="bottom-bar"):
             yield MessageInput(placeholder=f"Message {Config.AGENT_NAME}...", id="input-bar")
             yield DynamicFooter(id="dynamic-footer")

@@ -1813,7 +1813,7 @@ class AsdaaasTUI(App):
         Binding("ctrl+t", "toggle_theme_selector", "Theme", show=True),
         Binding("escape", "dismiss_overlay", "Dismiss", show=False),
         Binding("f1", "toggle_thinking", "Toggle Thinking", show=True),
-        Binding("f3", "close_ephact", "Close Artifact", show=True, priority=True),
+        Binding("f3", "close_ephact", "Artifact", show=True, priority=True),
         Binding("end", "scroll_bottom", "Bottom", show=False),
         Binding("home", "scroll_top", "Top", show=False, priority=True),
         Binding("pageup", "load_history", "Load History", show=False, priority=True),
@@ -2549,10 +2549,15 @@ Type anything else to send a message to the agent.
         self.query_one("#input-bar", MessageInput).focus()
 
     def action_close_ephact(self) -> None:
-        """Close the ephact viewer panel."""
+        """Toggle the ephact viewer panel (show/hide)."""
         try:
             viewer = self.query_one("#ephact-viewer", EphactViewer)
-            viewer.close()
+            if viewer.display:
+                viewer.close()
+            elif viewer.has_content:
+                viewer._visible = True
+                viewer.display = True
+                viewer.refresh(layout=True)
         except NoMatches:
             pass
 

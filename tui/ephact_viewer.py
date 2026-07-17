@@ -132,12 +132,9 @@ class EphactViewer(Static):
         agent = self._active_agent
         stack = self._stacks.get(agent, [])
         if len(stack) > 1:
-            self.navigate(1)
-            # Wrap around to start
-            idx = self._view_index.get(agent, 0)
-            if idx >= len(stack):
-                self._view_index[agent] = 0
-                self.refresh(layout=True)
+            idx = self._view_index.get(agent, len(stack) - 1)
+            self._view_index[agent] = (idx + 1) % len(stack)
+            self.refresh(layout=True)
 
 
 def archive_ephact(agent: str, entry: EphactEntry, agents_home: str = None) -> Path:

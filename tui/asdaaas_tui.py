@@ -3671,15 +3671,10 @@ Type anything else to send a message to the agent.
 
         self._current_agent_msg.append_chunk(text)
 
-        # Check for complete ephact tags in accumulated text
+        # Check for complete ephact tags — collect to viewer but leave in chat
         full_text = self._current_agent_msg.full_text
-        cleaned, ephacts = extract_ephacts(full_text)
+        _, ephacts = extract_ephacts(full_text)
         if ephacts:
-            # Replace the widget's text with the cleaned version
-            self._current_agent_msg._chunks = [cleaned]
-            self._current_agent_msg._text = cleaned
-            self._current_agent_msg.refresh(layout=True)
-            # Push to viewer and archive
             try:
                 viewer = self.query_one("#ephact-viewer", EphactViewer)
                 for eph in ephacts:
@@ -3987,7 +3982,6 @@ Type anything else to send a message to the agent.
                                             viewer.push(agent_name, eph)
                                     except NoMatches:
                                         pass
-                                    text = cleaned
                                 msg = AgentMessage()
                                 msg._text = text
                                 msg._chunks = [text]

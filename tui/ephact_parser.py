@@ -33,6 +33,9 @@ _EPHACT_RE = re.compile(
 )
 
 
+_CODE_BLOCK_RE = re.compile(r'```.*?```|`[^`]+`', re.DOTALL)
+
+
 def extract_ephacts(text: str) -> tuple[str, list[EphactData]]:
     """
     Extract all complete ephact blocks from text.
@@ -40,9 +43,16 @@ def extract_ephacts(text: str) -> tuple[str, list[EphactData]]:
     Returns:
         (cleaned_text, ephacts) — text with tags removed, list of extracted artifacts.
         Partial/unclosed tags are left in text.
+        Tags inside code blocks (``` or inline `) are ignored.
     """
-    ephacts = []
+    # Mask code blocks so ephact tags inside them aren't matched
+    masks = []
+    def _mask(m: re.Match) -> str:
+        masks.append(m.group(0))
+        return f"\x00MASK{len(masks)-1}\x00"
+    masked = _CODE_BLOCK_RE.sub(_mask, text)
 
+    ephacts = []
     def _collect(m: re.Match) -> str:
         etype = m.group(1)
         title = m.group(2)  # None if not present
@@ -50,9 +60,12 @@ def extract_ephacts(text: str) -> tuple[str, list[EphactData]]:
         ephacts.append(EphactData(type=etype, content=content, title=title))
         return ""  # strip from text
 
-    cleaned = _EPHACT_RE.sub(_collect, text)
+    cleaned = _EPHACT_RE.sub(_collect, masked)
     # Clean up extra blank lines left by removal
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    # Restore masked code blocks
+    for i, original in enumerate(masks):
+        cleaned = cleaned.replace(f"\x00MASK{i}\x00", original)
     return cleaned, ephacts
 
 

@@ -1,7 +1,7 @@
 {
   "name": "heartbeat",
-  "pid": 3533,
-  "started": 1783531647.3734162,
+  "pid": 3460,
+  "started": 1783961834.626939,
   "capabilities": [
     "notify"
   ],
@@ -16,5 +16,5 @@
     "default_nudge_interval": 600,
     "per_agent": true
   },
-  "heartbeat": 1783546274.2955935
+  "heartbeat": 1784036540.643205
 }

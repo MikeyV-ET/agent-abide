@@ -334,38 +334,6 @@ def write_conversation(agent_name, role, content, env=None):
         f.write(json.dumps(entry) + "\n")
 
 
-def write_compaction_state(agent_name, phase, request_id=None, tokens_before=None, tokens_after=None, env=None):
-    """Write compaction phase to disk for external consumers (TUI, SA).
-
-    Phases: idle, requested, confirmed, in_flight, complete, failed.
-    Preserves last_completed timestamp across phase transitions.
-    """
-    state_path = agent_dir(agent_name, env=env) / "compaction_state.json"
-    existing = {}
-    try:
-        with open(state_path) as f:
-            existing = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-
-    state = {
-        "phase": phase,
-        "ts": time.time(),
-        "request_id": request_id,
-        "tokens_before": tokens_before,
-        "tokens_after": tokens_after,
-        "last_completed": existing.get("last_completed"),
-    }
-    if phase == "complete":
-        state["last_completed"] = state["ts"]
-
-    agent_dir(agent_name, env=env).mkdir(parents=True, exist_ok=True)
-    tmp = str(state_path) + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(state, f)
-    os.rename(tmp, str(state_path))
-
-
 def get_compaction_instructions(agent_name, env=None):
     """Return compaction instructions for the given agent.
 

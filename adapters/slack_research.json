@@ -1,7 +1,7 @@
 {
   "name": "slack_research",
-  "pid": 189663,
-  "started": 1783030748.4909205,
+  "pid": 3514,
+  "started": 1783961858.740766,
   "capabilities": [
     "search",
     "history",
@@ -11,8 +11,12 @@
   "config": {
     "type": "control",
     "agents": [
+      "Sr",
+      "Jr",
+      "Trip",
+      "Q",
       "Cinco"
     ]
   },
-  "heartbeat": 1783197694.8163328
+  "heartbeat": 1784036525.8071265
 }

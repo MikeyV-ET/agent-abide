@@ -3986,6 +3986,15 @@ Type anything else to send a message to the agent.
                         if event_type == "agent_message_chunk":
                             text = update.get("content", {}).get("text", "")
                             if text:
+                                cleaned, ephacts = extract_ephacts(text)
+                                if ephacts:
+                                    try:
+                                        viewer = self.query_one("#ephact-viewer", EphactViewer)
+                                        for eph in ephacts:
+                                            viewer.push(agent_name, eph)
+                                    except NoMatches:
+                                        pass
+                                    text = cleaned
                                 msg = AgentMessage()
                                 msg._text = text
                                 msg._chunks = [text]

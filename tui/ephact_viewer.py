@@ -128,10 +128,8 @@ class EphactViewer(Static):
         )
 
     def on_click(self, event) -> None:
-        """Handle clicks — close button detection."""
-        # Simple: any click on the title area closes. We can refine later.
-        # For now, use Escape key binding instead.
-        pass
+        """Click on the viewer panel to close it."""
+        self.close()
 
 
 def archive_ephact(agent: str, entry: EphactEntry, agents_home: str = None) -> Path:

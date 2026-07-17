@@ -1416,8 +1416,28 @@ class AgentMessage(Static):
             return f"\n> 🔔 **[interjection]**\n{quoted}\n"
         return re.sub(r"<interjection>\n?(.*?)</interjection>", _repl, text, flags=re.DOTALL)
 
+    @staticmethod
+    def _format_ephacts(text: str) -> str:
+        """Replace <ephact> blocks with visible markdown blockquotes so they render inline."""
+        import re
+        if "<ephact" not in text:
+            return text
+        def _repl(m):
+            etype = m.group(1)
+            title = m.group(2)
+            body = m.group(3).strip()
+            label = f"📌 {title}" if title else f"📌 {etype}"
+            lines = body.split("\n")
+            quoted = "\n".join(f"> {line}" for line in lines)
+            return f"\n> **{label}**\n{quoted}\n"
+        return re.sub(
+            r'<ephact\s+type=["\'](\w+)["\'](?:\s+title=["\']([^"\']*)["\'])?\s*>(.*?)</ephact>',
+            _repl, text, flags=re.DOTALL)
+
     def render(self) -> RichMarkdown:
-        return RichMarkdown(self._format_interjections(self._text))
+        text = self._format_interjections(self._text)
+        text = self._format_ephacts(text)
+        return RichMarkdown(text)
 
 
 class ThinkingBlock(Static):
@@ -3677,10 +3697,14 @@ Type anything else to send a message to the agent.
         # Check for complete ephact tags — collect to viewer but leave in chat
         full_text = self._current_agent_msg.full_text
         _, ephacts = extract_ephacts(full_text)
-        if ephacts:
+        # Track pushed count to avoid duplicates on subsequent chunks
+        already_pushed = getattr(self._current_agent_msg, '_ephact_count', 0)
+        new_ephacts = ephacts[already_pushed:]
+        if new_ephacts:
+            self._current_agent_msg._ephact_count = len(ephacts)
             try:
                 viewer = self.query_one("#ephact-viewer", EphactViewer)
-                for eph in ephacts:
+                for eph in new_ephacts:
                     viewer.push(self._active_agent, eph)
                     entry = EphactEntry(data=eph, agent=self._active_agent)
                     archive_ephact(self._active_agent, entry)

@@ -1836,6 +1836,8 @@ class AsdaaasTUI(App):
         Binding("escape", "dismiss_overlay", "Dismiss", show=False),
         Binding("f1", "toggle_thinking", "Toggle Thinking", show=True),
         Binding("f3", "close_ephact", "Artifact", show=True, priority=True),
+        Binding("f5", "ephact_prev", "◀ Artifact", show=False, priority=True),
+        Binding("f6", "ephact_next", "Artifact ▶", show=False, priority=True),
 
         Binding("end", "scroll_bottom", "Bottom", show=False),
         Binding("home", "scroll_top", "Top", show=False, priority=True),

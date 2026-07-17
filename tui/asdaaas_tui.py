@@ -1804,9 +1804,7 @@ class AsdaaasTUI(App):
         margin: 0 0 0 0;
     }
 
-    #ephact-viewer.dock-bottom {
-        dock: bottom;
-    }
+
     """
 
     BINDINGS = [
@@ -1818,7 +1816,7 @@ class AsdaaasTUI(App):
         Binding("escape", "dismiss_overlay", "Dismiss", show=False),
         Binding("f1", "toggle_thinking", "Toggle Thinking", show=True),
         Binding("f3", "close_ephact", "Artifact", show=True, priority=True),
-        Binding("f4", "move_ephact", "Move Artifact", show=False, priority=True),
+
         Binding("end", "scroll_bottom", "Bottom", show=False),
         Binding("home", "scroll_top", "Top", show=False, priority=True),
         Binding("pageup", "load_history", "Load History", show=False, priority=True),
@@ -2563,18 +2561,6 @@ Type anything else to send a message to the agent.
                 viewer._visible = True
                 viewer.display = True
                 viewer.refresh(layout=True)
-        except NoMatches:
-            pass
-
-    def action_move_ephact(self) -> None:
-        """Toggle ephact viewer position between top and bottom."""
-        try:
-            viewer = self.query_one("#ephact-viewer", EphactViewer)
-            if viewer.has_class("dock-bottom"):
-                viewer.remove_class("dock-bottom")
-            else:
-                viewer.add_class("dock-bottom")
-            viewer.refresh(layout=True)
         except NoMatches:
             pass
 

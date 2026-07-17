@@ -594,7 +594,7 @@ class TurnEngine:
         import asyncio
         from asdaaas import (
             read_gaze, context_left_tag, write_to_outbox,
-            write_health, write_compaction_state,
+            write_health,
             poll_adapter_inboxes, poll_inbox,
         )
 
@@ -616,8 +616,6 @@ class TurnEngine:
         self.compact_pending_turns = 0
         self.total_tokens = tokens_after
         self._prev_tokens = self.total_tokens
-        write_compaction_state(agent_name, "complete",
-                              tokens_before=tokens_before, tokens_after=tokens_after, env=self.env)
 
         # Drain pending messages before orientation
         if self.interjection_enabled:
@@ -699,7 +697,7 @@ class TurnEngine:
         import time
         from asdaaas import (
             agent_dir, read_gaze, context_left_tag, write_to_outbox,
-            write_health, write_compaction_state, get_compaction_instructions,
+            write_health, get_compaction_instructions,
             _cleanup_compact_doorbells, _queue_post_compaction_doorbell,
             COMPACTION_COOLDOWN_TURNS,
         )
@@ -735,8 +733,6 @@ class TurnEngine:
 
         try:
             tokens_before = self.total_tokens
-            write_compaction_state(agent_name, "in_flight", request_id=request_id,
-                                  tokens_before=tokens_before, env=self.env)
             instructions = cmd.get("instructions") or get_compaction_instructions(agent_name, env=self.env)
             compact_prompt = f"/compact {instructions}"
             compact_handle = await self.backend.send_prompt(compact_prompt)
@@ -748,8 +744,6 @@ class TurnEngine:
                 # Async — poll for token drop
                 print(f"[asdaaas] Compact pending: {tokens_before} -> {self.total_tokens} "
                       "(polling for async completion)")
-                write_compaction_state(agent_name, "pending", request_id=request_id,
-                                     tokens_before=tokens_before, env=self.env)
                 compaction_landed = False
                 for _poll in range(15):
                     await asyncio.sleep(2)
@@ -764,16 +758,12 @@ class TurnEngine:
                     print(f"[asdaaas] Compact completed (async): {tokens_before} -> {self.total_tokens}")
                     self._prev_tokens = self.total_tokens
                     self.turns_since_compaction = 0
-                    write_compaction_state(agent_name, "complete", request_id=request_id,
-                                         tokens_before=tokens_before, tokens_after=self.total_tokens, env=self.env)
                     _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens, env=self.env)
                 else:
                     _, event_ta, event_tb = self.backend.pop_compaction_event()
                     tokens_before = event_tb or tokens_before
                     self.total_tokens = event_ta or self.total_tokens
                     print(f"[asdaaas] Compact still pending after 30s poll — queueing doorbell anyway")
-                    write_compaction_state(agent_name, "complete", request_id=request_id,
-                                         tokens_before=tokens_before, tokens_after=self.total_tokens, env=self.env)
                     _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens, env=self.env)
                     self.turns_since_compaction = 0
                     self._prev_tokens = self.total_tokens
@@ -811,14 +801,11 @@ class TurnEngine:
                     }, f)
                 os.rename(tmp, str(result_file))
                 print(f"[asdaaas] Compact: {tokens_before} -> {self.total_tokens}")
-                write_compaction_state(agent_name, "complete", request_id=request_id,
-                                     tokens_before=tokens_before, tokens_after=self.total_tokens, env=self.env)
                 write_health(agent_name, "ready",
                             f"compacted {tokens_before}->{self.total_tokens}",
                             self.total_tokens, self.context_window, env=self.env)
                 _cleanup_compact_doorbells(agent_name, env=self.env)
         except Exception as e:
-            write_compaction_state(agent_name, "failed", request_id=request_id, env=self.env)
             print(f"[asdaaas] Compact failed: {e}")
 
     async def handle_force_compact_command(self, cmd: dict, *,
@@ -828,7 +815,7 @@ class TurnEngine:
         import time
         from asdaaas import (
             read_gaze, context_left_tag, write_to_outbox, write_health,
-            write_compaction_state, get_compaction_instructions,
+            get_compaction_instructions,
             _cleanup_compact_doorbells, COMPACTION_COOLDOWN_TURNS,
         )
 
@@ -844,7 +831,6 @@ class TurnEngine:
 
         try:
             tokens_before = self.total_tokens
-            write_compaction_state(agent_name, "in_flight", tokens_before=tokens_before, env=self.env)
             instructions = cmd.get("instructions") or get_compaction_instructions(agent_name, env=self.env)
             compact_prompt = f"/compact {instructions}"
             compact_handle = await self.backend.send_prompt(compact_prompt)
@@ -854,7 +840,6 @@ class TurnEngine:
 
             if self.total_tokens >= tokens_before:
                 print(f"[asdaaas] Force compact pending: {tokens_before} -> {self.total_tokens} (no reduction yet)")
-                write_compaction_state(agent_name, "pending", tokens_before=tokens_before, env=self.env)
                 self._prev_tokens = self.total_tokens
             else:
                 _, event_ta, event_tb = self.backend.pop_compaction_event()
@@ -879,14 +864,11 @@ class TurnEngine:
                 self._prev_tokens = self.total_tokens
                 self.turns_since_compaction = 0
                 _cleanup_compact_doorbells(agent_name, env=self.env)
-                write_compaction_state(agent_name, "complete",
-                                     tokens_before=tokens_before, tokens_after=self.total_tokens, env=self.env)
                 write_health(agent_name, "ready",
                             f"force-compacted {tokens_before}->{self.total_tokens}",
                             self.total_tokens, self.context_window, env=self.env)
                 print(f"[asdaaas] Force compact: {tokens_before} -> {self.total_tokens}")
         except Exception as e:
-            write_compaction_state(agent_name, "failed", env=self.env)
             print(f"[asdaaas] Force compact failed: {e}")
 
     async def deliver_background_doorbells(self, bg_doorbells: list, *,

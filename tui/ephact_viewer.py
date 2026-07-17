@@ -128,8 +128,16 @@ class EphactViewer(Static):
         )
 
     def on_click(self, event) -> None:
-        """Click on the viewer panel to close it."""
-        self.close()
+        """Click on the viewer cycles through the stack."""
+        agent = self._active_agent
+        stack = self._stacks.get(agent, [])
+        if len(stack) > 1:
+            self.navigate(1)
+            # Wrap around to start
+            idx = self._view_index.get(agent, 0)
+            if idx >= len(stack):
+                self._view_index[agent] = 0
+                self.refresh(layout=True)
 
 
 def archive_ephact(agent: str, entry: EphactEntry, agents_home: str = None) -> Path:

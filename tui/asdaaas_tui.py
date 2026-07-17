@@ -855,6 +855,8 @@ class MessageInput(TextArea):
     def _on_key(self, event) -> None:
         """Handle input keys. Ctrl+E toggles mode. Mode determines Enter vs Ctrl+J behavior."""
         # Pass Home/End/PageUp/PageDown to the app for scroll/history actions
+        if event.key in ("f3", "f5", "f6"):
+            return  # Let these bubble to app-level bindings
         if event.key in ("home", "end", "pageup", "pagedown"):
             event.prevent_default()
             event.stop()

@@ -128,18 +128,15 @@ class EphactViewer(Static):
         )
 
     def on_click(self, event) -> None:
-        """Click on the viewer: cycles through stack, then closes on wrap."""
-        agent = self._active_agent
-        stack = self._stacks.get(agent, [])
-        if not stack or len(stack) <= 1:
+        """Top border click = close, content click = cycle stack."""
+        if event.y == 0:
             self.close()
             return
-        idx = self._view_index.get(agent, len(stack) - 1)
-        new_idx = (idx + 1) % len(stack)
-        if new_idx == 0 and idx == len(stack) - 1:
-            self.close()
-        else:
-            self._view_index[agent] = new_idx
+        agent = self._active_agent
+        stack = self._stacks.get(agent, [])
+        if len(stack) > 1:
+            idx = self._view_index.get(agent, len(stack) - 1)
+            self._view_index[agent] = (idx + 1) % len(stack)
             self.refresh(layout=True)
 
 

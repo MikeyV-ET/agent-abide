@@ -43,6 +43,7 @@ class EphactViewer(Static):
         # Current view index per agent (0 = most recent)
         self._view_index: dict[str, int] = {}
         self._active_agent: str = ""
+        self._closed_by_user: set[str] = set()
 
     def push(self, agent: str, ephact: EphactData) -> None:
         """Add a new ephact to an agent's stack. Shows viewer only if agent is active."""
@@ -53,6 +54,7 @@ class EphactViewer(Static):
         entry = EphactEntry(data=ephact, agent=agent)
         self._stacks[agent].append(entry)
         self._view_index[agent] = len(self._stacks[agent]) - 1
+        self._closed_by_user.discard(agent)
         if agent == self._active_agent:
             self._visible = True
             self.display = True
@@ -60,6 +62,7 @@ class EphactViewer(Static):
 
     def close(self) -> None:
         """Hide the viewer."""
+        self._closed_by_user.add(self._active_agent)
         self._visible = False
         self.display = False
         self.refresh(layout=True)
@@ -67,7 +70,7 @@ class EphactViewer(Static):
     def set_active_agent(self, agent: str) -> None:
         """Switch which agent's stack is displayed."""
         self._active_agent = agent
-        if agent in self._stacks and self._stacks[agent]:
+        if agent in self._stacks and self._stacks[agent] and agent not in self._closed_by_user:
             self._visible = True
             self.display = True
         else:

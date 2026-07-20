@@ -318,15 +318,23 @@ class Config:
         agent_path = cls.agent_dir()
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
-        if session_dir.exists():
-            # Find the session subdirectory (UUID)
-            subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
-            if subdirs:
-                # Use the most recent one
-                latest = max(subdirs, key=lambda d: d.stat().st_mtime)
-                updates = latest / "updates.jsonl"
-                if updates.exists():
-                    return updates
+        if not session_dir.exists():
+            return None
+        # Prefer session ID from agents.json over mtime guess
+        cfg = cls.load_agents_cfg()
+        agent_cfg = cfg.get("agents", {}).get(cls.AGENT_NAME, {})
+        sid = agent_cfg.get("session")
+        if sid:
+            updates = session_dir / sid / "updates.jsonl"
+            if updates.exists():
+                return updates
+        # Fallback: most recent subdir (may pick subagent sessions)
+        subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
+        if subdirs:
+            latest = max(subdirs, key=lambda d: d.stat().st_mtime)
+            updates = latest / "updates.jsonl"
+            if updates.exists():
+                return updates
         return None
 
     @classmethod
@@ -336,13 +344,21 @@ class Config:
         agent_path = cls.agent_dir()
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
-        if session_dir.exists():
-            subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
-            if subdirs:
-                latest = max(subdirs, key=lambda d: d.stat().st_mtime)
-                signals = latest / "signals.json"
-                if signals.exists():
-                    return signals
+        if not session_dir.exists():
+            return None
+        cfg = cls.load_agents_cfg()
+        agent_cfg = cfg.get("agents", {}).get(cls.AGENT_NAME, {})
+        sid = agent_cfg.get("session")
+        if sid:
+            signals = session_dir / sid / "signals.json"
+            if signals.exists():
+                return signals
+        subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
+        if subdirs:
+            latest = max(subdirs, key=lambda d: d.stat().st_mtime)
+            signals = latest / "signals.json"
+            if signals.exists():
+                return signals
         return None
 
 
@@ -3097,10 +3113,22 @@ Type anything else to send a message to the agent.
                     encoded = str(agent_dir).replace("/", "%2F")
                     session_dir = sessions_root / encoded
                     if session_dir.exists():
-                        subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
-                        if subdirs:
-                            latest = max(subdirs, key=lambda d: d.stat().st_mtime)
-                            signals_path = latest / "signals.json"
+                        cfg = Config.load_agents_cfg()
+                        agent_cfg = cfg.get("agents", {}).get(active, {})
+                        sid = agent_cfg.get("session")
+                        signals_path = None
+                        if sid:
+                            sp = session_dir / sid / "signals.json"
+                            if sp.exists():
+                                signals_path = sp
+                        if signals_path is None:
+                            subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
+                            if subdirs:
+                                latest = max(subdirs, key=lambda d: d.stat().st_mtime)
+                                sp = latest / "signals.json"
+                                if sp.exists():
+                                    signals_path = sp
+                        if signals_path is not None:
                             if signals_path.exists():
                                 with open(signals_path) as f:
                                     signals = json.load(f)
@@ -3329,13 +3357,21 @@ Type anything else to send a message to the agent.
         agent_path = Config.agent_home(agent_name)
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
-        if session_dir.exists():
-            subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
-            if subdirs:
-                latest = max(subdirs, key=lambda d: d.stat().st_mtime)
-                updates = latest / "updates.jsonl"
-                if updates.exists():
-                    return updates
+        if not session_dir.exists():
+            return None
+        cfg = Config.load_agents_cfg()
+        agent_cfg = cfg.get("agents", {}).get(agent_name, {})
+        sid = agent_cfg.get("session")
+        if sid:
+            updates = session_dir / sid / "updates.jsonl"
+            if updates.exists():
+                return updates
+        subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
+        if subdirs:
+            latest = max(subdirs, key=lambda d: d.stat().st_mtime)
+            updates = latest / "updates.jsonl"
+            if updates.exists():
+                return updates
         return None
 
     def _tail_updates_for_agent(self, agent_name: str) -> None:

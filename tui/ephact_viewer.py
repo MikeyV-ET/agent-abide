@@ -45,19 +45,18 @@ class EphactViewer(Static):
         self._active_agent: str = ""
 
     def push(self, agent: str, ephact: EphactData) -> None:
-        """Add a new ephact to an agent's stack. Shows the viewer."""
+        """Add a new ephact to an agent's stack. Shows viewer only if agent is active."""
         if agent not in self._stacks:
             self._stacks[agent] = []
             self._view_index[agent] = 0
 
         entry = EphactEntry(data=ephact, agent=agent)
         self._stacks[agent].append(entry)
-        # Reset view to most recent
         self._view_index[agent] = len(self._stacks[agent]) - 1
-        self._active_agent = agent
-        self._visible = True
-        self.display = True
-        self.refresh(layout=True)
+        if agent == self._active_agent:
+            self._visible = True
+            self.display = True
+            self.refresh(layout=True)
 
     def close(self) -> None:
         """Hide the viewer."""

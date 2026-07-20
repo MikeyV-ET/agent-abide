@@ -2002,6 +2002,11 @@ class AsdaaasTUI(App):
 
     def _start_workers(self) -> None:
         """Start background workers and initialize UI."""
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            viewer.set_active_agent(self._active_agent)
+        except NoMatches:
+            pass
         # Start the status poller
         self.status_worker = self.run_worker(
             self._poll_status, thread=True, name="status_poller"

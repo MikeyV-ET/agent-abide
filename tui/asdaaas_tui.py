@@ -3864,7 +3864,7 @@ Type anything else to send a message to the agent.
         elif hasattr(self, "_last_event_ts") and self._last_event_ts:
             ts_str = datetime.datetime.fromtimestamp(
                 self._last_event_ts
-            ).strftime("%H:%M:%S")
+            ).strftime("%a %b %d %H:%M:%S")
 
         # End current agent message block
         self._current_agent_msg = None

@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-USB_DIR="/mnt/d"
+USB_DIR="/mnt/e"
 SNAR_FILE="${USB_DIR}/home_eric.snar"
 LOG_FILE="${USB_DIR}/backup.log"
 DATE=$(date +%Y%m%d)

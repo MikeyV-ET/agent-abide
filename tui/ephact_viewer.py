@@ -265,8 +265,15 @@ class EphactViewer(Static):
                 if start <= x < end:
                     if action[0] == "scroll":
                         agent = self._active_agent
+                        stack = self._stacks.get(agent, [])
                         scroll = self._tab_scroll.get(agent, 0)
-                        self._tab_scroll[agent] = max(0, scroll + action[1])
+                        new_scroll = max(0, min(len(stack) - 1, scroll + action[1]))
+                        self._tab_scroll[agent] = new_scroll
+                        # Select the tab at the scroll edge so auto-scroll doesn't fight
+                        if action[1] < 0 and new_scroll < scroll:
+                            self._view_index[agent] = new_scroll
+                        elif action[1] > 0:
+                            self._view_index[agent] = min(new_scroll + 1, len(stack) - 1)
                         self.refresh(layout=True)
                     elif action[0] == "tab":
                         self._view_index[self._active_agent] = action[1]

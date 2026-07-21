@@ -157,8 +157,8 @@ class EphactViewer(Static):
             label = e.data.title or e.data.type.capitalize()
             if len(label) > 12:
                 label = label[:11] + "…"
-            # width = label + ✕ + separator (│)
-            w = len(label) + 1 + (1 if i < len(stack) - 1 else 0)
+            # width = label + " x" + separator (│)
+            w = len(label) + 2 + (1 if i < len(stack) - 1 else 0)
             tab_labels.append((i, label, w))
 
         # Determine scroll position and visible window
@@ -195,7 +195,7 @@ class EphactViewer(Static):
             subtitle.append("  ", style="dim")
         pos += 2
 
-        # Visible tabs — each with its own ✕
+        # Visible tabs — each with its own x close
         for ti, label, w in tab_labels[scroll:visible_end]:
             if ti == idx:
                 subtitle.append(label, style="bold white on blue")
@@ -203,9 +203,9 @@ class EphactViewer(Static):
                 subtitle.append(label, style="cyan")
             regions.append((pos, pos + len(label), ("tab", ti)))
             pos += len(label)
-            subtitle.append("✕", style="bold red")
-            regions.append((pos, pos + 1, ("close_one", ti)))
-            pos += 1
+            subtitle.append(" x", style="bold red")
+            regions.append((pos, pos + 2, ("close_one", ti)))
+            pos += 2
             if ti < visible_end - 1:
                 subtitle.append("│", style="dim cyan")
                 pos += 1

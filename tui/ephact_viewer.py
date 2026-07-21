@@ -180,7 +180,9 @@ class EphactViewer(Static):
         )
 
     def on_click(self, event) -> None:
-        """Title bar: use click regions. Content area: cycle stack."""
+        """Title bar: use click regions. Content area: cycle stack. Left-click only."""
+        if getattr(event, 'button', 1) != 1:
+            return
         if event.y == 0:
             x = event.x
             for start, end, action in self._click_regions:
@@ -193,8 +195,7 @@ class EphactViewer(Static):
                     elif action[0] == "close_one":
                         self.close_current()
                     return
-            # Clicked title bar but missed a region — hide viewer
-            self.close()
+            # Clicked title bar but missed a region — no-op
             return
         # Content area click: cycle forward
         agent = self._active_agent

@@ -1862,6 +1862,7 @@ class AsdaaasTUI(App):
         Binding("pageup", "load_history", "Load History", show=False, priority=True),
         Binding("ctrl+n", "next_agent", "Next Agent", show=False),
         Binding("f2", "show_persistence", "Persistence", show=True),
+        Binding("f7", "toggle_copy_mode", "Copy Mode", show=True),
     ]
 
     def __init__(self, agents: list[str] = None, **kwargs):
@@ -2560,7 +2561,10 @@ Type anything else to send a message to the agent.
             pass
 
     def action_dismiss_overlay(self) -> None:
-        """Dismiss any open overlay, or focus input."""
+        """Dismiss any open overlay, exit copy mode, or focus input."""
+        if getattr(self, '_copy_mode', False):
+            self.action_toggle_copy_mode()
+            return
         try:
             selector = self.query_one("#gaze-selector", GazeSelector)
             if selector.display:
@@ -2967,6 +2971,19 @@ Type anything else to send a message to the agent.
             pass
 
     
+
+    def action_toggle_copy_mode(self) -> None:
+        """Toggle copy mode: disables mouse capture so terminal handles text selection."""
+        self._copy_mode = not getattr(self, '_copy_mode', False)
+        driver = self._driver
+        if driver is None:
+            return
+        if self._copy_mode:
+            driver._disable_mouse_support()
+            self.notify("Copy mode ON — select text normally, F7 to exit", severity="information")
+        else:
+            driver._enable_mouse_support()
+            self.notify("Copy mode OFF — mouse scrolling restored", severity="information")
 
     def action_show_persistence(self) -> None:
         """Show persistence management panel for the active agent."""

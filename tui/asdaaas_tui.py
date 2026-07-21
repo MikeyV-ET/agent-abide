@@ -1452,10 +1452,17 @@ class AgentMessage(Static):
             r'<ephact\s+type=["\'](\w+)["\'](?:\s+title=["\']([^"\']*)["\'])?\s*>(.*?)</ephact>',
             _repl, text, flags=re.DOTALL)
 
-    def render(self) -> RichMarkdown:
+    def render(self):
         text = self._format_interjections(self._text)
         text = self._format_ephacts(text)
-        return RichMarkdown(text)
+        # Render markdown through Rich, then convert to Text for native selectability
+        from io import StringIO
+        from rich.console import Console
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=120, no_color=False)
+        console.print(RichMarkdown(text), end="")
+        ansi = buf.getvalue()
+        return Text.from_ansi(ansi)
 
 
 class ThinkingBlock(Static):

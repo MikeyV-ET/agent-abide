@@ -1462,11 +1462,12 @@ class AgentMessage(Static):
         w = self.size.width - 2 if self.size.width > 10 else 120
         console = Console(file=buf, force_terminal=True, width=w, no_color=False)
         console.print(RichMarkdown(text), end="")
-        ansi = buf.getvalue()
-        # Strip trailing whitespace per line to avoid padding in copy/paste
-        lines = ansi.split("\n")
-        ansi = "\n".join(line.rstrip() for line in lines)
-        return Text.from_ansi(ansi)
+        result = Text.from_ansi(buf.getvalue())
+        # Strip trailing whitespace per line (Rich pads to console width)
+        lines = result.split("\n")
+        for line in lines:
+            line.rstrip()
+        return Text("\n").join(lines)
 
 
 class ThinkingBlock(Static):

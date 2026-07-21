@@ -1067,28 +1067,40 @@ class ToolCallPanel(Static):
 
         title = f"{kind_icon} {self.tool_title} {status_icon}"
 
-        # Collapsed: single line with hint
+        # Set CSS border dynamically based on status
+        from textual.color import Color as TextualColor
+        try:
+            color = TextualColor.parse(border_style)
+        except Exception:
+            color = TextualColor.parse("blue")
+
+        # Collapsed: no border, single line
         if self._collapsed:
+            self.styles.border = ("none", color)
+            self.styles.padding = (0, 0)
+            self.border_title = ""
             text = Text()
             text.append(f"  {title}", style=border_style)
             if self.tool_output:
                 text.append("  ▸ click to expand", style=Theme.DARK4)
             return text
 
-        # Expanded: full panel
+        # Expanded: CSS border + content as Text
+        self.styles.border = ("round", color)
+        self.styles.padding = (0, 1)
+        self.border_title = title
+
         if self.tool_output:
             output = self.tool_output
             lines = output.split("\n")
             is_active = self.tool_status not in ("completed", "failed")
 
             if is_active and len(lines) > self.MAX_ACTIVE_LINES:
-                # Active panel: show last MAX lines with "click for more"
                 display = "\n".join(lines[-self.MAX_ACTIVE_LINES:])
                 header = f"... ({len(lines) - self.MAX_ACTIVE_LINES} more lines above, click to expand) ...\n"
                 content = Text(header, style=Theme.DARK4)
                 content.append(display, style=Theme.GRAY)
             elif not is_active and len(output) > 2000:
-                # Completed: truncate middle
                 display = output[:1000] + "\n... (truncated) ...\n" + output[-500:]
                 content = Text(display, style=Theme.GRAY)
             else:
@@ -1096,15 +1108,7 @@ class ToolCallPanel(Static):
         else:
             content = Text("(no output)", style=f"italic {Theme.DARK4}")
 
-        panel = Panel(
-            content,
-            title=title,
-            title_align="left",
-            border_style=border_style,
-            padding=(0, 1),
-        )
-        w = self.size.width if self.size.width > 10 else 120
-        return _flatten_to_text(panel, width=w)
+        return content
 
 
 class PlanPanel(Static):
@@ -1510,7 +1514,7 @@ class ThinkingBlock(Static):
         self._expanded = not self._expanded
         self.refresh(layout=True)
 
-    def render(self) -> Panel:
+    def render(self):
         text = self._text
         lines = text.split("\n")
         total = len(lines)
@@ -1534,15 +1538,8 @@ class ThinkingBlock(Static):
         if self._expanded and total > self.TRUNCATE_THRESHOLD:
             title_str += " [expanded — click to collapse]"
 
-        panel = Panel(
-            Text(display, style=Theme.DARK4),
-            title=title_str,
-            title_align="left",
-            border_style=Theme.DARK3,
-            padding=(0, 1),
-        )
-        w = self.size.width if self.size.width > 10 else 120
-        return _flatten_to_text(panel, width=w)
+        self.border_title = title_str
+        return Text(display, style=Theme.DARK4)
 
 
 class InterjectionBlock(Static):
@@ -1553,15 +1550,8 @@ class InterjectionBlock(Static):
         self._message = message
 
     def render(self):
-        panel = Panel(
-            Text(self._message, style=Theme.BR_ORANGE),
-            title="🔔 Interjection",
-            title_align="left",
-            border_style=Theme.BR_ORANGE,
-            padding=(0, 1),
-        )
-        w = self.size.width if self.size.width > 10 else 120
-        return _flatten_to_text(panel, width=w)
+        self.border_title = "🔔 Interjection"
+        return Text(self._message, style=Theme.BR_ORANGE)
 
 
 # =============================================================================
@@ -1860,6 +1850,15 @@ class AsdaaasTUI(App):
 
     ThinkingBlock {
         margin: 0 0 0 2;
+        border: round $accent-muted;
+        padding: 0 1;
+        border-title-align: left;
+    }
+
+    InterjectionBlock {
+        border: round $warning;
+        padding: 0 1;
+        border-title-align: left;
     }
 
     SystemAlert {

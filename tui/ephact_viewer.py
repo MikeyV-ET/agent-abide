@@ -142,14 +142,17 @@ class EphactViewer(Static):
         title_text = entry.data.title or entry.data.type.capitalize()
         title = f"📌 {title_text}"
 
-        # Bottom subtitle: ◀ Tab1✕│Tab2✕ ▶ (clickable tab bar)
-        # Scrollable — ◀/▶ shift the visible tab window
+        # Bottom subtitle: ◀ Tab1 x│Tab2 x ▶ (clickable tab bar)
+        # ◀ pinned left, ▶ pinned right, tabs flow between
         subtitle = Text()
         regions: list[tuple[int, int, object]] = []
-        pos = 3  # Panel border: ╰─ + space = 3
+        left_pos = 3  # Panel border: ╰─ + space = 3
+        panel_width = self.size.width if self.size.width > 20 else 80
 
-        # Available width for tabs (subtract borders + ◀ + ▶ + padding)
-        avail = (self.size.width - 10) if self.size.width > 20 else 40
+        # Fixed positions for arrows
+        arrow_width = 2  # "◀ " or " ▶"
+        # Available width for tabs between the two arrows
+        avail = panel_width - 10 - (arrow_width * 2)
 
         # Build tab labels with widths
         tab_labels = []
@@ -187,15 +190,16 @@ class EphactViewer(Static):
         has_left = scroll > 0
         has_right = visible_end < len(stack)
 
-        # ◀ button (scroll tabs left)
+        # ◀ button — always at left_pos
+        pos = left_pos
         if has_left:
             subtitle.append("◀ ", style="bold cyan")
-            regions.append((pos, pos + 2, ("scroll", -1)))
+            regions.append((pos, pos + arrow_width, ("scroll", -1)))
         else:
             subtitle.append("  ", style="dim")
-        pos += 2
+        pos += arrow_width
 
-        # Visible tabs — each with its own x close
+        # Visible tabs — flow between arrows
         for ti, label, w in tab_labels[scroll:visible_end]:
             if ti == idx:
                 subtitle.append(label, style="bold white on blue")
@@ -210,13 +214,20 @@ class EphactViewer(Static):
                 subtitle.append("│", style="dim cyan")
                 pos += 1
 
-        # ▶ button (scroll tabs right)
+        # Pad to push ▶ to the right edge
+        right_pos = left_pos + arrow_width + avail
+        pad = right_pos - pos
+        if pad > 0:
+            subtitle.append(" " * pad)
+            pos = right_pos
+
+        # ▶ button — always at right edge
         if has_right:
             subtitle.append(" ▶", style="bold cyan")
-            regions.append((pos, pos + 2, ("scroll", 1)))
+            regions.append((pos, pos + arrow_width, ("scroll", 1)))
         else:
             subtitle.append("  ", style="dim")
-        pos += 2
+        pos += arrow_width
 
         self._click_regions = regions
 

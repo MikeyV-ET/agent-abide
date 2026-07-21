@@ -1463,6 +1463,9 @@ class AgentMessage(Static):
         console = Console(file=buf, force_terminal=True, width=w, no_color=False)
         console.print(RichMarkdown(text), end="")
         ansi = buf.getvalue()
+        # Strip trailing whitespace per line to avoid padding in copy/paste
+        lines = ansi.split("\n")
+        ansi = "\n".join(line.rstrip() for line in lines)
         return Text.from_ansi(ansi)
 
 

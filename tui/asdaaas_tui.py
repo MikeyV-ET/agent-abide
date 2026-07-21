@@ -57,10 +57,34 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 from rich.table import Table
-from rich.console import Group
+from rich.console import Console as RichConsole, Group
 
 from ephact_parser import extract_ephacts, has_partial_ephact
 from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
+
+
+def _flatten_to_text(renderable, width: int = 120) -> Text:
+    """Render a Rich renderable through Console, return as Text for native selectability.
+
+    Strips trailing whitespace on lines without background color."""
+    from io import StringIO
+    from rich.style import Style as RichStyle
+    buf = StringIO()
+    console = RichConsole(file=buf, force_terminal=True, width=width, no_color=False)
+    console.print(renderable, end="")
+    result = Text.from_ansi(buf.getvalue())
+    lines = result.split("\n")
+    for line in lines:
+        plain = line.plain
+        stripped_len = len(plain.rstrip())
+        if stripped_len < len(plain):
+            has_bg = any(
+                end > stripped_len and RichStyle.parse(str(s)).bgcolor
+                for start, end, s in line._spans
+            )
+            if not has_bg:
+                line.rstrip()
+    return Text("\n").join(lines)
 
 
 # =============================================================================
@@ -1072,13 +1096,15 @@ class ToolCallPanel(Static):
         else:
             content = Text("(no output)", style=f"italic {Theme.DARK4}")
 
-        return Panel(
+        panel = Panel(
             content,
             title=title,
             title_align="left",
             border_style=border_style,
             padding=(0, 1),
         )
+        w = self.size.width if self.size.width > 10 else 120
+        return _flatten_to_text(panel, width=w)
 
 
 class PlanPanel(Static):
@@ -1455,31 +1481,8 @@ class AgentMessage(Static):
     def render(self):
         text = self._format_interjections(self._text)
         text = self._format_ephacts(text)
-        # Render markdown through Rich, then convert to Text for native selectability
-        from io import StringIO
-        from rich.console import Console
-        buf = StringIO()
         w = self.size.width - 2 if self.size.width > 10 else 120
-        console = Console(file=buf, force_terminal=True, width=w, no_color=False)
-        console.print(RichMarkdown(text), end="")
-        result = Text.from_ansi(buf.getvalue())
-        # Strip trailing whitespace per line, but preserve padding on
-        # lines with background color (code blocks)
-        from rich.style import Style as RichStyle
-        lines = result.split("\n")
-        for line in lines:
-            plain = line.plain
-            stripped_len = len(plain.rstrip())
-            if stripped_len < len(plain):
-                has_bg = False
-                for start, end, style_str in line._spans:
-                    s = RichStyle.parse(str(style_str))
-                    if end > stripped_len and s.bgcolor:
-                        has_bg = True
-                        break
-                if not has_bg:
-                    line.rstrip()
-        return Text("\n").join(lines)
+        return _flatten_to_text(RichMarkdown(text), width=w)
 
 
 class ThinkingBlock(Static):
@@ -1531,13 +1534,15 @@ class ThinkingBlock(Static):
         if self._expanded and total > self.TRUNCATE_THRESHOLD:
             title_str += " [expanded — click to collapse]"
 
-        return Panel(
+        panel = Panel(
             Text(display, style=Theme.DARK4),
             title=title_str,
             title_align="left",
             border_style=Theme.DARK3,
             padding=(0, 1),
         )
+        w = self.size.width if self.size.width > 10 else 120
+        return _flatten_to_text(panel, width=w)
 
 
 class InterjectionBlock(Static):
@@ -1547,14 +1552,16 @@ class InterjectionBlock(Static):
         super().__init__(**kwargs)
         self._message = message
 
-    def render(self) -> Panel:
-        return Panel(
+    def render(self):
+        panel = Panel(
             Text(self._message, style=Theme.BR_ORANGE),
             title="🔔 Interjection",
             title_align="left",
             border_style=Theme.BR_ORANGE,
             padding=(0, 1),
         )
+        w = self.size.width if self.size.width > 10 else 120
+        return _flatten_to_text(panel, width=w)
 
 
 # =============================================================================

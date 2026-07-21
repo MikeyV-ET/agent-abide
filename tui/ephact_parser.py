@@ -63,9 +63,12 @@ def extract_ephacts(text: str) -> tuple[str, list[EphactData]]:
     cleaned = _EPHACT_RE.sub(_collect, masked)
     # Clean up extra blank lines left by removal
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-    # Restore masked code blocks
+    # Restore masked code blocks in both cleaned text and extracted content
     for i, original in enumerate(masks):
-        cleaned = cleaned.replace(f"\x00MASK{i}\x00", original)
+        placeholder = f"\x00MASK{i}\x00"
+        cleaned = cleaned.replace(placeholder, original)
+        for e in ephacts:
+            e.content = e.content.replace(placeholder, original)
     return cleaned, ephacts
 
 

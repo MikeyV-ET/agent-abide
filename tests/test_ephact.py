@@ -75,6 +75,14 @@ class TestExtractEphacts:
         cleaned, _ = extract_ephacts(text)
         assert "\n\n\n" not in cleaned
 
+    def test_inline_code_in_ephact_content(self):
+        text = '<ephact type="table" title="T">| col |\n|---|\n| `pass` | `fail` |</ephact>'
+        cleaned, ephacts = extract_ephacts(text)
+        assert len(ephacts) == 1
+        assert "`pass`" in ephacts[0].content
+        assert "`fail`" in ephacts[0].content
+        assert "MASK" not in ephacts[0].content
+
 
 class TestHasPartialEphact:
     def test_no_tags(self):

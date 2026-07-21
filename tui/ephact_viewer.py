@@ -44,6 +44,8 @@ class EphactViewer(Static):
         self._view_index: dict[str, int] = {}
         self._active_agent: str = ""
         self._closed_by_user: set[str] = set()
+        # Click regions for title bar: [(start_x, end_x, action), ...]
+        self._click_regions: list[tuple[int, int, object]] = []
 
     def push(self, agent: str, ephact: EphactData) -> None:
         """Add a new ephact to an agent's stack. Shows viewer only if agent is active."""
@@ -61,10 +63,24 @@ class EphactViewer(Static):
             self.refresh(layout=True)
 
     def close(self) -> None:
-        """Hide the viewer."""
+        """Hide the viewer (keeps stack intact)."""
         self._closed_by_user.add(self._active_agent)
         self._visible = False
         self.display = False
+        self.refresh(layout=True)
+
+    def close_current(self) -> None:
+        """Remove the currently viewed ephact from the stack."""
+        agent = self._active_agent
+        stack = self._stacks.get(agent, [])
+        if not stack:
+            return
+        idx = self._view_index.get(agent, len(stack) - 1)
+        stack.pop(idx)
+        if not stack:
+            self.close()
+            return
+        self._view_index[agent] = min(idx, len(stack) - 1)
         self.refresh(layout=True)
 
     def set_active_agent(self, agent: str) -> None:
@@ -79,14 +95,13 @@ class EphactViewer(Static):
         self.refresh(layout=True)
 
     def navigate(self, direction: int) -> None:
-        """Navigate history. direction: -1 = older, +1 = newer."""
+        """Navigate history. direction: -1 = older, +1 = newer. Wraps around."""
         agent = self._active_agent
         if agent not in self._stacks or not self._stacks[agent]:
             return
         stack = self._stacks[agent]
         idx = self._view_index.get(agent, len(stack) - 1)
-        idx = max(0, min(len(stack) - 1, idx + direction))
-        self._view_index[agent] = idx
+        self._view_index[agent] = (idx + direction) % len(stack)
         self.refresh(layout=True)
 
     @property
@@ -108,17 +123,52 @@ class EphactViewer(Static):
         if not entry:
             return Panel("No artifacts", title="📌 Artifacts", border_style="dim")
 
-        # Build navigation indicator
         agent = self._active_agent
         stack = self._stacks[agent]
         idx = self._view_index.get(agent, len(stack) - 1)
-        nav = f" [{idx + 1}/{len(stack)}]" if len(stack) > 1 else ""
 
-        # Title from ephact or type
-        title_text = entry.data.title or entry.data.type.capitalize()
-        title = f"📌 {title_text}{nav} — [x] close"
+        # Build title with clickable regions: ◀ Tab1│Tab2│Tab3 ▶ ✕
+        title = Text()
+        regions: list[tuple[int, int, object]] = []
+        pos = 1  # Panel border eats column 0
 
-        # Render content as markdown for tables/lists
+        # ◀ button (backward)
+        if len(stack) > 1:
+            title.append("◀ ", style="bold cyan")
+            regions.append((pos, pos + 2, ("nav", -1)))
+            pos += 2
+        else:
+            title.append("📌 ", style="cyan")
+            pos += 2
+
+        # Tabs
+        for i, e in enumerate(stack):
+            label = e.data.title or e.data.type.capitalize()
+            if len(label) > 12:
+                label = label[:11] + "…"
+            if i == idx:
+                title.append(label, style="bold white on blue")
+            else:
+                title.append(label, style="cyan")
+            regions.append((pos, pos + len(label), ("tab", i)))
+            pos += len(label)
+            if i < len(stack) - 1:
+                title.append("│", style="dim cyan")
+                pos += 1
+
+        # ▶ button (forward)
+        if len(stack) > 1:
+            title.append(" ▶", style="bold cyan")
+            regions.append((pos, pos + 2, ("nav", 1)))
+            pos += 2
+
+        # ✕ button (close individual)
+        title.append(" ✕", style="bold red")
+        regions.append((pos, pos + 2, ("close_one",)))
+        pos += 2
+
+        self._click_regions = regions
+
         content = entry.data.content
 
         return Panel(
@@ -130,10 +180,23 @@ class EphactViewer(Static):
         )
 
     def on_click(self, event) -> None:
-        """Top border click = close, content click = cycle stack."""
+        """Title bar: use click regions. Content area: cycle stack."""
         if event.y == 0:
+            x = event.x
+            for start, end, action in self._click_regions:
+                if start <= x < end:
+                    if action[0] == "nav":
+                        self.navigate(action[1])
+                    elif action[0] == "tab":
+                        self._view_index[self._active_agent] = action[1]
+                        self.refresh(layout=True)
+                    elif action[0] == "close_one":
+                        self.close_current()
+                    return
+            # Clicked title bar but missed a region — hide viewer
             self.close()
             return
+        # Content area click: cycle forward
         agent = self._active_agent
         stack = self._stacks.get(agent, [])
         if len(stack) > 1:

@@ -112,7 +112,7 @@ class TestEphactViewer:
         viewer.push("Trip", EphactData(type="list", content="second"))
         assert viewer.current_entry.data.content == "second"  # newest
 
-    def test_navigate(self, viewer):
+    def test_navigate_wraps(self, viewer):
         viewer.push("Trip", EphactData(type="a", content="1"))
         viewer.push("Trip", EphactData(type="b", content="2"))
         viewer.push("Trip", EphactData(type="c", content="3"))
@@ -121,10 +121,10 @@ class TestEphactViewer:
         assert viewer.current_entry.data.type == "b"
         viewer.navigate(-1)
         assert viewer.current_entry.data.type == "a"
-        viewer.navigate(-1)  # can't go past start
+        viewer.navigate(-1)  # wraps to end
+        assert viewer.current_entry.data.type == "c"
+        viewer.navigate(1)  # wraps to start
         assert viewer.current_entry.data.type == "a"
-        viewer.navigate(1)
-        assert viewer.current_entry.data.type == "b"
 
     def test_per_agent_isolation(self, viewer):
         viewer.push("Trip", EphactData(type="table", content="trip's"))
@@ -144,6 +144,31 @@ class TestEphactViewer:
         viewer.set_active_agent("Q")  # no ephacts
         assert viewer.has_content is False
         assert viewer.current_entry is None
+
+    def test_close_current_removes_entry(self, viewer):
+        viewer.push("Trip", EphactData(type="a", content="1"))
+        viewer.push("Trip", EphactData(type="b", content="2"))
+        viewer.push("Trip", EphactData(type="c", content="3"))
+        # Viewing "c" (index 2), remove it
+        viewer.close_current()
+        assert len(viewer._stacks["Trip"]) == 2
+        assert viewer.current_entry.data.type == "b"
+
+    def test_close_current_last_hides_viewer(self, viewer):
+        viewer.push("Trip", EphactData(type="only", content="x"))
+        assert viewer._visible is True
+        viewer.close_current()
+        assert viewer._visible is False
+        assert len(viewer._stacks["Trip"]) == 0
+
+    def test_close_current_adjusts_index(self, viewer):
+        viewer.push("Trip", EphactData(type="a", content="1"))
+        viewer.push("Trip", EphactData(type="b", content="2"))
+        # Navigate to first, then close it
+        viewer._view_index["Trip"] = 0
+        viewer.close_current()
+        assert viewer.current_entry.data.type == "b"
+        assert viewer._view_index["Trip"] == 0
 
 
 # ── Archive tests ─────────────────────────────────────────────────────

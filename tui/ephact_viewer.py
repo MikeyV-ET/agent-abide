@@ -136,13 +136,19 @@ class EphactViewer(Static):
         stack = self._stacks[agent]
         idx = self._view_index.get(agent, len(stack) - 1)
 
-        # Build title with clickable regions: ◀ Tab1│Tab2│Tab3 ▶ ✕
-        title = Text()
+        # Top title: current ephact name
+        title_text = entry.data.title or entry.data.type.capitalize()
+        title = f"📌 {title_text}"
+
+        # Bottom subtitle: ◀ Tab1✕│Tab2✕ ▶ (clickable tab bar)
+        subtitle = Text()
         regions: list[tuple[int, int, object]] = []
-        pos = 3  # Panel renders ╭─ (2 chars) + space before title = 3
+        # Store y-offset for bottom border — set during on_click via self.size.height - 1
+        self._tab_bar_y = -1  # sentinel, resolved at click time
+        pos = 3  # Panel renders ╰─ (2 chars) + space before subtitle = 3
 
         # ◀ button (backward)
-        title.append("◀ ", style="bold cyan")
+        subtitle.append("◀ ", style="bold cyan")
         regions.append((pos, pos + 2, ("nav", -1)))
         pos += 2
 
@@ -152,20 +158,20 @@ class EphactViewer(Static):
             if len(label) > 12:
                 label = label[:11] + "…"
             if i == idx:
-                title.append(label, style="bold white on blue")
+                subtitle.append(label, style="bold white on blue")
             else:
-                title.append(label, style="cyan")
+                subtitle.append(label, style="cyan")
             regions.append((pos, pos + len(label), ("tab", i)))
             pos += len(label)
-            title.append("✕", style="bold red")
+            subtitle.append("✕", style="bold red")
             regions.append((pos, pos + 1, ("close_one", i)))
             pos += 1
             if i < len(stack) - 1:
-                title.append("│", style="dim cyan")
+                subtitle.append("│", style="dim cyan")
                 pos += 1
 
         # ▶ button (forward)
-        title.append(" ▶", style="bold cyan")
+        subtitle.append(" ▶", style="bold cyan")
         regions.append((pos, pos + 2, ("nav", 1)))
         pos += 2
 
@@ -177,15 +183,19 @@ class EphactViewer(Static):
             RichMarkdown(content),
             title=title,
             title_align="left",
+            subtitle=subtitle,
+            subtitle_align="left",
             border_style="cyan",
             padding=(0, 1),
         )
 
     def on_click(self, event) -> None:
-        """Title bar: use click regions. Content area: cycle stack. Left-click only."""
+        """Bottom border: tab bar click regions. Top border/content: cycle. Left-click only."""
         if getattr(event, 'button', 1) != 1:
             return
-        if event.y == 0:
+        bottom_y = self.size.height - 1
+        if event.y == bottom_y:
+            # Bottom border — tab bar with click regions
             x = event.x
             for start, end, action in self._click_regions:
                 if start <= x < end:
@@ -197,7 +207,10 @@ class EphactViewer(Static):
                     elif action[0] == "close_one":
                         self.close_at(action[1])
                     return
-            # Clicked title bar but missed a region — no-op
+            return
+        if event.y == 0:
+            # Top border — close viewer
+            self.close()
             return
         # Content area click: cycle forward
         agent = self._active_agent

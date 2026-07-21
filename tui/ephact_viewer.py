@@ -130,7 +130,7 @@ class EphactViewer(Static):
         # Build title with clickable regions: ◀ Tab1│Tab2│Tab3 ▶ ✕
         title = Text()
         regions: list[tuple[int, int, object]] = []
-        pos = 1  # Panel border eats column 0
+        pos = 3  # Panel renders ╭─ (2 chars) + space before title = 3
 
         # ◀ button (backward)
         if len(stack) > 1:

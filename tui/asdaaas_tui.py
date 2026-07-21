@@ -1463,10 +1463,22 @@ class AgentMessage(Static):
         console = Console(file=buf, force_terminal=True, width=w, no_color=False)
         console.print(RichMarkdown(text), end="")
         result = Text.from_ansi(buf.getvalue())
-        # Strip trailing whitespace per line (Rich pads to console width)
+        # Strip trailing whitespace per line, but preserve padding on
+        # lines with background color (code blocks)
+        from rich.style import Style as RichStyle
         lines = result.split("\n")
         for line in lines:
-            line.rstrip()
+            plain = line.plain
+            stripped_len = len(plain.rstrip())
+            if stripped_len < len(plain):
+                has_bg = False
+                for start, end, style_str in line._spans:
+                    s = RichStyle.parse(str(style_str))
+                    if end > stripped_len and s.bgcolor:
+                        has_bg = True
+                        break
+                if not has_bg:
+                    line.rstrip()
         return Text("\n").join(lines)
 
 

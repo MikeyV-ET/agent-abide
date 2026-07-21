@@ -179,8 +179,31 @@ class EphactViewer(Static):
 
         content = entry.data.content
 
+        # Render content: use RichMarkdown but flatten to Text for selectability
+        from io import StringIO
+        from rich.console import Console as RichConsole
+        from rich.style import Style as RichStyle
+        buf = StringIO()
+        w = self.size.width - 4 if self.size.width > 10 else 80
+        console = RichConsole(file=buf, force_terminal=True, width=w, no_color=False)
+        console.print(RichMarkdown(content), end="")
+        rendered = Text.from_ansi(buf.getvalue())
+        # Strip trailing whitespace on lines without background
+        rlines = rendered.split("\n")
+        for rline in rlines:
+            plain = rline.plain
+            slen = len(plain.rstrip())
+            if slen < len(plain):
+                has_bg = any(
+                    end > slen and RichStyle.parse(str(s)).bgcolor
+                    for start, end, s in rline._spans
+                )
+                if not has_bg:
+                    rline.rstrip()
+        rendered = Text("\n").join(rlines)
+
         return Panel(
-            RichMarkdown(content),
+            rendered,
             title=title,
             title_align="left",
             subtitle=subtitle,

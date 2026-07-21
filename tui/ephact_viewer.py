@@ -72,15 +72,24 @@ class EphactViewer(Static):
     def close_current(self) -> None:
         """Remove the currently viewed ephact from the stack."""
         agent = self._active_agent
+        idx = self._view_index.get(agent, 0)
+        self.close_at(idx)
+
+    def close_at(self, index: int) -> None:
+        """Remove the ephact at the given index from the stack."""
+        agent = self._active_agent
         stack = self._stacks.get(agent, [])
-        if not stack:
+        if not stack or index < 0 or index >= len(stack):
             return
-        idx = self._view_index.get(agent, len(stack) - 1)
-        stack.pop(idx)
+        stack.pop(index)
         if not stack:
             self.close()
             return
-        self._view_index[agent] = min(idx, len(stack) - 1)
+        cur = self._view_index.get(agent, 0)
+        if cur >= len(stack):
+            self._view_index[agent] = len(stack) - 1
+        elif index < cur:
+            self._view_index[agent] = cur - 1
         self.refresh(layout=True)
 
     def set_active_agent(self, agent: str) -> None:
@@ -133,15 +142,11 @@ class EphactViewer(Static):
         pos = 3  # Panel renders ╭─ (2 chars) + space before title = 3
 
         # ◀ button (backward)
-        if len(stack) > 1:
-            title.append("◀ ", style="bold cyan")
-            regions.append((pos, pos + 2, ("nav", -1)))
-            pos += 2
-        else:
-            title.append("📌 ", style="cyan")
-            pos += 2
+        title.append("◀ ", style="bold cyan")
+        regions.append((pos, pos + 2, ("nav", -1)))
+        pos += 2
 
-        # Tabs
+        # Tabs — each with its own ✕
         for i, e in enumerate(stack):
             label = e.data.title or e.data.type.capitalize()
             if len(label) > 12:
@@ -152,19 +157,16 @@ class EphactViewer(Static):
                 title.append(label, style="cyan")
             regions.append((pos, pos + len(label), ("tab", i)))
             pos += len(label)
+            title.append("✕", style="bold red")
+            regions.append((pos, pos + 1, ("close_one", i)))
+            pos += 1
             if i < len(stack) - 1:
                 title.append("│", style="dim cyan")
                 pos += 1
 
         # ▶ button (forward)
-        if len(stack) > 1:
-            title.append(" ▶", style="bold cyan")
-            regions.append((pos, pos + 2, ("nav", 1)))
-            pos += 2
-
-        # ✕ button (close individual)
-        title.append(" ✕", style="bold red")
-        regions.append((pos, pos + 2, ("close_one",)))
+        title.append(" ▶", style="bold cyan")
+        regions.append((pos, pos + 2, ("nav", 1)))
         pos += 2
 
         self._click_regions = regions
@@ -193,7 +195,7 @@ class EphactViewer(Static):
                         self._view_index[self._active_agent] = action[1]
                         self.refresh(layout=True)
                     elif action[0] == "close_one":
-                        self.close_current()
+                        self.close_at(action[1])
                     return
             # Clicked title bar but missed a region — no-op
             return

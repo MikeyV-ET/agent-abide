@@ -1459,7 +1459,8 @@ class AgentMessage(Static):
         from io import StringIO
         from rich.console import Console
         buf = StringIO()
-        console = Console(file=buf, force_terminal=True, width=120, no_color=False)
+        w = self.size.width - 2 if self.size.width > 10 else 120
+        console = Console(file=buf, force_terminal=True, width=w, no_color=False)
         console.print(RichMarkdown(text), end="")
         ansi = buf.getvalue()
         return Text.from_ansi(ansi)

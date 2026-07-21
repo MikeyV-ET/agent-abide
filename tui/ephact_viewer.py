@@ -161,26 +161,28 @@ class EphactViewer(Static):
             w = len(label) + 1 + (1 if i < len(stack) - 1 else 0)
             tab_labels.append((i, label, w))
 
-        # Ensure active tab is visible in scroll window
+        # Determine scroll position and visible window
         scroll = self._tab_scroll.get(agent, 0)
-        if idx < scroll:
-            scroll = idx
-        # Scroll forward until active tab fits
-        while True:
-            used = sum(w for ti, _, w in tab_labels[scroll:] if ti <= idx)
-            if used <= avail or scroll >= idx:
-                break
-            scroll += 1
-        self._tab_scroll[agent] = scroll
+        scroll = max(0, min(scroll, len(stack) - 1))
 
-        # Determine visible tabs within available width
+        # Calculate visible tabs from scroll position
         visible_end = scroll
         used_width = 0
         for ti, label, w in tab_labels[scroll:]:
-            if used_width + w > avail and ti > idx:
+            if used_width + w > avail:
                 break
             used_width += w
             visible_end = ti + 1
+
+        # If active tab is out of visible window, adjust selection to nearest edge
+        if idx < scroll:
+            self._view_index[agent] = scroll
+            idx = scroll
+        elif idx >= visible_end:
+            self._view_index[agent] = visible_end - 1
+            idx = visible_end - 1
+
+        self._tab_scroll[agent] = scroll
 
         has_left = scroll > 0
         has_right = visible_end < len(stack)
@@ -265,15 +267,8 @@ class EphactViewer(Static):
                 if start <= x < end:
                     if action[0] == "scroll":
                         agent = self._active_agent
-                        stack = self._stacks.get(agent, [])
                         scroll = self._tab_scroll.get(agent, 0)
-                        new_scroll = max(0, min(len(stack) - 1, scroll + action[1]))
-                        self._tab_scroll[agent] = new_scroll
-                        # Select the tab at the scroll edge so auto-scroll doesn't fight
-                        if action[1] < 0 and new_scroll < scroll:
-                            self._view_index[agent] = new_scroll
-                        elif action[1] > 0:
-                            self._view_index[agent] = min(new_scroll + 1, len(stack) - 1)
+                        self._tab_scroll[agent] = max(0, scroll + action[1])
                         self.refresh(layout=True)
                     elif action[0] == "tab":
                         self._view_index[self._active_agent] = action[1]

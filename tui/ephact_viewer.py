@@ -46,6 +46,8 @@ class EphactViewer(Static):
         self._closed_by_user: set[str] = set()
         # Click regions for title bar: [(start_x, end_x, action), ...]
         self._click_regions: list[tuple[int, int, object]] = []
+        # Tab scroll offset per agent (first visible tab index)
+        self._tab_scroll: dict[str, int] = {}
 
     def push(self, agent: str, ephact: EphactData) -> None:
         """Add a new ephact to an agent's stack. Shows viewer only if agent is active."""
@@ -141,38 +143,77 @@ class EphactViewer(Static):
         title = f"📌 {title_text}"
 
         # Bottom subtitle: ◀ Tab1✕│Tab2✕ ▶ (clickable tab bar)
+        # Scrollable — ◀/▶ shift the visible tab window
         subtitle = Text()
         regions: list[tuple[int, int, object]] = []
-        # Store y-offset for bottom border — set during on_click via self.size.height - 1
-        self._tab_bar_y = -1  # sentinel, resolved at click time
-        pos = 3  # Panel renders ╰─ (2 chars) + space before subtitle = 3
+        pos = 3  # Panel border: ╰─ + space = 3
 
-        # ◀ button (backward)
-        subtitle.append("◀ ", style="bold cyan")
-        regions.append((pos, pos + 2, ("nav", -1)))
-        pos += 2
+        # Available width for tabs (subtract borders + ◀ + ▶ + padding)
+        avail = (self.size.width - 10) if self.size.width > 20 else 40
 
-        # Tabs — each with its own ✕
+        # Build tab labels with widths
+        tab_labels = []
         for i, e in enumerate(stack):
             label = e.data.title or e.data.type.capitalize()
             if len(label) > 12:
                 label = label[:11] + "…"
-            if i == idx:
+            # width = label + ✕ + separator (│)
+            w = len(label) + 1 + (1 if i < len(stack) - 1 else 0)
+            tab_labels.append((i, label, w))
+
+        # Ensure active tab is visible in scroll window
+        scroll = self._tab_scroll.get(agent, 0)
+        if idx < scroll:
+            scroll = idx
+        # Scroll forward until active tab fits
+        while True:
+            used = sum(w for ti, _, w in tab_labels[scroll:] if ti <= idx)
+            if used <= avail or scroll >= idx:
+                break
+            scroll += 1
+        self._tab_scroll[agent] = scroll
+
+        # Determine visible tabs within available width
+        visible_end = scroll
+        used_width = 0
+        for ti, label, w in tab_labels[scroll:]:
+            if used_width + w > avail and ti > idx:
+                break
+            used_width += w
+            visible_end = ti + 1
+
+        has_left = scroll > 0
+        has_right = visible_end < len(stack)
+
+        # ◀ button (scroll tabs left)
+        if has_left:
+            subtitle.append("◀ ", style="bold cyan")
+            regions.append((pos, pos + 2, ("scroll", -1)))
+        else:
+            subtitle.append("  ", style="dim")
+        pos += 2
+
+        # Visible tabs — each with its own ✕
+        for ti, label, w in tab_labels[scroll:visible_end]:
+            if ti == idx:
                 subtitle.append(label, style="bold white on blue")
             else:
                 subtitle.append(label, style="cyan")
-            regions.append((pos, pos + len(label), ("tab", i)))
+            regions.append((pos, pos + len(label), ("tab", ti)))
             pos += len(label)
             subtitle.append("✕", style="bold red")
-            regions.append((pos, pos + 1, ("close_one", i)))
+            regions.append((pos, pos + 1, ("close_one", ti)))
             pos += 1
-            if i < len(stack) - 1:
+            if ti < visible_end - 1:
                 subtitle.append("│", style="dim cyan")
                 pos += 1
 
-        # ▶ button (forward)
-        subtitle.append(" ▶", style="bold cyan")
-        regions.append((pos, pos + 2, ("nav", 1)))
+        # ▶ button (scroll tabs right)
+        if has_right:
+            subtitle.append(" ▶", style="bold cyan")
+            regions.append((pos, pos + 2, ("scroll", 1)))
+        else:
+            subtitle.append("  ", style="dim")
         pos += 2
 
         self._click_regions = regions
@@ -222,8 +263,11 @@ class EphactViewer(Static):
             x = event.x
             for start, end, action in self._click_regions:
                 if start <= x < end:
-                    if action[0] == "nav":
-                        self.navigate(action[1])
+                    if action[0] == "scroll":
+                        agent = self._active_agent
+                        scroll = self._tab_scroll.get(agent, 0)
+                        self._tab_scroll[agent] = max(0, scroll + action[1])
+                        self.refresh(layout=True)
                     elif action[0] == "tab":
                         self._view_index[self._active_agent] = action[1]
                         self.refresh(layout=True)

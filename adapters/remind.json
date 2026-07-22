@@ -1,7 +1,7 @@
 {
   "name": "remind",
-  "pid": 3499,
-  "started": 1783961850.3382545,
+  "pid": 323197,
+  "started": 1784738695.4062283,
   "capabilities": [
     "remind"
   ],
@@ -18,5 +18,5 @@
       "remind"
     ]
   },
-  "heartbeat": 1784036552.438299
+  "heartbeat": 1784739087.0981245
 }

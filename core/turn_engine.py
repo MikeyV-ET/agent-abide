@@ -431,7 +431,7 @@ class TurnEngine:
                     self.next_turn_delay = float(dv)
                     self.delay_until_event = False
                 ptr.agent_wrote_delay = True
-            elif pa in ("compact", "gaze", "awareness"):
+            elif pa in ("compact", "gaze", "awareness", "reasoning_effort"):
                 requeue.append(pc)
 
         if requeue:
@@ -472,7 +472,7 @@ class TurnEngine:
                     ptr.agent_wrote_delay = True
                 elif la == "ack":
                     ack_doorbells(agent_name, lc.get("handled", []), env=self.env)
-                elif la in ("compact", "gaze", "awareness"):
+                elif la in ("compact", "gaze", "awareness", "reasoning_effort"):
                     requeue.append(lc)
             if late_cmds:
                 print(f"[asdaaas] Late command poll: {len(late_cmds)} command(s)")

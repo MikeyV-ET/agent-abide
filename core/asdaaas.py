@@ -347,7 +347,8 @@ def get_compaction_instructions(agent_name, env=None):
         return DEFAULT_COMPACTION_INSTRUCTIONS
 
 
-def context_left_tag(total_tokens, context_window, turns_since_compaction=None, gaze=None):
+def context_left_tag(total_tokens, context_window, turns_since_compaction=None, gaze=None,
+                     reasoning_effort_info=None):
     """Format a compact context-remaining tag for prompt injection.
     
     Reports tokens remaining before compaction (85% of context_window),
@@ -382,6 +383,13 @@ def context_left_tag(total_tokens, context_window, turns_since_compaction=None, 
         else:
             parts.append("compaction available")
     
+    if reasoning_effort_info:
+        level, remaining = reasoning_effort_info
+        if remaining <= 2:
+            parts.append(f"reasoning:{level} ({remaining} turn{'s' if remaining != 1 else ''} left, send reasoning_effort to renew)")
+        else:
+            parts.append(f"reasoning:{level}")
+
     if gaze is not None:
         parts.append(gaze_label(gaze))
     
@@ -2173,6 +2181,11 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     delay_until_event = False  # if True, skip default doorbell entirely (wait for external)
     delay_text = None           # optional text payload from delay command, delivered on next continue
     did_work_this_iteration = False  # track if any work was done this loop iteration
+
+    # ---- Reasoning effort state ----
+    REASONING_EFFORT_TURN_LIMIT = 5
+    reasoning_effort_turns_remaining = None  # None = no elevated level active
+    reasoning_effort_default = agent_reasoning_effort  # configured default from agents.json
     consecutive_empty_doorbell = 0  # count consecutive empty doorbell responses (for backoff)
     last_delivered_bell_ids = set()  # bells delivered on previous iteration — skip on next poll (issue_0039)
 
@@ -2322,21 +2335,30 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                 elif action == "reasoning_effort":
                     # Change reasoning effort level mid-session.
-                    # Restarts the backend with the new level, resuming the same session.
                     # Usage: {"action": "reasoning_effort", "level": "xhigh"}
                     # Levels: low, medium, high, xhigh
+                    # Renewal: if already at requested level, just resets the turn counter.
                     new_level = cmd.get("level", "")
+                    turns = cmd.get("turns", REASONING_EFFORT_TURN_LIMIT)
                     valid_levels = ("low", "medium", "high", "xhigh")
                     if new_level in valid_levels:
-                        old_level = backend._start_kwargs.get("reasoning_effort") or "default"
-                        backend._start_kwargs["reasoning_effort"] = new_level
-                        print(f"[asdaaas] REASONING EFFORT: {old_level} -> {new_level}, restarting backend...")
-                        try:
-                            sid = await backend.cancel_and_restart(agent_cwd)
-                            print(f"[asdaaas] Backend restarted with reasoning_effort={new_level} (session {sid[:12]})")
-                        except Exception as e:
-                            print(f"[asdaaas] ERROR restarting backend: {e}")
-                            backend._start_kwargs["reasoning_effort"] = old_level if old_level != "default" else None
+                        current_level = backend._start_kwargs.get("reasoning_effort") or reasoning_effort_default
+                        if current_level == new_level:
+                            # Renewal — same level, just reset counter, no restart
+                            reasoning_effort_turns_remaining = int(turns)
+                            print(f"[asdaaas] REASONING EFFORT: renewed {new_level} for {turns} turns")
+                        else:
+                            # Level change — restart backend
+                            old_level = current_level or "default"
+                            backend._start_kwargs["reasoning_effort"] = new_level
+                            print(f"[asdaaas] REASONING EFFORT: {old_level} -> {new_level}, restarting backend...")
+                            try:
+                                sid = await backend.cancel_and_restart(agent_cwd)
+                                reasoning_effort_turns_remaining = int(turns)
+                                print(f"[asdaaas] Backend restarted with reasoning_effort={new_level} for {turns} turns (session {sid[:12]})")
+                            except Exception as e:
+                                print(f"[asdaaas] ERROR restarting backend: {e}")
+                                backend._start_kwargs["reasoning_effort"] = old_level if old_level != "default" else None
                     else:
                         print(f"[asdaaas] REASONING EFFORT: invalid level '{new_level}' (valid: {valid_levels})")
 
@@ -2403,6 +2425,13 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 continue
 
             # ==== 4. COALESCED DELIVERY: doorbells + in-room messages ====
+            # Set reasoning effort info for context tag
+            if reasoning_effort_turns_remaining is not None:
+                current_re = backend._start_kwargs.get("reasoning_effort") or "default"
+                engine.reasoning_effort_info = (current_re, reasoning_effort_turns_remaining)
+            else:
+                engine.reasoning_effort_info = None
+
             # Extracted to TurnEngine.deliver_turn() (S4 decomposition)
             deliver_result = await engine.deliver_turn(
                 gathered,
@@ -2438,6 +2467,25 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 gaze = engine.gaze
                 total_tokens = engine.total_tokens
                 agent_wrote_delay = post_result.agent_wrote_delay
+
+                # ---- Reasoning effort countdown ----
+                if reasoning_effort_turns_remaining is not None:
+                    reasoning_effort_turns_remaining -= 1
+                    current_level = backend._start_kwargs.get("reasoning_effort") or "default"
+                    if reasoning_effort_turns_remaining <= 0:
+                        # Auto-revert to default
+                        revert_to = reasoning_effort_default or "medium"
+                        if current_level != revert_to:
+                            backend._start_kwargs["reasoning_effort"] = revert_to
+                            print(f"[asdaaas] REASONING EFFORT: expired, reverting {current_level} -> {revert_to}, restarting backend...")
+                            try:
+                                sid = await backend.cancel_and_restart(agent_cwd)
+                                print(f"[asdaaas] Backend restarted with reasoning_effort={revert_to} (session {sid[:12]})")
+                            except Exception as e:
+                                print(f"[asdaaas] ERROR reverting reasoning effort: {e}")
+                        reasoning_effort_turns_remaining = None
+                    else:
+                        print(f"[asdaaas] REASONING EFFORT: {current_level}, {reasoning_effort_turns_remaining} turns remaining")
 
             # ==== 5. Background doorbell messages (separate delivery) ====
             # Extracted to TurnEngine.deliver_background_doorbells() (S4)

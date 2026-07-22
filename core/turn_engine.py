@@ -112,6 +112,9 @@ class TurnEngine:
         self.compact_pending = None
         self.compact_pending_turns: int = 0
 
+        # Reasoning effort (set by main loop, passed to context_left_tag)
+        self.reasoning_effort_info: Optional[tuple] = None  # (level, turns_remaining) or None
+
     def agent_dir(self) -> Path:
         """Per-agent asdaaas directory."""
         return self.env.agents_home / self.agent_name / "asdaaas"
@@ -299,7 +302,8 @@ class TurnEngine:
         self.gaze = read_gaze(agent_name, env=self.env)
         prompt_text = "\n".join(prompt_parts) + context_left_tag(
             self.total_tokens, self.context_window,
-            self.turns_since_compaction, gaze=self.gaze)
+            self.turns_since_compaction, gaze=self.gaze,
+            reasoning_effort_info=self.reasoning_effort_info)
 
         has_bells = bool(bells)
         has_msgs = bool(in_room_msgs)

@@ -481,17 +481,14 @@ class GrokBackend(AgentBackend):
         """Change reasoning effort in-place via session/set_model.
 
         Sends the current model ID with a new reasoningEffort in _meta.
-        Expects two JSON-RPC frames back: a response and a notification
-        with sessionUpdate: model_changed confirming the new level.
+        The binary sends a response and a model_changed notification on
+        stdout, both consumed by _process_stdout (fire-and-forget).
         """
         await self._send(self._rpc_request("session/set_model", {
             "sessionId": self._session_id,
             "modelId": self._model_id,
             "_meta": {"reasoningEffort": level},
         }))
-        resp = await self._wait_for_response(self._rpc_id, timeout=10)
-        if "error" in resp:
-            raise RuntimeError(f"set_model failed: {resp['error']}")
 
     async def _wait_for_receipt(self, timeout: float = 300.0):
         """Wait for user_message_chunk in updates.jsonl confirming receipt.

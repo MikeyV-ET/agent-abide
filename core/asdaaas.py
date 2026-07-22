@@ -2320,6 +2320,26 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     else:
                         print(f"[asdaaas] GAZE: invalid command: {cmd}")
 
+                elif action == "reasoning_effort":
+                    # Change reasoning effort level mid-session.
+                    # Restarts the backend with the new level, resuming the same session.
+                    # Usage: {"action": "reasoning_effort", "level": "xhigh"}
+                    # Levels: low, medium, high, xhigh
+                    new_level = cmd.get("level", "")
+                    valid_levels = ("low", "medium", "high", "xhigh")
+                    if new_level in valid_levels:
+                        old_level = backend._start_kwargs.get("reasoning_effort") or "default"
+                        backend._start_kwargs["reasoning_effort"] = new_level
+                        print(f"[asdaaas] REASONING EFFORT: {old_level} -> {new_level}, restarting backend...")
+                        try:
+                            sid = await backend.cancel_and_restart(agent_cwd)
+                            print(f"[asdaaas] Backend restarted with reasoning_effort={new_level} (session {sid[:12]})")
+                        except Exception as e:
+                            print(f"[asdaaas] ERROR restarting backend: {e}")
+                            backend._start_kwargs["reasoning_effort"] = old_level if old_level != "default" else None
+                    else:
+                        print(f"[asdaaas] REASONING EFFORT: invalid level '{new_level}' (valid: {valid_levels})")
+
                 elif action == "awareness":
                     # Modify awareness config. Reads current, applies change, writes back.
                     # Usage: {"action": "awareness", "add": "#meetingroom1", "mode": "doorbell"}

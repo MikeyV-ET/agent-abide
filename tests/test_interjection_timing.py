@@ -202,11 +202,11 @@ class TestInterjectionTiming:
         )
 
     @pytest.mark.asyncio
-    async def test_watcher_error_doesnt_crash_silently(self, agent_home, monkeypatch):
-        """If the watcher's poll_fn throws, it should not die silently.
+    async def test_watcher_survives_poll_error(self, agent_home, monkeypatch):
+        """Watcher must survive poll_fn exceptions and keep polling.
 
-        Current code only catches CancelledError. Any other exception kills
-        the watcher task without logging — messages never get queued.
+        Regression test for 122ea97: poll_fn throwing OSError on call #2
+        should not kill the watcher. It should log the error and continue.
         """
         monkeypatch.setattr(Path, 'home', lambda: agent_home)
 
@@ -223,19 +223,21 @@ class TestInterjectionTiming:
 
         await asyncio.sleep(0.25)
 
-        # Check: is the watcher still alive after the error?
-        assert watcher.done(), (
-            "Watcher should have died from unhandled OSError"
+        # Watcher must still be alive after the error
+        assert not watcher.done(), (
+            "Watcher died after poll error — should catch and continue"
         )
 
-        # The watcher died — this is the bug. It should have caught the error
-        # and continued polling (or at least logged it).
-        # This test documents the current behavior; the fix would be to add
-        # exception handling around the poll loop body.
-        exc = watcher.exception()
-        assert isinstance(exc, OSError), (
-            f"Watcher should have died with OSError, got: {exc}"
+        # poll_fn was called more than twice (survived the error on call #2)
+        assert call_count[0] > 2, (
+            f"Watcher only polled {call_count[0]} times — stopped after error"
         )
+
+        watcher.cancel()
+        try:
+            await watcher
+        except asyncio.CancelledError:
+            pass
 
     @pytest.mark.asyncio
     async def test_message_after_all_tool_calls_goes_to_drain(self, agent_home, monkeypatch):

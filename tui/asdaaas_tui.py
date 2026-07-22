@@ -57,7 +57,34 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 from rich.table import Table
-from rich.console import Group
+from rich.console import Console as RichConsole, Group
+
+from ephact_parser import extract_ephacts, has_partial_ephact
+from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
+
+
+def _flatten_to_text(renderable, width: int = 120) -> Text:
+    """Render a Rich renderable through Console, return as Text for native selectability.
+
+    Strips trailing whitespace on lines without background color."""
+    from io import StringIO
+    from rich.style import Style as RichStyle
+    buf = StringIO()
+    console = RichConsole(file=buf, force_terminal=True, width=width, no_color=False)
+    console.print(renderable, end="")
+    result = Text.from_ansi(buf.getvalue())
+    lines = result.split("\n")
+    for line in lines:
+        plain = line.plain
+        stripped_len = len(plain.rstrip())
+        if stripped_len < len(plain):
+            has_bg = any(
+                end > stripped_len and RichStyle.parse(str(s)).bgcolor
+                for start, end, s in line._spans
+            )
+            if not has_bg:
+                line.rstrip()
+    return Text("\n").join(lines)
 
 
 # =============================================================================
@@ -315,15 +342,23 @@ class Config:
         agent_path = cls.agent_dir()
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
-        if session_dir.exists():
-            # Find the session subdirectory (UUID)
-            subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
-            if subdirs:
-                # Use the most recent one
-                latest = max(subdirs, key=lambda d: d.stat().st_mtime)
-                updates = latest / "updates.jsonl"
-                if updates.exists():
-                    return updates
+        if not session_dir.exists():
+            return None
+        # Prefer session ID from agents.json over mtime guess
+        cfg = cls.load_agents_cfg()
+        agent_cfg = cfg.get("agents", {}).get(cls.AGENT_NAME, {})
+        sid = agent_cfg.get("session")
+        if sid:
+            updates = session_dir / sid / "updates.jsonl"
+            if updates.exists():
+                return updates
+        # Fallback: most recent subdir (may pick subagent sessions)
+        subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
+        if subdirs:
+            latest = max(subdirs, key=lambda d: d.stat().st_mtime)
+            updates = latest / "updates.jsonl"
+            if updates.exists():
+                return updates
         return None
 
     @classmethod
@@ -333,13 +368,21 @@ class Config:
         agent_path = cls.agent_dir()
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
-        if session_dir.exists():
-            subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
-            if subdirs:
-                latest = max(subdirs, key=lambda d: d.stat().st_mtime)
-                signals = latest / "signals.json"
-                if signals.exists():
-                    return signals
+        if not session_dir.exists():
+            return None
+        cfg = cls.load_agents_cfg()
+        agent_cfg = cfg.get("agents", {}).get(cls.AGENT_NAME, {})
+        sid = agent_cfg.get("session")
+        if sid:
+            signals = session_dir / sid / "signals.json"
+            if signals.exists():
+                return signals
+        subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
+        if subdirs:
+            latest = max(subdirs, key=lambda d: d.stat().st_mtime)
+            signals = latest / "signals.json"
+            if signals.exists():
+                return signals
         return None
 
 
@@ -852,6 +895,8 @@ class MessageInput(TextArea):
     def _on_key(self, event) -> None:
         """Handle input keys. Ctrl+E toggles mode. Mode determines Enter vs Ctrl+J behavior."""
         # Pass Home/End/PageUp/PageDown to the app for scroll/history actions
+        if event.key in ("f3", "f5", "f6"):
+            return  # Let these bubble to app-level bindings
         if event.key in ("home", "end", "pageup", "pagedown"):
             event.prevent_default()
             event.stop()
@@ -1022,28 +1067,40 @@ class ToolCallPanel(Static):
 
         title = f"{kind_icon} {self.tool_title} {status_icon}"
 
-        # Collapsed: single line with hint
+        # Set CSS border dynamically based on status
+        from textual.color import Color as TextualColor
+        try:
+            color = TextualColor.parse(border_style)
+        except Exception:
+            color = TextualColor.parse("blue")
+
+        # Collapsed: no border, single line
         if self._collapsed:
+            self.styles.border = ("none", color)
+            self.styles.padding = (0, 0)
+            self.border_title = ""
             text = Text()
             text.append(f"  {title}", style=border_style)
             if self.tool_output:
                 text.append("  ▸ click to expand", style=Theme.DARK4)
             return text
 
-        # Expanded: full panel
+        # Expanded: CSS border + content as Text
+        self.styles.border = ("round", color)
+        self.styles.padding = (0, 1)
+        self.border_title = title
+
         if self.tool_output:
             output = self.tool_output
             lines = output.split("\n")
             is_active = self.tool_status not in ("completed", "failed")
 
             if is_active and len(lines) > self.MAX_ACTIVE_LINES:
-                # Active panel: show last MAX lines with "click for more"
                 display = "\n".join(lines[-self.MAX_ACTIVE_LINES:])
                 header = f"... ({len(lines) - self.MAX_ACTIVE_LINES} more lines above, click to expand) ...\n"
                 content = Text(header, style=Theme.DARK4)
                 content.append(display, style=Theme.GRAY)
             elif not is_active and len(output) > 2000:
-                # Completed: truncate middle
                 display = output[:1000] + "\n... (truncated) ...\n" + output[-500:]
                 content = Text(display, style=Theme.GRAY)
             else:
@@ -1051,13 +1108,7 @@ class ToolCallPanel(Static):
         else:
             content = Text("(no output)", style=f"italic {Theme.DARK4}")
 
-        return Panel(
-            content,
-            title=title,
-            title_align="left",
-            border_style=border_style,
-            padding=(0, 1),
-        )
+        return content
 
 
 class PlanPanel(Static):
@@ -1413,8 +1464,29 @@ class AgentMessage(Static):
             return f"\n> 🔔 **[interjection]**\n{quoted}\n"
         return re.sub(r"<interjection>\n?(.*?)</interjection>", _repl, text, flags=re.DOTALL)
 
-    def render(self) -> RichMarkdown:
-        return RichMarkdown(self._format_interjections(self._text))
+    @staticmethod
+    def _format_ephacts(text: str) -> str:
+        """Replace <ephact> blocks with visible markdown blockquotes so they render inline."""
+        import re
+        if "<ephact" not in text:
+            return text
+        def _repl(m):
+            etype = m.group(1)
+            title = m.group(2)
+            body = m.group(3).strip()
+            label = f"📌 {title}" if title else f"📌 {etype}"
+            lines = body.split("\n")
+            quoted = "\n".join(f"> {line}" for line in lines)
+            return f"\n> **{label}**\n{quoted}\n"
+        return re.sub(
+            r'<ephact\s+type=["\'](\w+)["\'](?:\s+title=["\']([^"\']*)["\'])?\s*>(.*?)</ephact>',
+            _repl, text, flags=re.DOTALL)
+
+    def render(self):
+        text = self._format_interjections(self._text)
+        text = self._format_ephacts(text)
+        w = self.size.width - 2 if self.size.width > 10 else 120
+        return _flatten_to_text(RichMarkdown(text), width=w)
 
 
 class ThinkingBlock(Static):
@@ -1442,7 +1514,7 @@ class ThinkingBlock(Static):
         self._expanded = not self._expanded
         self.refresh(layout=True)
 
-    def render(self) -> Panel:
+    def render(self):
         text = self._text
         lines = text.split("\n")
         total = len(lines)
@@ -1466,13 +1538,8 @@ class ThinkingBlock(Static):
         if self._expanded and total > self.TRUNCATE_THRESHOLD:
             title_str += " [expanded — click to collapse]"
 
-        return Panel(
-            Text(display, style=Theme.DARK4),
-            title=title_str,
-            title_align="left",
-            border_style=Theme.DARK3,
-            padding=(0, 1),
-        )
+        self.border_title = title_str
+        return Text(display, style=Theme.DARK4)
 
 
 class InterjectionBlock(Static):
@@ -1482,14 +1549,9 @@ class InterjectionBlock(Static):
         super().__init__(**kwargs)
         self._message = message
 
-    def render(self) -> Panel:
-        return Panel(
-            Text(self._message, style=Theme.BR_ORANGE),
-            title="🔔 Interjection",
-            title_align="left",
-            border_style=Theme.BR_ORANGE,
-            padding=(0, 1),
-        )
+    def render(self):
+        self.border_title = "🔔 Interjection"
+        return Text(self._message, style=Theme.BR_ORANGE)
 
 
 # =============================================================================
@@ -1788,12 +1850,30 @@ class AsdaaasTUI(App):
 
     ThinkingBlock {
         margin: 0 0 0 2;
+        border: round $accent-muted;
+        padding: 0 1;
+        border-title-align: left;
+    }
+
+    InterjectionBlock {
+        border: round $warning;
+        padding: 0 1;
+        border-title-align: left;
     }
 
     SystemAlert {
         margin: 0 0 0 0;
         height: auto;
     }
+
+    #ephact-viewer {
+        height: auto;
+        max-height: 50%;
+        margin: 0 0 0 0;
+        overflow-y: auto;
+    }
+
+
     """
 
     BINDINGS = [
@@ -1804,11 +1884,16 @@ class AsdaaasTUI(App):
         Binding("ctrl+t", "toggle_theme_selector", "Theme", show=True),
         Binding("escape", "dismiss_overlay", "Dismiss", show=False),
         Binding("f1", "toggle_thinking", "Toggle Thinking", show=True),
+        Binding("f3", "close_ephact", "Artifact", show=True, priority=True),
+        Binding("f5", "ephact_prev", "◀ Artifact", show=False, priority=True),
+        Binding("f6", "ephact_next", "Artifact ▶", show=False, priority=True),
+
         Binding("end", "scroll_bottom", "Bottom", show=False),
         Binding("home", "scroll_top", "Top", show=False, priority=True),
         Binding("pageup", "load_history", "Load History", show=False, priority=True),
         Binding("ctrl+n", "next_agent", "Next Agent", show=False),
         Binding("f2", "show_persistence", "Persistence", show=True),
+        Binding("f7", "toggle_copy_mode", "Copy Mode", show=True),
     ]
 
     def __init__(self, agents: list[str] = None, **kwargs):
@@ -1904,6 +1989,10 @@ class AsdaaasTUI(App):
         room_vs = ContentScroll(id="content-room")
         room_vs.display = False
         yield room_vs
+        # Ephemeral artifact viewer — between chat and input for visual proximity
+        viewer = EphactViewer(id="ephact-viewer")
+        viewer.display = False
+        yield viewer
         with Vertical(id="bottom-bar"):
             yield MessageInput(placeholder=f"Message {Config.AGENT_NAME}...", id="input-bar")
             yield DynamicFooter(id="dynamic-footer")
@@ -1945,6 +2034,11 @@ class AsdaaasTUI(App):
 
     def _start_workers(self) -> None:
         """Start background workers and initialize UI."""
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            viewer.set_active_agent(self._active_agent)
+        except NoMatches:
+            pass
         # Start the status poller
         self.status_worker = self.run_worker(
             self._poll_status, thread=True, name="status_poller"
@@ -2498,7 +2592,10 @@ Type anything else to send a message to the agent.
             pass
 
     def action_dismiss_overlay(self) -> None:
-        """Dismiss any open overlay, or focus input."""
+        """Dismiss any open overlay, exit copy mode, or focus input."""
+        if getattr(self, '_copy_mode', False):
+            self.action_toggle_copy_mode()
+            return
         try:
             selector = self.query_one("#gaze-selector", GazeSelector)
             if selector.display:
@@ -2523,7 +2620,47 @@ Type anything else to send a message to the agent.
                 return
         except NoMatches:
             pass
+        # Close ephact viewer if open
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            if viewer.display:
+                viewer.close()
+                self.query_one("#input-bar", MessageInput).focus()
+                return
+        except NoMatches:
+            pass
         self.query_one("#input-bar", MessageInput).focus()
+
+    def action_close_ephact(self) -> None:
+        """Toggle the ephact viewer panel (show/hide)."""
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            if viewer.display:
+                viewer.close()
+            elif viewer.has_content:
+                viewer._visible = True
+                viewer.display = True
+                viewer.refresh(layout=True)
+        except NoMatches:
+            pass
+
+    def action_ephact_prev(self) -> None:
+        """Navigate to older ephact in the stack."""
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            if viewer.display:
+                viewer.navigate(-1)
+        except NoMatches:
+            pass
+
+    def action_ephact_next(self) -> None:
+        """Navigate to newer ephact in the stack."""
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            if viewer.display:
+                viewer.navigate(1)
+        except NoMatches:
+            pass
 
     def action_interrupt_agent(self) -> None:
         """Send an interrupt to the active agent (like Ctrl+C in grok TUI)."""
@@ -2591,6 +2728,13 @@ Type anything else to send a message to the agent.
         try:
             tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
             tab_bar.active_agent = agent_name
+        except NoMatches:
+            pass
+
+        # Switch ephact viewer to new agent's stack
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            viewer.set_active_agent(agent_name)
         except NoMatches:
             pass
 
@@ -2859,6 +3003,19 @@ Type anything else to send a message to the agent.
 
     
 
+    def action_toggle_copy_mode(self) -> None:
+        """Toggle copy mode: disables mouse capture so terminal handles text selection."""
+        self._copy_mode = not getattr(self, '_copy_mode', False)
+        driver = self._driver
+        if driver is None:
+            return
+        if self._copy_mode:
+            driver._disable_mouse_support()
+            self.notify("Copy mode ON — select text normally, F7 to exit", severity="information")
+        else:
+            driver._enable_mouse_support()
+            self.notify("Copy mode OFF — mouse scrolling restored", severity="information")
+
     def action_show_persistence(self) -> None:
         """Show persistence management panel for the active agent."""
         agent_dir = Path.home() / "agents" / self._active_agent
@@ -3009,10 +3166,22 @@ Type anything else to send a message to the agent.
                     encoded = str(agent_dir).replace("/", "%2F")
                     session_dir = sessions_root / encoded
                     if session_dir.exists():
-                        subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
-                        if subdirs:
-                            latest = max(subdirs, key=lambda d: d.stat().st_mtime)
-                            signals_path = latest / "signals.json"
+                        cfg = Config.load_agents_cfg()
+                        agent_cfg = cfg.get("agents", {}).get(active, {})
+                        sid = agent_cfg.get("session")
+                        signals_path = None
+                        if sid:
+                            sp = session_dir / sid / "signals.json"
+                            if sp.exists():
+                                signals_path = sp
+                        if signals_path is None:
+                            subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
+                            if subdirs:
+                                latest = max(subdirs, key=lambda d: d.stat().st_mtime)
+                                sp = latest / "signals.json"
+                                if sp.exists():
+                                    signals_path = sp
+                        if signals_path is not None:
                             if signals_path.exists():
                                 with open(signals_path) as f:
                                     signals = json.load(f)
@@ -3043,29 +3212,22 @@ Type anything else to send a message to the agent.
                 except Exception:
                     pass
 
-                # Read compaction state
+                # Read compaction state from binary_state.json (hook-written)
                 try:
-                    compact_path = asdaaas_dir / "compaction_state.json"
-                    if compact_path.exists():
-                        with open(compact_path) as f:
-                            cstate = json.load(f)
+                    bstate_path = asdaaas_dir / "binary_state.json"
+                    if bstate_path.exists():
+                        with open(bstate_path) as f:
+                            bstate = json.load(f)
+                        cstate = bstate.get("compaction", {})
                         phase = cstate.get("phase", "")
                         # Auto-hide complete phase after 2 minutes
                         if phase == "complete":
-                            last_done = cstate.get("last_completed") or cstate.get("ts", 0)
+                            last_done = cstate.get("completed_at", 0)
                             if time.time() - last_done > 120:
                                 phase = ""
-                        # Build detail string for token savings
-                        detail = ""
-                        if phase == "complete" and cstate.get("tokens_before") and cstate.get("tokens_after"):
-                            saved = cstate["tokens_before"] - cstate["tokens_after"]
-                            if saved > 0:
-                                detail = f"-{round(saved / 1000)}k"
                         self.call_from_thread(setattr, header, "compaction_phase", phase)
-                        self.call_from_thread(setattr, header, "compaction_detail", detail)
                     else:
                         self.call_from_thread(setattr, header, "compaction_phase", "")
-                        self.call_from_thread(setattr, header, "compaction_detail", "")
                 except Exception:
                     pass
 
@@ -3248,13 +3410,21 @@ Type anything else to send a message to the agent.
         agent_path = Config.agent_home(agent_name)
         encoded = str(agent_path).replace("/", "%2F")
         session_dir = sessions_root / encoded
-        if session_dir.exists():
-            subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
-            if subdirs:
-                latest = max(subdirs, key=lambda d: d.stat().st_mtime)
-                updates = latest / "updates.jsonl"
-                if updates.exists():
-                    return updates
+        if not session_dir.exists():
+            return None
+        cfg = Config.load_agents_cfg()
+        agent_cfg = cfg.get("agents", {}).get(agent_name, {})
+        sid = agent_cfg.get("session")
+        if sid:
+            updates = session_dir / sid / "updates.jsonl"
+            if updates.exists():
+                return updates
+        subdirs = [d for d in session_dir.iterdir() if d.is_dir()]
+        if subdirs:
+            latest = max(subdirs, key=lambda d: d.stat().st_mtime)
+            updates = latest / "updates.jsonl"
+            if updates.exists():
+                return updates
         return None
 
     def _tail_updates_for_agent(self, agent_name: str) -> None:
@@ -3616,6 +3786,25 @@ Type anything else to send a message to the agent.
             content.refresh(layout=True)
 
         self._current_agent_msg.append_chunk(text)
+
+        # Check for complete ephact tags — collect to viewer but leave in chat
+        full_text = self._current_agent_msg.full_text
+        _, ephacts = extract_ephacts(full_text)
+        # Track pushed count to avoid duplicates on subsequent chunks
+        already_pushed = getattr(self._current_agent_msg, '_ephact_count', 0)
+        new_ephacts = ephacts[already_pushed:]
+        if new_ephacts:
+            self._current_agent_msg._ephact_count = len(ephacts)
+            try:
+                viewer = self.query_one("#ephact-viewer", EphactViewer)
+                for eph in new_ephacts:
+                    viewer.push(self._active_agent, eph)
+                    entry = EphactEntry(data=eph, agent=self._active_agent)
+                    archive_ephact(self._active_agent, entry)
+                    self._debug(f"EPHACT type={eph.type} title={eph.title} agent={self._active_agent}")
+            except NoMatches:
+                pass
+
         self._debug(f"MSG_CHUNK len={len(text)} total={len(self._current_agent_msg._text)} new_widget={was_none}")
         self._scroll_to_bottom()
 
@@ -3764,7 +3953,7 @@ Type anything else to send a message to the agent.
         elif hasattr(self, "_last_event_ts") and self._last_event_ts:
             ts_str = datetime.datetime.fromtimestamp(
                 self._last_event_ts
-            ).strftime("%H:%M:%S")
+            ).strftime("%a %b %d %H:%M:%S")
 
         # End current agent message block
         self._current_agent_msg = None
@@ -3905,6 +4094,14 @@ Type anything else to send a message to the agent.
                         if event_type == "agent_message_chunk":
                             text = update.get("content", {}).get("text", "")
                             if text:
+                                cleaned, ephacts = extract_ephacts(text)
+                                if ephacts:
+                                    try:
+                                        viewer = self.query_one("#ephact-viewer", EphactViewer)
+                                        for eph in ephacts:
+                                            viewer.push(agent_name, eph)
+                                    except NoMatches:
+                                        pass
                                 msg = AgentMessage()
                                 msg._text = text
                                 msg._chunks = [text]

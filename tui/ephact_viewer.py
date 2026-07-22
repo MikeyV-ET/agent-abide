@@ -1,0 +1,325 @@
+"""
+Ephemeral Artifact Viewer widget for the TUI.
+
+Displays pinned content from <ephact> tags in agent speech.
+Per-agent artifact stacks with history navigation.
+"""
+
+import json
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+from textual.containers import Vertical
+from textual.reactive import reactive
+from textual.widget import Widget
+from textual.widgets import Static
+
+from rich.markdown import Markdown as RichMarkdown
+from rich.panel import Panel
+from rich.text import Text
+
+from ephact_parser import EphactData
+
+
+@dataclass
+class EphactEntry:
+    """An ephact with metadata for the stack."""
+    data: EphactData
+    agent: str
+    timestamp: float = field(default_factory=time.time)
+
+
+class EphactViewer(Static):
+    """Pinned artifact viewer. Shows current ephact with navigation."""
+
+    _visible = reactive(False)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Per-agent stacks: agent_name -> list of EphactEntry
+        self._stacks: dict[str, list[EphactEntry]] = {}
+        # Current view index per agent (0 = most recent)
+        self._view_index: dict[str, int] = {}
+        self._active_agent: str = ""
+        self._closed_by_user: set[str] = set()
+        # Click regions for title bar: [(start_x, end_x, action), ...]
+        self._click_regions: list[tuple[int, int, object]] = []
+        # Tab scroll offset per agent (first visible tab index)
+        self._tab_scroll: dict[str, int] = {}
+
+    def push(self, agent: str, ephact: EphactData) -> None:
+        """Add a new ephact to an agent's stack. Shows viewer only if agent is active."""
+        if agent not in self._stacks:
+            self._stacks[agent] = []
+            self._view_index[agent] = 0
+
+        entry = EphactEntry(data=ephact, agent=agent)
+        self._stacks[agent].append(entry)
+        self._view_index[agent] = len(self._stacks[agent]) - 1
+        self._closed_by_user.discard(agent)
+        if agent == self._active_agent:
+            self._visible = True
+            self.display = True
+            self.refresh(layout=True)
+
+    def close(self) -> None:
+        """Hide the viewer (keeps stack intact)."""
+        self._closed_by_user.add(self._active_agent)
+        self._visible = False
+        self.display = False
+        self.refresh(layout=True)
+
+    def close_current(self) -> None:
+        """Remove the currently viewed ephact from the stack."""
+        agent = self._active_agent
+        idx = self._view_index.get(agent, 0)
+        self.close_at(idx)
+
+    def close_at(self, index: int) -> None:
+        """Remove the ephact at the given index from the stack."""
+        agent = self._active_agent
+        stack = self._stacks.get(agent, [])
+        if not stack or index < 0 or index >= len(stack):
+            return
+        stack.pop(index)
+        if not stack:
+            self.close()
+            return
+        cur = self._view_index.get(agent, 0)
+        if cur >= len(stack):
+            self._view_index[agent] = len(stack) - 1
+        elif index < cur:
+            self._view_index[agent] = cur - 1
+        self.refresh(layout=True)
+
+    def set_active_agent(self, agent: str) -> None:
+        """Switch which agent's stack is displayed."""
+        self._active_agent = agent
+        if agent in self._stacks and self._stacks[agent] and agent not in self._closed_by_user:
+            self._visible = True
+            self.display = True
+        else:
+            self._visible = False
+            self.display = False
+        self.refresh(layout=True)
+
+    def navigate(self, direction: int) -> None:
+        """Navigate history. direction: -1 = older, +1 = newer. Wraps around."""
+        agent = self._active_agent
+        if agent not in self._stacks or not self._stacks[agent]:
+            return
+        stack = self._stacks[agent]
+        idx = self._view_index.get(agent, len(stack) - 1)
+        self._view_index[agent] = (idx + direction) % len(stack)
+        self.refresh(layout=True)
+
+    @property
+    def has_content(self) -> bool:
+        agent = self._active_agent
+        return bool(self._stacks.get(agent))
+
+    @property
+    def current_entry(self) -> Optional[EphactEntry]:
+        agent = self._active_agent
+        stack = self._stacks.get(agent, [])
+        if not stack:
+            return None
+        idx = self._view_index.get(agent, len(stack) - 1)
+        return stack[idx]
+
+    def render(self) -> Panel:
+        entry = self.current_entry
+        if not entry:
+            return Panel("No artifacts", title="📌 Artifacts", border_style="dim")
+
+        agent = self._active_agent
+        stack = self._stacks[agent]
+        idx = self._view_index.get(agent, len(stack) - 1)
+
+        # Top title: current ephact name
+        title_text = entry.data.title or entry.data.type.capitalize()
+        title = f"📌 {title_text}"
+
+        # Bottom subtitle: ◀ Tab1 x│Tab2 x ▶ (clickable tab bar)
+        # ◀ pinned left, ▶ pinned right, tabs flow between
+        subtitle = Text()
+        regions: list[tuple[int, int, object]] = []
+        left_pos = 3  # Panel border: ╰─ + space = 3
+        panel_width = self.size.width if self.size.width > 20 else 80
+
+        # Fixed positions for arrows
+        arrow_width = 2  # "◀ " or " ▶"
+        # Available width for tabs between the two arrows
+        avail = panel_width - 10 - (arrow_width * 2)
+
+        # Build tab labels with widths
+        tab_labels = []
+        for i, e in enumerate(stack):
+            label = e.data.title or e.data.type.capitalize()
+            if len(label) > 12:
+                label = label[:11] + "…"
+            # width = label + " x" + separator (│)
+            w = len(label) + 2 + (1 if i < len(stack) - 1 else 0)
+            tab_labels.append((i, label, w))
+
+        # Determine scroll position and visible window
+        scroll = self._tab_scroll.get(agent, 0)
+        scroll = max(0, min(scroll, len(stack) - 1))
+
+        # Calculate visible tabs from scroll position
+        visible_end = scroll
+        used_width = 0
+        for ti, label, w in tab_labels[scroll:]:
+            if used_width + w > avail:
+                break
+            used_width += w
+            visible_end = ti + 1
+
+        # If active tab is out of visible window, adjust selection to nearest edge
+        if idx < scroll:
+            self._view_index[agent] = scroll
+            idx = scroll
+        elif idx >= visible_end:
+            self._view_index[agent] = visible_end - 1
+            idx = visible_end - 1
+
+        self._tab_scroll[agent] = scroll
+
+        has_left = scroll > 0
+        has_right = visible_end < len(stack)
+
+        # ◀ button — always at left_pos
+        pos = left_pos
+        if has_left:
+            subtitle.append("◀ ", style="bold cyan")
+            regions.append((pos, pos + arrow_width, ("scroll", -1)))
+        else:
+            subtitle.append("  ", style="dim")
+        pos += arrow_width
+
+        # Visible tabs — flow between arrows
+        for ti, label, w in tab_labels[scroll:visible_end]:
+            if ti == idx:
+                subtitle.append(label, style="bold white on blue")
+            else:
+                subtitle.append(label, style="cyan")
+            regions.append((pos, pos + len(label), ("tab", ti)))
+            pos += len(label)
+            subtitle.append(" x", style="bold red")
+            regions.append((pos, pos + 2, ("close_one", ti)))
+            pos += 2
+            if ti < visible_end - 1:
+                subtitle.append("│", style="dim cyan")
+                pos += 1
+
+        # Pad to push ▶ to the right edge
+        right_pos = left_pos + arrow_width + avail
+        pad = right_pos - pos
+        if pad > 0:
+            subtitle.append(" " * pad)
+            pos = right_pos
+
+        # ▶ button — always at right edge
+        if has_right:
+            subtitle.append(" ▶", style="bold cyan")
+            regions.append((pos, pos + arrow_width, ("scroll", 1)))
+        else:
+            subtitle.append("  ", style="dim")
+        pos += arrow_width
+
+        self._click_regions = regions
+
+        content = entry.data.content
+
+        # Render content: use RichMarkdown but flatten to Text for selectability
+        from io import StringIO
+        from rich.console import Console as RichConsole
+        from rich.style import Style as RichStyle
+        buf = StringIO()
+        w = self.size.width - 4 if self.size.width > 10 else 80
+        console = RichConsole(file=buf, force_terminal=True, width=w, no_color=False)
+        console.print(RichMarkdown(content), end="")
+        rendered = Text.from_ansi(buf.getvalue())
+        # Strip trailing whitespace on lines without background
+        rlines = rendered.split("\n")
+        for rline in rlines:
+            plain = rline.plain
+            slen = len(plain.rstrip())
+            if slen < len(plain):
+                has_bg = any(
+                    end > slen and RichStyle.parse(str(s)).bgcolor
+                    for start, end, s in rline._spans
+                )
+                if not has_bg:
+                    rline.rstrip()
+        rendered = Text("\n").join(rlines)
+
+        return Panel(
+            rendered,
+            title=title,
+            title_align="left",
+            subtitle=subtitle,
+            subtitle_align="left",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+
+    def on_click(self, event) -> None:
+        """Bottom border: tab bar click regions. Top border/content: cycle. Left-click only."""
+        if getattr(event, 'button', 1) != 1:
+            return
+        bottom_y = self.size.height - 1
+        if event.y == bottom_y:
+            # Bottom border — tab bar with click regions
+            x = event.x
+            for start, end, action in self._click_regions:
+                if start <= x < end:
+                    if action[0] == "scroll":
+                        agent = self._active_agent
+                        scroll = self._tab_scroll.get(agent, 0)
+                        self._tab_scroll[agent] = max(0, scroll + action[1])
+                        self.refresh(layout=True)
+                    elif action[0] == "tab":
+                        self._view_index[self._active_agent] = action[1]
+                        self.refresh(layout=True)
+                    elif action[0] == "close_one":
+                        self.close_at(action[1])
+                    return
+            return
+        if event.y == 0:
+            # Top border — close viewer
+            self.close()
+            return
+        # Content area click: cycle forward
+        agent = self._active_agent
+        stack = self._stacks.get(agent, [])
+        if len(stack) > 1:
+            idx = self._view_index.get(agent, len(stack) - 1)
+            self._view_index[agent] = (idx + 1) % len(stack)
+            self.refresh(layout=True)
+
+
+def archive_ephact(agent: str, entry: EphactEntry, agents_home: str = None) -> Path:
+    """Save an ephact to disk for cross-session review.
+
+    Returns the path to the saved file.
+    """
+    if agents_home is None:
+        agents_home = str(Path.home() / "agents")
+
+    ephacts_dir = Path(agents_home) / agent / "ephacts"
+    ephacts_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = int(entry.timestamp * 1000)
+    path = ephacts_dir / f"ephact_{ts}.json"
+    data = {
+        "type": entry.data.type,
+        "title": entry.data.title,
+        "content": entry.data.content,
+        "agent": entry.agent,
+        "timestamp": entry.timestamp,
+    }
+    path.write_text(json.dumps(data, indent=2))
+    return path

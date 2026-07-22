@@ -2334,7 +2334,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                         print(f"[asdaaas] GAZE: invalid command: {cmd}")
 
                 elif action == "reasoning_effort":
-                    # Change reasoning effort level mid-session.
+                    # Change reasoning effort level mid-session via session/set_model.
                     # Usage: {"action": "reasoning_effort", "level": "xhigh"}
                     # Levels: low, medium, high, xhigh
                     # Renewal: if already at requested level, just resets the turn counter.
@@ -2344,21 +2344,20 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     if new_level in valid_levels:
                         current_level = backend._start_kwargs.get("reasoning_effort") or reasoning_effort_default
                         if current_level == new_level:
-                            # Renewal — same level, just reset counter, no restart
+                            # Renewal — same level, just reset counter
                             reasoning_effort_turns_remaining = int(turns)
                             print(f"[asdaaas] REASONING EFFORT: renewed {new_level} for {turns} turns")
                         else:
-                            # Level change — restart backend
+                            # Level change — session/set_model with _meta.reasoningEffort
                             old_level = current_level or "default"
-                            backend._start_kwargs["reasoning_effort"] = new_level
-                            print(f"[asdaaas] REASONING EFFORT: {old_level} -> {new_level}, restarting backend...")
+                            print(f"[asdaaas] REASONING EFFORT: {old_level} -> {new_level}...")
                             try:
-                                sid = await backend.cancel_and_restart(agent_cwd)
+                                await backend.set_reasoning_effort(new_level)
+                                backend._start_kwargs["reasoning_effort"] = new_level
                                 reasoning_effort_turns_remaining = int(turns)
-                                print(f"[asdaaas] Backend restarted with reasoning_effort={new_level} for {turns} turns (session {sid[:12]})")
+                                print(f"[asdaaas] REASONING EFFORT: set to {new_level} for {turns} turns")
                             except Exception as e:
-                                print(f"[asdaaas] ERROR restarting backend: {e}")
-                                backend._start_kwargs["reasoning_effort"] = old_level if old_level != "default" else None
+                                print(f"[asdaaas] ERROR setting reasoning effort: {e}")
                     else:
                         print(f"[asdaaas] REASONING EFFORT: invalid level '{new_level}' (valid: {valid_levels})")
 
@@ -2473,14 +2472,14 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     reasoning_effort_turns_remaining -= 1
                     current_level = backend._start_kwargs.get("reasoning_effort") or "default"
                     if reasoning_effort_turns_remaining <= 0:
-                        # Auto-revert to default
+                        # Auto-revert to default via session/set_model
                         revert_to = reasoning_effort_default or "medium"
                         if current_level != revert_to:
-                            backend._start_kwargs["reasoning_effort"] = revert_to
-                            print(f"[asdaaas] REASONING EFFORT: expired, reverting {current_level} -> {revert_to}, restarting backend...")
+                            print(f"[asdaaas] REASONING EFFORT: expired, reverting {current_level} -> {revert_to}...")
                             try:
-                                sid = await backend.cancel_and_restart(agent_cwd)
-                                print(f"[asdaaas] Backend restarted with reasoning_effort={revert_to} (session {sid[:12]})")
+                                await backend.set_reasoning_effort(revert_to)
+                                backend._start_kwargs["reasoning_effort"] = revert_to
+                                print(f"[asdaaas] REASONING EFFORT: reverted to {revert_to}")
                             except Exception as e:
                                 print(f"[asdaaas] ERROR reverting reasoning effort: {e}")
                         reasoning_effort_turns_remaining = None

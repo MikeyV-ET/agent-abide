@@ -1870,6 +1870,7 @@ class AsdaaasTUI(App):
         height: auto;
         max-height: 50%;
         margin: 0 0 0 0;
+        overflow-y: auto;
     }
 
 

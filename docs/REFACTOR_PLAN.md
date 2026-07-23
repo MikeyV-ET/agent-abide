@@ -1,124 +1,93 @@
 # Agent-Abide Refactor Plan: Y-Channel + Modularity
 
 **Author:** Sr  
-**Date:** 2026-07-23 (revised)  
-**Status:** DRAFT — awaiting Eric's review  
+**Date:** 2026-07-23 (v3)  
+**Status:** APPROVED — implementation starting  
 **Prerequisites:** Y_CHANNEL_LSP_LESSONS.md (Trip, 2026-07-07), observer spec, TurnEngine extraction (s1)
 
 ---
 
-## Problem Statement
+## Motivating Principle
 
-asdaaas has three interleaved problems that share a root cause — **no clear ownership boundaries between transport, state, and orchestration:**
+Modularity is evolvability. The right granularity is determined by the system's rate and type of change. The error should be on the side of slightly over-modular: over-modular is a flat interface tax (bounded, constant), under-modular is cascade bugs (unbounded, variable). Biology demonstrates this — Hox genes, stem cell niches, organ interfaces are all "over the line" for any individual organism, but that over-modularity is what made the Cambrian explosion possible.
 
-1. **Split visibility.** The binary emits state on two channels (files + stdout). The observer only sees files. `_process_stdout` sees stdout but discards everything except gates. Shadow state (`_start_kwargs`, `_model_id`) drifts from reality.
-
-2. **Monolithic main().** ~750 lines mixing setup, observer lifecycle, command dispatch, turn orchestration, compaction detection, reasoning effort countdown, and shutdown.
-
-3. **No testable units.** You can't test command dispatch, output routing, or input gathering without bootstrapping the entire binary.
+**Target:** each module is a concern you can test, understand, or replace without loading the rest of the system into your head. main() becomes a composition root — setup, wiring, loop, teardown.
 
 ---
 
-## Architectural Clarifications
+## Module Architecture
 
-### Stdout is NOT a superset of updates.jsonl
+| Module | Concern | Current location |
+|--------|---------|-----------------|
+| **GrokBackend** | Binary connection, pipes, gates, session management | `grok_backend.py` (stays, gains observer feed) |
+| **BinaryStateObserver** | Single source of truth for all binary state (updates.jsonl + stdout notifications). In-process asyncio task. | `binary_state_observer.py` (refactored from sidecar to in-process) |
+| **InputGatherer** | Poll all input sources: doorbells, commands, adapters, interjections. Returns unified input set. | Spread across main() + helper functions |
+| **OutputRouter** | Gaze-based response delivery to adapters (TUI/IRC/arena). | Inline in main() (~80 lines) |
+| **CommandDispatcher** | Dispatch table: action → handler. Each handler is `(ctx, cmd) → side effects`. Handlers don't know about each other. | if/elif chain in main() (~100 lines) |
+| **Pacer** | Delay logic, continue doorbells, turn timing, `until_event` handling. | Mixed into turn loop |
+| **CompactionManager** | Detection, instructions, request, post-compaction state reset. | Scattered across main(), command handlers, backend |
+| **HealthWriter** | Health files, profiles, session registry, dashboard state. | Inline in main() |
+| **TurnEngine** | Orchestrator: wires all modules, runs gather→deliver→route→dispatch→pace cycle. | Partially extracted (thin wrapper) |
 
-The two streams are complementary:
+### Target main()
 
-| Stream | Carries |
-|--------|---------|
-| **updates.jsonl** (file) | Content chunks, tool calls, turn lifecycle, retry state, doom loop, compaction events, token counts |
-| **stdout** (pipe) | Model/effort/activity changes (`sessions/changed`), available models (`models/update`), gates, skill catalog, JSON-RPC responses |
-
-The observer needs **both feeds** to have complete state. We're merging two streams, not replacing one.
-
-### There is no stdout pipe contention
-
-`_process_stdout` is the exclusive pipe reader. The turn cycle reads responses from **updates.jsonl** (the file), not from the stdout pipe. The race condition with `_wait_for_response` was already fixed (fire-and-forget for set_reasoning_effort). The problem Eric identified is conceptual: `_process_stdout` discards what the observer needs, and the observer can't see it.
-
-### Observer should move in-process
-
-The observer currently runs as a sidecar subprocess communicating via atomic JSON file (250ms polling). This was appropriate when it only tailed one file. With two data sources and a role as single source of truth, in-process is better:
-
-- **Latency:** File-based IPC adds 250ms+ per hop (two hops for stdout → observer → asdaaas). In-process: same tick.
-- **Simplicity:** Direct method calls replace file read/parse/write cycles.
-- **Isolation cost is near-zero:** If asdaaas dies, there's nothing to observe. Observer is in asdaaas, not the binary — survives binary restarts.
-- **The state machine is already pure:** `BinaryStateObserver.process_event()` is a testable function. `ObserverService` (file-tailing wrapper) is the part we're replacing.
-
-### Gate handler extraction is premature
-
-Gate handlers are ~100 lines, handle 3 gate types, and are unlikely to grow (the binary has a fixed gate set). Extracting them into a formal transport/handler registration system adds indirection for minimal benefit. They stay inside the backend.
-
----
-
-## What main() Looks Like Today
-
-```
-main():
-    SETUP          — directories, config, signals                   (~100 lines)
-    START BINARY   — launch process, get session                    (~50 lines)  
-    START OBSERVER — launch sidecar, read_observer_state()          (~30 lines)
-    INIT STATE     — awareness, adapters, watchdog, pending queue   (~50 lines)
-    
-    LOOP:
-        GATHER     — poll doorbells, commands, adapters, interjections
-        DELIVER    — format prompt, send to binary, collect response
-        ROUTE      — send response to gaze target (TUI/IRC/arena)
-        DISPATCH   — process commands (delay/gaze/awareness/effort/compact)
-        PACE       — delay logic, continue doorbells, timing
-    
-    SHUTDOWN       — reap observer, kill binary, unregister         (~50 lines)
-```
-
-Every verb in that loop is a distinct concern mixed into one function.
-
----
-
-## Module Boundaries
-
-**Principle:** A module is a concern you can test, understand, or replace without loading the rest of the system into your head.
-
-| Module | Responsibility | Test strategy |
-|--------|---------------|---------------|
-| **InputGatherer** | Poll all input sources (doorbells, commands, adapters, interjections). Return unified input set. Doesn't know about the binary or output. | Mock filesystem, verify gathered messages |
-| **OutputRouter** | Given a response and gaze state, deliver to the right adapter (TUI/IRC/arena). Doesn't know how responses are generated. | Mock adapters, verify routing decisions |
-| **CommandDispatcher** | Dispatch table: action → handler function. Each handler is `(context, command) → side effects`. Handlers don't know about each other. | Mock context, verify each handler independently |
-| **BinaryStateObserver** | Single source of truth for binary state. In-process asyncio task. Consumes updates.jsonl events + stdout notifications. Exposes state via attributes. | Existing unit tests + new stdout notification tests |
-| **TurnEngine** | Orchestrates: gather → deliver → route → dispatch → pace. Wires modules together per-turn. | Integration tests with mock modules |
-| **GrokBackend** | Binary connection: start, send, collect response, gates. Owns both pipes. Feeds stdout notifications to observer. | Existing MockBinary tests |
-
-**What stays in main():**
-- One-time setup (directories, config, signals) — sequential, not reusable
-- Module construction and wiring — the composition root
-- The `while not shutdown: engine.run_turn()` loop
-- Teardown
-
-**Target main():**
 ```python
 async def main(agent_name, ...):
     # Setup
     backend = GrokBackend(...)
     await backend.start(...)
     observer = BinaryStateObserver(pid=backend.proc.pid, ...)
-    asyncio.create_task(observer.run())  # tails updates.jsonl, receives stdout events
-    backend.set_observer(observer)       # _process_stdout feeds notifications to observer
-    
+    asyncio.create_task(observer.run())
+    backend.set_observer(observer)
+
     # Wire modules
     gatherer = InputGatherer(agent_name, awareness, adapters)
     router = OutputRouter(agent_name)
     dispatcher = CommandDispatcher(backend, observer)
-    engine = TurnEngine(gatherer, router, dispatcher, backend, observer)
-    
+    pacer = Pacer(agent_name)
+    compaction = CompactionManager(backend, observer, agent_name)
+    health = HealthWriter(agent_name, observer)
+    engine = TurnEngine(
+        gatherer, router, dispatcher, pacer,
+        compaction, health, backend, observer
+    )
+
     # Run
     while not shutdown:
         await engine.run_turn()
-    
+
     # Shutdown
     observer.stop()
     await backend.stop()
 ```
 
-~50 lines of glue. Every piece of logic lives in a module testable with mocks.
+---
+
+## Technical Clarifications
+
+### Stdout is complementary, not a superset
+
+| Stream | Carries |
+|--------|---------|
+| **updates.jsonl** (file) | Content chunks, tool calls, turn lifecycle, retry state, doom loop, compaction, token counts |
+| **stdout** (pipe) | Model/effort/activity (`sessions/changed`), available models (`models/update`), gates, skill catalog, JSON-RPC responses |
+
+Observer needs both feeds. We're merging two streams, not replacing one.
+
+### No stdout pipe contention
+
+`_process_stdout` is the exclusive pipe reader. The turn cycle reads from updates.jsonl (file). No race condition. The problem is conceptual: `_process_stdout` discards what the observer needs.
+
+### Observer moves in-process
+
+- File-based IPC adds 250ms+ per hop. In-process: same tick.
+- Isolation benefit is near-zero (if asdaaas dies, nothing to observe).
+- State machine (`BinaryStateObserver.process_event()`) is already pure and testable.
+- Still writes state file for external consumers (dashboards, health checks) at reduced frequency.
+
+### Gate handlers stay in backend
+
+~100 lines, 3 gate types, fixed set. Not worth extracting. They stay inside GrokBackend.
 
 ---
 
@@ -126,68 +95,52 @@ async def main(agent_name, ...):
 
 ### Phase 1: Observer in-process + stdout feed
 
-**Goal:** Observer becomes single source of truth for all binary state.
-
-1. Move `BinaryStateObserver` from sidecar subprocess to asyncio task in asdaaas.
-   - Keep the state machine class as-is (well-tested).
-   - Replace `ObserverService` with an async task: tail updates.jsonl + expose state via attributes.
-   - Still write state file for dashboards/health checks (but asdaaas reads directly).
-2. Add `process_stdout_event(frame)` method to observer for `sessions/changed` and `models/update`.
-3. `_process_stdout` calls `observer.process_stdout_event(frame)` after logging, before discarding. ~5 lines.
+1. Move `BinaryStateObserver` from sidecar subprocess to asyncio task.
+2. Add `process_stdout_event(frame)` for `sessions/changed` and `models/update`.
+3. `_process_stdout` calls observer after logging. ~5 lines.
 4. Observer state gains: `model_id`, `reasoning_effort`, `activity`.
-5. Replace `_start_kwargs["reasoning_effort"]` and `_model_id` reads with observer reads.
+5. Kill shadow state (`_start_kwargs["reasoning_effort"]`, `_model_id`).
+6. Observer `reset(new_pid)` for binary restarts.
+7. State file still written for dashboards (every 1s, not 250ms).
 
-**Tests:** Observer unit tests with synthetic stdout events. Integration: change effort via `session/set_model`, verify observer reflects it same tick.
+**Tests:** Observer unit tests with synthetic stdout events. Integration: change effort, verify observer reflects it.
 
-**Blast radius:** observer launch in main(), `read_observer_state()` calls, shadow state in backend. Backend's `_process_stdout` gains one method call.
+### Phase 2: CommandDispatcher + Pacer extraction
 
-### Phase 2: Command dispatch extraction
+1. `command_handlers.py`: handler functions with `CommandContext`.
+2. Dispatch table replaces if/elif chain.
+3. Reasoning effort countdown moves entirely into handler.
+4. `pacer.py`: delay logic, continue doorbells, `until_event`, timing.
+5. `cmd_fix` (dual continue problem) becomes a Pacer concern, isolated and fixable.
 
-**Goal:** Command handling becomes testable in isolation.
+**Tests:** Each handler with mock context. Pacer timing tests.
 
-1. Create `command_handlers.py` with handler functions.
-2. Each handler: `async def handle_X(ctx: CommandContext, cmd: dict) -> None`.
-3. `CommandContext` bundles: backend, observer, agent_name, config.
-4. Dispatch table: `HANDLERS = {"delay": handle_delay, "gaze": handle_gaze, ...}`.
-5. Reasoning effort countdown moves entirely into the handler (currently split across handler + post-turn).
-6. main() replaces if/elif chain with: `handler = HANDLERS.get(action); await handler(ctx, cmd)`.
+### Phase 3: InputGatherer + OutputRouter + HealthWriter
 
-**Tests:** Each handler testable with mock context. Countdown logic tested independently.
+1. `InputGatherer`: encapsulates all polling. Returns structured result.
+2. `OutputRouter`: encapsulates gaze-based delivery.
+3. `HealthWriter`: encapsulates all observability output.
+4. These are grouping existing code behind class interfaces.
 
-### Phase 3: InputGatherer + OutputRouter extraction
+**Tests:** Mock filesystem/adapters, verify gathering/routing/writing independently.
 
-**Goal:** Input collection and output routing become testable units.
+### Phase 4: CompactionManager + TurnEngine completion
 
-1. `InputGatherer`: encapsulates doorbell polling, command polling, adapter inbox reading, interjection checking. Returns a structured result.
-2. `OutputRouter`: encapsulates gaze-based response delivery to adapters.
-3. These are currently helper functions + inline code in main(). Extraction is mostly grouping existing code behind a class interface.
+1. `CompactionManager`: detection, instructions, request, post-compaction reset.
+2. TurnEngine absorbs remaining main() loop logic.
+3. main() reduces to composition root.
 
-### Phase 4: TurnEngine completion
-
-**Goal:** main() becomes pure glue.
-
-1. TurnEngine wires together: gatherer.poll() → deliver to binary → router.route() → dispatcher.handle() → pacer.wait().
-2. Absorbs remaining main() loop logic: compaction detection, health writes, timing.
-3. main() reduces to: setup → wire → loop → teardown.
-
----
-
-## What This Does NOT Include
-
-- **Separate Y-channel process or module.** The Y-channel is `_process_stdout` feeding the observer. No new process, no new module.
-- **StdioTransport extraction.** Gate handlers stay in backend. The backend IS the transport.
-- **Dropping updates.jsonl.** Observer needs both streams (complementary, not overlapping).
-- **Adapter refactoring.** Adapters are already modular.
+**Tests:** CompactionManager with mock backend/observer. TurnEngine integration tests.
 
 ---
 
 ## Open Questions
 
-1. **State file for dashboards.** Observer moves in-process but dashboards/health checks still need the JSON file. Observer should still write it, but at a lower frequency (every 1s instead of 250ms). asdaaas reads state directly; file is for external consumers only.
+1. **Observer state file frequency.** 250ms is for the sidecar's heartbeat. In-process, we write for external consumers only. 1s? 2s? Driven by dashboard refresh rate.
 
-2. **Observer across binary restarts.** `cancel_and_restart()` kills the binary PID. In-process observer detects GONE (PID died), then asdaaas restarts binary with new PID. Observer needs a `reset(new_pid)` method. Straightforward.
+2. **Observer across binary restarts.** `cancel_and_restart()` kills PID. Observer needs `reset(new_pid)`. The updates.jsonl path also changes (new session dir). Observer must re-orient.
 
-3. **Branch strategy.** Single branch (main) with tests as safety net. The s1 branch served its purpose; future work goes directly to main.
+3. **Branch strategy.** Single branch (main) with tests as safety net. Each phase is a PR-sized commit or small series.
 
 ---
 
@@ -195,9 +148,9 @@ async def main(agent_name, ...):
 
 | Phase | Scope | Estimate |
 |-------|-------|----------|
-| 1. Observer in-process + stdout feed | Core state architecture | 2-3 sessions |
-| 2. Command dispatch extraction | Mechanical refactor | 1 session |
-| 3. InputGatherer + OutputRouter | Grouping existing code | 1-2 sessions |
-| 4. TurnEngine completion | Final main() reduction | 1-2 sessions |
+| 1. Observer in-process + stdout | Core state architecture | 2-3 sessions |
+| 2. CommandDispatcher + Pacer | Command handling + timing | 1-2 sessions |
+| 3. InputGatherer + OutputRouter + HealthWriter | Input/output/health | 1-2 sessions |
+| 4. CompactionManager + TurnEngine | Final main() reduction | 1-2 sessions |
 
-Total: 5-8 sessions, each phase independently deployable and testable.
+Total: 5-9 sessions, each phase independently deployable and testable.

@@ -1088,7 +1088,7 @@ class ToolCallPanel(Static):
         # Expanded: CSS border + content as Text
         self.styles.border = ("round", color)
         self.styles.padding = (0, 1)
-        self.border_title = title
+        self.border_title = title.replace("[", "\\[")
 
         if self.tool_output:
             output = self.tool_output
@@ -1536,7 +1536,7 @@ class ThinkingBlock(Static):
             title_str = "💭 Thinking"
 
         if self._expanded and total > self.TRUNCATE_THRESHOLD:
-            title_str += " [expanded — click to collapse]"
+            title_str += " \\[expanded — click to collapse]"
 
         self.border_title = title_str
         return Text(display, style=Theme.DARK4)

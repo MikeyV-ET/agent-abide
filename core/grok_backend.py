@@ -127,6 +127,11 @@ class GrokBackend(AgentBackend):
         self._allowed_always: set[str] = set()  # tool kinds auto-approved
         self._permission_pending: bool = False  # set while awaiting mentor decision
         self._start_kwargs: dict = {}  # cached kwargs for cancel_and_restart
+        self._observer = None  # InProcessObserver, set via set_observer()
+
+    def set_observer(self, observer):
+        """Set the in-process observer for stdout event forwarding."""
+        self._observer = observer
 
     def _rpc_request(self, method: str, params: Optional[dict] = None) -> str:
         self._rpc_id += 1
@@ -258,6 +263,12 @@ class GrokBackend(AgentBackend):
                         await self._handle_ask_user(frame)
                     elif "id" in frame and method:
                         print(f"[grok_backend] unhandled request: method={method} id={frame['id']} params={json.dumps(frame.get('params', {}))[:300]}")
+                    # Forward all stdout frames to observer for state tracking
+                    if self._observer and method:
+                        try:
+                            self._observer.process_stdout_event(frame)
+                        except Exception:
+                            pass
         except (asyncio.CancelledError, OSError):
             pass
         finally:

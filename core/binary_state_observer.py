@@ -17,6 +17,7 @@ Components:
 """
 
 import argparse
+import asyncio
 import enum
 import json
 import os
@@ -97,6 +98,12 @@ class BinaryStateObserver:
         self._exit_code: Optional[int] = None
         self._pid_proc_state: Optional[str] = None
 
+        # Stdout-derived state (sessions/changed, models/update)
+        self._model_id: str = "unknown"
+        self._reasoning_effort: Optional[str] = None
+        self._activity: Optional[str] = None
+        self._available_models: Optional[list] = None
+
     @staticmethod
     def _default_process_check(pid: int) -> bool:
         try:
@@ -175,6 +182,22 @@ class BinaryStateObserver:
     @property
     def turn_event_count(self) -> int:
         return self._turn_event_count
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
+    @property
+    def reasoning_effort(self) -> Optional[str]:
+        return self._reasoning_effort
+
+    @property
+    def activity(self) -> Optional[str]:
+        return self._activity
+
+    @property
+    def available_models(self) -> Optional[list]:
+        return self._available_models
 
     # -- Core event processing --
 
@@ -278,6 +301,79 @@ class BinaryStateObserver:
                 event_type, DEFAULT_SILENCE_WINDOW
             )
 
+    def process_stdout_event(self, frame: dict):
+        """Process a stdout JSON-RPC notification and update state.
+
+        Handles:
+        - _x.ai/sessions/changed: model_id, reasoning_effort, activity
+        - _x.ai/models/update: available_models
+        """
+        method = frame.get("method", "")
+
+        if method == "_x.ai/session_notification":
+            params = frame.get("params", {})
+            update = params.get("update", {})
+            su = update.get("sessionUpdate", "")
+
+            if su == "model_changed":
+                model_id = update.get("model_id")
+                if model_id:
+                    self._model_id = model_id
+                effort = update.get("reasoning_effort")
+                if effort:
+                    self._reasoning_effort = effort
+
+            elif su == "session_changed":
+                activity = update.get("activity")
+                if activity is not None:
+                    self._activity = activity
+                model_id = update.get("model_id")
+                if model_id:
+                    self._model_id = model_id
+                effort = update.get("reasoning_effort")
+                if effort:
+                    self._reasoning_effort = effort
+
+        elif method == "_x.ai/sessions/changed":
+            params = frame.get("params", {})
+            model_id = params.get("model_id")
+            if model_id:
+                self._model_id = model_id
+            effort = params.get("reasoning_effort")
+            if effort:
+                self._reasoning_effort = effort
+            activity = params.get("activity")
+            if activity is not None:
+                self._activity = activity
+
+        elif method == "_x.ai/models/update":
+            params = frame.get("params", {})
+            models = params.get("models")
+            if models is not None:
+                self._available_models = models
+
+    def reset(self, new_pid: int, session_dir: str = None):
+        """Reset observer for a new binary process (after cancel_and_restart).
+
+        Preserves model_id and reasoning_effort (these carry across restarts).
+        Resets turn state, pending tools, GONE metadata, and process info.
+        """
+        self.pid = new_pid
+        self._state = ObserverState.STARTING
+        self._since = time.time()
+        self._last_event_type = None
+        self._last_event_ts = None
+        self._pending_tools.clear()
+        self._expected_silence = DEFAULT_SILENCE_WINDOW
+        self._turn_event_count = 0
+        self._retry_attempt = None
+        self._retry_reason = None
+        self._doom_loop = False
+        self._unknown_event = None
+        self._exit_code = None
+        self._pid_proc_state = None
+        # model_id, reasoning_effort, activity intentionally preserved
+
     def _compute_expected_silence(self, update: dict) -> float:
         """Compute expected silence window from tool call context."""
         tool_name = update.get("title", "")
@@ -357,6 +453,9 @@ class BinaryStateObserver:
             "doom_loop": self._doom_loop,
             "turn_event_count": self._turn_event_count,
             "pending_tools": {tid: kind for tid, kind in self._pending_tools.items()} if self._pending_tools else None,
+            "model_id": self._model_id,
+            "reasoning_effort": self._reasoning_effort,
+            "activity": self._activity,
             "written_at": now,
             "expires_at": now + STATE_TTL,
         }
@@ -663,6 +762,177 @@ class ObserverService:
     def stop(self):
         """Signal the event loop to stop."""
         self._running = False
+
+
+# ============================================================================
+# InProcessObserver -- async wrapper for in-process use
+# ============================================================================
+
+class InProcessObserver:
+    """
+    Async wrapper that runs BinaryStateObserver as an asyncio task inside
+    the asdaaas process. Replaces ObserverService (sidecar subprocess).
+
+    Tails updates.jsonl for turn lifecycle events. Stdout events are fed
+    directly via process_stdout_event() called from _process_stdout.
+
+    Writes state file periodically for external consumers (dashboards).
+    """
+
+    STATE_WRITE_INTERVAL = 1.0  # seconds (relaxed from sidecar's 250ms)
+    HEARTBEAT_INTERVAL = 0.25   # seconds
+
+    def __init__(
+        self,
+        pid: int,
+        session_dir: str,
+        state_file: str,
+        data_dir: str = None,
+    ):
+        # Resolve data directory
+        if data_dir is None:
+            data_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "observer_data"
+            )
+
+        # Load configuration
+        known_types = load_known_types(data_dir)
+        tool_windows, event_windows, default_window, self._p95_events = \
+            load_silence_windows(data_dir)
+
+        global DEFAULT_SILENCE_WINDOW
+        DEFAULT_SILENCE_WINDOW = default_window
+
+        # Create observer (the pure state machine)
+        self.observer = BinaryStateObserver(
+            pid=pid,
+            known_types=known_types,
+            silence_windows=tool_windows,
+            event_silence_windows=event_windows,
+        )
+
+        # Create tailer for updates.jsonl
+        updates_path = os.path.join(session_dir, "updates.jsonl")
+        self._tailer = UpdatesJSONLTailer(updates_path)
+        self._state_file = state_file
+        self._session_dir = session_dir
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+
+    # -- Public interface --
+
+    @property
+    def state(self) -> ObserverState:
+        return self.observer.state
+
+    def state_dict(self) -> dict:
+        return self.observer.state_dict()
+
+    def process_stdout_event(self, frame: dict):
+        """Called from _process_stdout to feed stdout notifications."""
+        self.observer.process_stdout_event(frame)
+
+    def reset(self, new_pid: int, session_dir: str = None):
+        """Reset for a new binary process after restart."""
+        self.observer.reset(new_pid)
+        if session_dir:
+            self._session_dir = session_dir
+            self._tailer.close()
+            updates_path = os.path.join(session_dir, "updates.jsonl")
+            self._tailer = UpdatesJSONLTailer(updates_path)
+        self._orient()
+        self.observer.write_state_file(self._state_file)
+
+    def start(self):
+        """Start the observer as an asyncio task."""
+        self._orient()
+        self._running = True
+        self._task = asyncio.get_event_loop().create_task(self._run())
+
+    def stop(self):
+        """Stop the observer task."""
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+
+    # -- Internal --
+
+    def _orient(self):
+        """Scan tail of updates.jsonl to establish current state."""
+        scan_size = self._p95_events
+        max_retries = 3
+
+        for attempt in range(max_retries):
+            lines = self._tailer.read_tail_lines(scan_size)
+            if not lines:
+                break
+
+            frames = []
+            for line in lines:
+                try:
+                    frames.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+            if not frames:
+                break
+
+            self.observer.orient_from_history(frames)
+
+            if self.observer.state != ObserverState.STARTING:
+                break
+
+            scan_size *= 3
+            self.observer._state = ObserverState.STARTING
+            self.observer._last_event_type = None
+            self.observer._last_event_ts = None
+            self.observer._pending_tools.clear()
+            self.observer._turn_event_count = 0
+
+        self._tailer.seek_to_end()
+        self.observer.write_state_file(self._state_file)
+
+    async def _run(self):
+        """Async event loop: tail updates.jsonl, heartbeat, write state."""
+        last_write = 0.0
+
+        try:
+            while self._running:
+                # Process new updates.jsonl events
+                lines = self._tailer.read_new_lines()
+                for line in lines:
+                    try:
+                        frame = json.loads(line)
+                        self.observer.process_event(frame)
+                    except json.JSONDecodeError:
+                        continue
+
+                # Heartbeat: check process liveness + silence
+                self.observer.check_heartbeat()
+
+                # Write state file at reduced frequency
+                now = time.time()
+                if now - last_write >= self.STATE_WRITE_INTERVAL:
+                    self.observer.write_state_file(self._state_file)
+                    last_write = now
+
+                # GONE: write final state, stop
+                if self.observer.state == ObserverState.GONE:
+                    self.observer.write_state_file(self._state_file)
+                    break
+
+                # Yield to event loop
+                await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._tailer.close()
+            # Write final state on shutdown
+            try:
+                self.observer.write_state_file(self._state_file)
+            except Exception:
+                pass
 
 
 # ============================================================================

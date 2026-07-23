@@ -2112,41 +2112,33 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     except Exception as _e:
         print(f"[asdaaas] WARN: failed to update session registry: {_e}")
 
-    # ---- Observer sidecar (always-on, Phase 5) ----
-    observer_process = None
+    # ---- Observer (in-process async task, Phase 1 refactor) ----
+    from binary_state_observer import InProcessObserver
     observer_state_file = str(config.agent_observer_state_file(agent_name)) if config else None
+    in_process_observer = None
 
     if backend.proc and backend.session_dir:
         try:
-            observer_script = os.path.join(os.path.dirname(__file__), "binary_state_observer.py")
             observer_state_file = str(config.agent_observer_state_file(agent_name))
-            observer_cmd = [
-                sys.executable, observer_script,
-                "--pid", str(backend.proc.pid),
-                "--session-dir", str(backend.session_dir),
-                "--state-file", observer_state_file,
-            ]
-            observer_process = await asyncio.create_subprocess_exec(
-                *observer_cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+            in_process_observer = InProcessObserver(
+                pid=backend.proc.pid,
+                session_dir=str(backend.session_dir),
+                state_file=observer_state_file,
             )
-            print(f"[asdaaas] Observer started (PID {observer_process.pid})")
+            in_process_observer.start()
+            backend.set_observer(in_process_observer)
+            print(f"[asdaaas] Observer started (in-process, watching PID {backend.proc.pid})")
         except Exception as e:
             print(f"[asdaaas] WARN: Failed to start observer: {e}")
-            observer_process = None
+            in_process_observer = None
     else:
         print(f"[asdaaas] WARN: Backend not ready for observer (no proc or session_dir)")
 
     def read_observer_state():
-        """Read observer state file. Returns None if observer dead/stale."""
-        if not observer_state_file:
-            return None
-        try:
-            from binary_state_observer import BinaryStateObserver
-            return BinaryStateObserver.read_state_file(observer_state_file)
-        except Exception:
-            return None
+        """Read observer state directly from in-process observer."""
+        if in_process_observer:
+            return in_process_observer.state_dict()
+        return None
 
     # Read awareness file — determines which adapter inboxes to watch
     awareness = read_awareness(agent_name)
@@ -2529,6 +2521,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 new_sid = await backend.cancel_and_restart(agent_cwd)
                 total_tokens = backend.total_tokens
                 print(f"[asdaaas] CANCEL: Restarted. Session {new_sid}, {total_tokens} tokens")
+                # Reset observer for new PID and session dir
+                if in_process_observer and backend.proc:
+                    in_process_observer.reset(backend.proc.pid, str(backend.session_dir))
+                    print(f"[asdaaas] CANCEL: Observer reset for PID {backend.proc.pid}")
                 write_health(agent_name, "active", f"cancelled and restarted", total_tokens, context_window)
                 
                 # Deliver a doorbell so the agent knows what happened
@@ -2569,15 +2565,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             await asyncio.sleep(2.0)
 
     # ---- Cleanup ----
-    # Reap observer sidecar first (fast, no deps)
-    if observer_process and observer_process.returncode is None:
-        try:
-            observer_process.terminate()
-            await asyncio.wait_for(observer_process.wait(), timeout=3.0)
-            print(f"[asdaaas] Observer reaped (PID {observer_process.pid})")
-        except (asyncio.TimeoutError, ProcessLookupError):
-            observer_process.kill()
-            print(f"[asdaaas] Observer killed (PID {observer_process.pid})")
+    # Stop in-process observer
+    if in_process_observer:
+        in_process_observer.stop()
+        print(f"[asdaaas] Observer stopped")
 
     # Unregister first -- if backend.shutdown() hangs and the process
     # gets killed, the agent should not appear as running.

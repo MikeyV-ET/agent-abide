@@ -365,6 +365,8 @@ class GrokBackend(AgentBackend):
         cmd.append(self._grok_binary)
         if sandbox:
             cmd.extend(["--sandbox", sandbox])
+        if yolo and not permission_mode:
+            permission_mode = "bypassPermissions"
         if permission_mode:
             cmd.extend(["--permission-mode", permission_mode])
         for rule in (allow_rules or []):
@@ -448,15 +450,8 @@ class GrokBackend(AgentBackend):
         # Also intercepts session/request_permission when yolo is off.
         self._stdout_task = asyncio.create_task(self._process_stdout())
 
-        if yolo:
-            # Enable always-approve mode (skip permission prompts)
-            await self._send(self._rpc_request("session/prompt", {
-                "sessionId": self._session_id,
-                "prompt": [{"type": "text", "text": "/always-approve on"}],
-            }))
-            result = await self._collect_from_files(keepalive_timeout=10.0, max_wall_clock=30.0)
-            if result.total_tokens > 0:
-                self._total_tokens = result.total_tokens
+        # Permission mode (yolo/bypassPermissions) is now set via CLI flag
+        # --permission-mode bypassPermissions, no post-startup prompt needed.
 
         return self._session_id
 

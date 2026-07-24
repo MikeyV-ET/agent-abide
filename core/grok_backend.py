@@ -460,10 +460,10 @@ class GrokBackend(AgentBackend):
         self._stdout_task = asyncio.create_task(self._process_stdout())
 
         if yolo:
-            # Enable yolo mode (skip permission prompts)
+            # Enable always-approve mode (skip permission prompts)
             await self._send(self._rpc_request("session/prompt", {
                 "sessionId": self._session_id,
-                "prompt": [{"type": "text", "text": "/yolo on"}],
+                "prompt": [{"type": "text", "text": "/always-approve on"}],
             }))
             result = await self._collect_from_files(keepalive_timeout=10.0, max_wall_clock=30.0)
             if result.total_tokens > 0:

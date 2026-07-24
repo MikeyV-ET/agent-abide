@@ -1,6 +1,6 @@
 {
   "name": "localmail",
-  "pid": 12385,
+  "pid": 2786,
   "started": 1784565355.1971424,
   "capabilities": [
     "send",
@@ -19,5 +19,5 @@
       "test-agent"
     ]
   },
-  "heartbeat": 1784739103.8029463
+  "heartbeat": 1784908701.492679
 }

@@ -21,7 +21,7 @@ Write JSON command files to `~/agents/<Name>/asdaaas/commands/cmd_{timestamp}_{r
 | Awareness TTL | `{"action": "awareness", "doorbell_ttl": {"irc": 3}}` | Set doorbell expiry |
 | Awareness attach | `{"action": "awareness", "attach": "arena"}` | Add adapter to direct_attach |
 | Awareness detach | `{"action": "awareness", "detach": "arena"}` | Remove adapter from direct_attach |
-| Reasoning effort | `{"action": "reasoning_effort", "level": "xhigh"}` | Change reasoning depth via session/set_model. Levels: low, medium, high, xhigh. Turn-limited (default 5), auto-reverts to configured default. No restart. |
+| Reasoning effort | `{"action": "reasoning_effort", "level": "high"}` | Change reasoning depth via session/set_model. Levels: low, medium, high. Turn-limited (default 5), auto-reverts to configured default. No restart. |
 
 ## Compaction Instructions
 

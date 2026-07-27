@@ -2327,12 +2327,12 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                 elif action == "reasoning_effort":
                     # Change reasoning effort level mid-session via session/set_model.
-                    # Usage: {"action": "reasoning_effort", "level": "xhigh"}
-                    # Levels: low, medium, high, xhigh
+                    # Usage: {"action": "reasoning_effort", "level": "high"}
+                    # Levels: low, medium, high
                     # Renewal: if already at requested level, just resets the turn counter.
                     new_level = cmd.get("level", "")
                     turns = cmd.get("turns", REASONING_EFFORT_TURN_LIMIT)
-                    valid_levels = ("low", "medium", "high", "xhigh")
+                    valid_levels = ("low", "medium", "high")
                     if new_level in valid_levels:
                         current_level = backend._start_kwargs.get("reasoning_effort") or reasoning_effort_default
                         if current_level == new_level:
@@ -2465,7 +2465,7 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     current_level = backend._start_kwargs.get("reasoning_effort") or "default"
                     if reasoning_effort_turns_remaining <= 0:
                         # Auto-revert to default via session/set_model
-                        revert_to = reasoning_effort_default or "medium"
+                        revert_to = reasoning_effort_default or "high"
                         if current_level != revert_to:
                             print(f"[asdaaas] REASONING EFFORT: expired, reverting {current_level} -> {revert_to}...")
                             try:
@@ -2607,7 +2607,7 @@ if __name__ == "__main__":
     parser.add_argument("--grok-binary", default=None,
                         help="Path to grok binary (default: 'grok' from PATH)")
     parser.add_argument("--reasoning-effort", default=None,
-                        choices=["xhigh", "high", "medium", "low"],
+                        choices=["high", "medium", "low"],
                         help="Reasoning effort level (overrides agents.json)")
     args = parser.parse_args()
 

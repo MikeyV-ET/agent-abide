@@ -6,13 +6,16 @@ Read this on boot (per boot protocol). Covers localmail, remind, issue tracker, 
 
 ## Localmail
 
+**Architecture:** Two components — an **adapter** (library, runs inside agent) and a **service** (daemon, runs outside agent). The adapter writes to the sender's own outbox; the service picks up and delivers to the target's inbox + rings doorbell. This works under sandbox restrictions and per-user Unix permissions.
+
 ```python
 import sys; sys.path.insert(0, '/path/to/agent-abide/core')
-from localmail import send_mail
+from localmail_adapter import send_mail
 send_mail(from_agent='<Name>', to_agent='<Target>', text='message')
 ```
 - `to_agent` accepts a string or list (broadcast)
-- Fire-and-forget. Target receives on next turn as doorbell.
+- Fire-and-forget. Message goes to your outbox; the localmail service daemon delivers it.
+- `from localmail import send_mail` also works (backward compat shim).
 
 ## Remind Adapter
 

@@ -78,11 +78,13 @@ class TurnEngine:
                  context_window: int = 200000,
                  watchdog: 'CommandWatchdog | None' = None,
                  pending_queue: 'PendingQueue | None' = None,
-                 observer_state_file: Optional[str] = None):
+                 observer_state_file: Optional[str] = None,
+                 compaction_threshold: Optional[float] = None):
         self.env = env
         self.agent_name = agent_name
         self.backend = backend
         self.context_window = context_window
+        self.compaction_threshold = compaction_threshold
         self.watchdog = watchdog
         self.pending_queue = pending_queue
         self.observer_state_file = observer_state_file
@@ -303,7 +305,8 @@ class TurnEngine:
         prompt_text = "\n".join(prompt_parts) + context_left_tag(
             self.total_tokens, self.context_window,
             self.turns_since_compaction, gaze=self.gaze,
-            reasoning_effort_info=self.reasoning_effort_info)
+            reasoning_effort_info=self.reasoning_effort_info,
+            compaction_threshold=self.compaction_threshold)
 
         has_bells = bool(bells)
         has_msgs = bool(in_room_msgs)
@@ -645,7 +648,8 @@ class TurnEngine:
             f"[Compaction complete. Context reduced from {tokens_before} to {tokens_after} tokens. "
             f"You are resuming from a compacted context. Follow your boot protocol.]"
             + context_left_tag(tokens_after, self.context_window,
-                              self.turns_since_compaction, gaze=self.gaze)
+                              self.turns_since_compaction, gaze=self.gaze,
+                              compaction_threshold=self.compaction_threshold)
         )
         print(f"[asdaaas] Immediate orientation turn for {agent_name}")
         write_health(agent_name, "working", "post-compaction orientation",
@@ -779,7 +783,8 @@ class TurnEngine:
                 probe_text = (
                     f"[Compaction complete. Context reduced from {tokens_before} to {self.total_tokens} tokens. "
                     f"You are resuming from a compacted context. Follow your boot protocol.]"
-                    + context_left_tag(self.total_tokens, self.context_window, 0, gaze=self.gaze)
+                    + context_left_tag(self.total_tokens, self.context_window, 0, gaze=self.gaze,
+                                      compaction_threshold=self.compaction_threshold)
                 )
                 await self.backend.drain_stale()
                 probe_handle = await self.backend.send_prompt(probe_text)
@@ -853,7 +858,8 @@ class TurnEngine:
                 probe_text = (
                     f"[Compaction complete. Context reduced from {tokens_before} to {self.total_tokens} tokens. "
                     f"You are resuming from a compacted context. Follow your boot protocol.]"
-                    + context_left_tag(self.total_tokens, self.context_window, 0, gaze=self.gaze)
+                    + context_left_tag(self.total_tokens, self.context_window, 0, gaze=self.gaze,
+                                      compaction_threshold=self.compaction_threshold)
                 )
                 await self.backend.drain_stale()
                 probe_handle = await self.backend.send_prompt(probe_text)
@@ -896,7 +902,8 @@ class TurnEngine:
             self.gaze = read_gaze(agent_name, env=self.env)
             bell_text = (format_background_doorbell(msg, agent_name=agent_name)
                         + context_left_tag(self.total_tokens, self.context_window,
-                                          self.turns_since_compaction, gaze=self.gaze))
+                                          self.turns_since_compaction, gaze=self.gaze,
+                                          compaction_threshold=self.compaction_threshold))
             print(f"[asdaaas] BACKGROUND: {bell_text[:120]}")
             await self.backend.drain_stale()
             write_health(agent_name, "working", "processing background doorbell",

@@ -348,10 +348,10 @@ def get_compaction_instructions(agent_name, env=None):
 
 
 def context_left_tag(total_tokens, context_window, turns_since_compaction=None, gaze=None,
-                     reasoning_effort_info=None):
+                     reasoning_effort_info=None, compaction_threshold=None):
     """Format a compact context-remaining tag for prompt injection.
     
-    Reports tokens remaining before compaction (85% of context_window),
+    Reports tokens remaining before compaction (compaction_threshold of context_window),
     not before the theoretical maximum. This is the real usable budget.
     
     Includes compaction status and gaze:
@@ -363,7 +363,8 @@ def context_left_tag(total_tokens, context_window, turns_since_compaction=None, 
     """
     if context_window <= 0 or total_tokens <= 0:
         return ""
-    usable = int(context_window * COMPACTION_THRESHOLD)
+    threshold = compaction_threshold if compaction_threshold is not None else COMPACTION_THRESHOLD
+    usable = int(context_window * threshold)
     remaining = usable - total_tokens
     if remaining < 0:
         remaining = 0
@@ -2014,6 +2015,11 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
         backend.context_window = agent_ctx
         print(f"[asdaaas] Context window override: {agent_ctx}")
 
+    # ---- Per-agent compaction threshold ----
+    agent_compaction_threshold = config.agent_compaction_threshold(agent_name)
+    if agent_compaction_threshold is not None:
+        print(f"[asdaaas] Compaction threshold override: {agent_compaction_threshold}")
+
     # ---- Sandbox and permission rules ----
     agent_sandbox = config.agent_sandbox(agent_name)
     agent_allow_rules = config.agent_allow_rules(agent_name)
@@ -2156,7 +2162,8 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     engine = TurnEngine(env, agent_name, backend,
                         context_window=context_window,
                         watchdog=watchdog, pending_queue=pending_queue,
-                        observer_state_file=observer_state_file)
+                        observer_state_file=observer_state_file,
+                        compaction_threshold=agent_compaction_threshold)
 
     # Phase 7.2: Read adapter registrations
     adapters = read_adapter_registrations()

@@ -198,6 +198,10 @@ class AsdaaasConfig:
         """Reasoning effort level: xhigh, high, medium, low. None = binary default."""
         return self._agents.get(agent_name, {}).get("reasoning_effort")
 
+    def agent_compaction_threshold(self, agent_name: str) -> Optional[float]:
+        """Fraction of context_window at which auto-compaction fires. None = use default (0.85)."""
+        return self._agents.get(agent_name, {}).get("compaction_threshold")
+
     def agent_backend(self, agent_name: str) -> str:
         """Backend type: 'grok' (default) or 'claude'."""
         return self._agents.get(agent_name, {}).get("backend", "grok")

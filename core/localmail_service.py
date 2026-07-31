@@ -136,17 +136,14 @@ def ring_doorbell(agent_name: str, msg: dict, env: AsdaaasEnv):
         raise
 
 
-def get_asdaaas_agents(env: AsdaaasEnv) -> set:
-    """Detect which agents have asdaaas infrastructure (can receive doorbells)."""
-    if not env.agents_home.exists():
-        return set()
-    asdaaas_agents = set()
-    for agent_d in env.agents_home.iterdir():
-        if not agent_d.is_dir():
-            continue
-        if (agent_d / "asdaaas" / "doorbells").is_dir():
-            asdaaas_agents.add(agent_d.name)
-    return asdaaas_agents
+def get_asdaaas_agents(agents: list, env: AsdaaasEnv) -> set:
+    """Return the set of agents managed by asdaaas (can receive doorbells).
+
+    Uses the agent list passed to the service rather than probing for
+    doorbells dirs, which may not exist yet if no doorbell has been
+    delivered since the last restart.
+    """
+    return set(agents)
 
 
 # ============================================================================
@@ -155,7 +152,7 @@ def get_asdaaas_agents(env: AsdaaasEnv) -> set:
 
 def process_outboxes(agents: list, env: AsdaaasEnv):
     """Scan all agents' outboxes, deliver messages to recipients."""
-    asdaaas_agents = get_asdaaas_agents(env)
+    asdaaas_agents = get_asdaaas_agents(agents, env)
 
     for agent in agents:
         outbox = env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "outbox"
@@ -202,7 +199,7 @@ def process_inboxes(agents: list, env: AsdaaasEnv):
     For TUI agents, messages stay in inbox — they poll with read_mail().
     For asdaaas agents, we ring a doorbell AND delete the inbox file.
     """
-    asdaaas_agents = get_asdaaas_agents(env)
+    asdaaas_agents = get_asdaaas_agents(agents, env)
 
     for agent in agents:
         inbox = env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "inbox"
@@ -267,6 +264,7 @@ def watch_loop(agents: list, poll_interval: float = 1.0,
     for agent in agents:
         (env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "inbox").mkdir(parents=True, exist_ok=True)
         (env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "outbox").mkdir(parents=True, exist_ok=True)
+        (env.agents_home / agent / "asdaaas" / "doorbells").mkdir(parents=True, exist_ok=True)
 
     adapter_api.register_adapter(
         name="localmail",

@@ -9,10 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMS="$SCRIPT_DIR/../core"
 
 echo "=== Stopping existing localmail adapter ==="
-pkill -f "localmail.py.*--poll" 2>/dev/null && echo "Killed localmail adapter" || echo "No localmail adapter running"
-# Also match the watch_loop pattern and the new service name
-pkill -f "python3.*localmail.py$" 2>/dev/null
-pkill -f "python3.*localmail_service.py" 2>/dev/null
+pkill -f "localmail.py.*--agents" 2>/dev/null && echo "Killed localmail adapter" || echo "No localmail adapter running"
+pkill -f "localmail_service.py" 2>/dev/null
 sleep 1
 
 echo ""

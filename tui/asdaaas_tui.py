@@ -67,6 +67,7 @@ from tui_env import TuiEnv
 from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme
 from chat_widgets import (
     ToolCallPanel, PlanPanel, UserMessage, AgentMessage, ThinkingBlock, InterjectionBlock,
+    SystemReminderPanel, is_system_reminder,
 )
 from message_input import MessageInput
 from chrome_widgets import (
@@ -957,6 +958,10 @@ class AsdaaasTUI(App):
         border: round $warning;
         padding: 0 1;
         border-title-align: left;
+    }
+
+    SystemReminderPanel {
+        margin: 0 0 0 2;
     }
 
     SystemAlert {
@@ -3092,9 +3097,19 @@ Type anything else to send a message to the agent.
             return
 
         # Skip messages we just sent from the TUI input bar (avoid double-display)
-        # Check if this text matches our last sent message
         if hasattr(self, "_last_sent_text") and self._last_sent_text and text.strip() == self._last_sent_text.strip():
-            self._last_sent_text = None  # Clear so we only skip once
+            self._last_sent_text = None
+            return
+
+        # Harness <system-reminder> blobs: not operator turns — tool-like panel
+        if is_system_reminder(text):
+            self._current_agent_msg = None
+            self._current_thinking = None
+            content = self._content_scroll()
+            content.mount(SystemReminderPanel(text))
+            if self._following_tail():
+                content.refresh(layout=True)
+            self._scroll_to_bottom()
             return
 
         # Increment logical turn counter and insert separator
@@ -3103,7 +3118,6 @@ Type anything else to send a message to the agent.
         turn_num = state["logical_turn"]
         trigger = classify_turn_trigger(text)
 
-        # Format timestamp from update metadata or current time
         ts_str = ""
         meta = update.get("_meta", {})
         if meta.get("ts"):
@@ -3113,7 +3127,6 @@ Type anything else to send a message to the agent.
                 self._last_event_ts
             ).strftime("%a %b %d %H:%M:%S")
 
-        # End current agent message block
         self._current_agent_msg = None
         self._current_thinking = None
 
@@ -3123,7 +3136,6 @@ Type anything else to send a message to the agent.
         content.refresh(layout=True)
         self._scroll_to_bottom()
 
-        # Update header
         try:
             header = self.query_one("#agent-header", AgentHeader)
             header.turn_logical = turn_num
@@ -3267,7 +3279,10 @@ Type anything else to send a message to the agent.
                         elif event_type == "user_message_chunk":
                             text = update.get("content", {}).get("text", "")
                             if text:
-                                widgets_to_prepend.append(UserMessage(text))
+                                if is_system_reminder(text):
+                                    widgets_to_prepend.append(SystemReminderPanel(text))
+                                else:
+                                    widgets_to_prepend.append(UserMessage(text))
                         elif event_type in ("tool_call_update", "tool_call"):
                             title = update.get("title", "tool")
                             status = update.get("status", "completed" if event_type == "tool_call_update" else "running")

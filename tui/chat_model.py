@@ -196,6 +196,11 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
         if not text:
             return changes
         state.close_open_streams()
+        # Harness chrome — not a logical user turn
+        if text.lstrip().startswith("<system-reminder>") or text.lstrip().startswith("<system_reminder>"):
+            state.items.append(SystemItem(text=text, kind="system_reminder"))
+            changes.append("system_reminder")
+            return changes
         state.logical_turn += 1
         state.items.append(TurnMark(number=state.logical_turn, trigger=classify_turn_trigger(text)))
         state.items.append(SpeechItem(text=text, kind="user"))

@@ -10,6 +10,8 @@ from theme import Theme
 def classify_turn_trigger(text: str) -> str:
     """Classify a user_message_chunk's content into a human-readable trigger label."""
     t = text.strip()
+    if t.startswith("<system-reminder>") or t.startswith("<system_reminder>"):
+        return "system"
     # asdaaas doorbells
     if "[continue" in t:
         return "continue"

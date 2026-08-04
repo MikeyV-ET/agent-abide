@@ -182,6 +182,87 @@ class PlanPanel(Static):
         return Panel(table, title="📋 Plan", title_align="left",
                      border_style=Theme.BR_PURPLE, padding=(0, 1))
 
+
+def is_system_reminder(text: str) -> bool:
+    """True if this user_message_chunk is harness chrome, not operator speech."""
+    if not text:
+        return False
+    s = text.lstrip()
+    return s.startswith("<system-reminder>") or s.startswith("<system_reminder>")
+
+
+class SystemReminderPanel(Static):
+    """Collapsed-by-default panel for <system-reminder> blobs (like tool panels).
+
+    These arrive as user_message_chunk but are not Eric turns — background task
+    notices, binary reminders, etc. Snippet + expand on click.
+    """
+
+    SNIPPET_LINES = 3
+    MAX_EXPANDED_LINES = 40
+
+    def __init__(self, text: str, **kwargs):
+        super().__init__(**kwargs)
+        self._text = text or ""
+        self._collapsed = True
+        self._title = self._make_title(self._text)
+
+    @staticmethod
+    def _make_title(text: str) -> str:
+        import re
+        t = text or ""
+        m = re.search(r'Background task\s+"([^"]+)"\s+completed', t)
+        if m:
+            short = m.group(1)
+            if len(short) > 24:
+                short = short[:24] + "…"
+            return f"system: task {short} completed"
+        m = re.search(r"<system-reminder>\s*([^\n<]{1,60})", t)
+        if m:
+            return f"system: {m.group(1).strip()[:50]}"
+        return "system-reminder"
+
+    def on_click(self, event) -> None:
+        self._collapsed = not self._collapsed
+        self.refresh(layout=True)
+
+    def render(self):
+        from textual.color import Color as TextualColor
+        border_style = Theme.DARK4
+        try:
+            color = TextualColor.parse(border_style)
+        except Exception:
+            color = TextualColor.parse("gray")
+
+        lines = self._text.split("\n") if self._text else []
+        title = f"📎 {self._title}"
+        if self._collapsed:
+            self.styles.border = ("round", color)
+            self.styles.padding = (0, 1)
+            self.border_title = title.replace("[", "\\[")
+            body = Text()
+            snippet = lines[: self.SNIPPET_LINES]
+            body.append("\n".join(snippet), style=Theme.DARK4)
+            hidden = max(0, len(lines) - len(snippet))
+            if hidden or len(self._text) > 200:
+                body.append(f"\n  ▸ +{hidden} lines — click to expand", style=Theme.DARK4)
+            else:
+                body.append("\n  ▸ click to expand", style=Theme.DARK4)
+            return body
+
+        self.styles.border = ("round", color)
+        self.styles.padding = (0, 1)
+        self.border_title = (title + " [expanded]").replace("[", "\\[")
+        if len(lines) > self.MAX_EXPANDED_LINES:
+            display = "\n".join(
+                lines[:25] + [f"... ({len(lines) - 35} lines) ..."] + lines[-10:]
+            )
+        else:
+            display = self._text
+        return Text(display, style=Theme.DARK4)
+
+
+
 class UserMessage(Static):
     """User message display -- clean inline style with chevron prefix."""
 

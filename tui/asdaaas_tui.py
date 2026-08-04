@@ -64,6 +64,7 @@ from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
 from event_coalesce import coalesce_events
 from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event
 from tui_env import TuiEnv
+from status_read import telemetry_from_files, code_version_stale
 
 
 def _flatten_to_text(renderable, width: int = 120) -> Text:
@@ -2724,56 +2725,35 @@ Type anything else to send a message to the agent.
     def _refresh_header_for_agent(self, agent_name: str) -> None:
         """Immediately refresh top-bar telemetry for agent (tab switch).
 
-        The background poller only runs every ~2s and only for the active agent,
-        so without this the header keeps the previous agent's ctx/health/gaze.
-        Main-thread synchronous FS reads — health.json/gaze.json are tiny.
+        Uses pure status_read.telemetry_from_files — no 2s poller wait.
         """
         try:
             header = self.query_one("#agent-header", AgentHeader)
         except NoMatches:
             return
-        header.agent_name = agent_name
         asdaaas_dir = Config.agent_home(agent_name) / "asdaaas"
-        # Health
-        try:
-            with open(asdaaas_dir / "health.json") as f:
-                health = __import__("json").load(f)
-            status = health.get("status", "unknown")
-            header.health_status = status
-            header.is_generating = status == "working"
-            tokens = health.get("totalTokens")
-            window = health.get("contextWindow")
-            if isinstance(tokens, int) and isinstance(window, int) and window > 0:
-                header.context_pct = int(tokens / window * 100)
-            else:
-                header.context_pct = 0
-            cv = health.get("code_version", "")
-            header.code_version = cv or ""
-            header.code_version_stale = bool(self._abide_head and cv and cv != self._abide_head)
-            model = health.get("model", "")
-            if model:
-                header.model_name = model
-        except Exception:
-            header.health_status = "unknown"
-            header.is_generating = False
-        # Gaze
-        try:
-            with open(asdaaas_dir / "gaze.json") as f:
-                gaze = __import__("json").load(f)
-            speech = gaze.get("speech", {})
-            target = speech.get("target", "?")
-            params = speech.get("params", {})
-            room = params.get("room", "") or params.get("pm", "")
-            header.gaze_target = f"{target}/{room}" if room else target
-        except Exception:
-            header.gaze_target = "unknown"
-        # Footer generating flag
+        tel = telemetry_from_files(
+            agent_name,
+            asdaaas_dir / "health.json",
+            asdaaas_dir / "gaze.json",
+            abide_head=getattr(self, "_abide_head", "") or "",
+        )
+        header.agent_name = tel.agent_name
+        header.health_status = tel.health_status
+        header.is_generating = tel.is_generating
+        header.context_pct = tel.context_pct
+        header.code_version = tel.code_version
+        header.code_version_stale = code_version_stale(
+            tel.code_version, getattr(self, "_abide_head", "") or ""
+        )
+        if tel.model_name:
+            header.model_name = tel.model_name
+        header.gaze_target = tel.gaze_target
         try:
             footer = self.query_one("#dynamic-footer", DynamicFooter)
-            footer.is_generating = header.is_generating
+            footer.is_generating = tel.is_generating
         except NoMatches:
             pass
-        # Logical turn from agent state
         try:
             header.turn_logical = self._agent_state.get(agent_name, {}).get("logical_turn", 0)
         except Exception:

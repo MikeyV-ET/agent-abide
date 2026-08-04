@@ -33,3 +33,7 @@ TuiEnv (tui_env.py)                           # injectable paths
 
 `Config.get_env()` / `set_env(TuiEnv)` — CLI sets env from `--agents-home`.
 `agent_home` falls back through `TuiEnv` when agents.json has no `home`.
+
+## status_read (2026-08-04)
+Pure health.json/gaze.json → AgentTelemetry. Used by tab-switch header refresh.
+Shadow tests: tests/test_chat_shadow.py validates ChatState under coalesced tool storms.

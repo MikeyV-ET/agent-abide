@@ -3215,7 +3215,7 @@ Type anything else to send a message to the agent.
             return
 
         state["loading_history"] = True
-        batch_size = 1  # Load 1 event per scroll tick
+        batch_size = 25  # Events per scroll-up load (1 was too sparse for large sessions)
 
         try:
             # Read backwards from earliest_offset
@@ -3268,27 +3268,40 @@ Type anything else to send a message to the agent.
                             text = update.get("content", {}).get("text", "")
                             if text:
                                 widgets_to_prepend.append(UserMessage(text))
-                        elif event_type == "tool_call_update":
+                        elif event_type in ("tool_call_update", "tool_call"):
                             title = update.get("title", "tool")
-                            status = update.get("status", "completed")
+                            status = update.get("status", "completed" if event_type == "tool_call_update" else "running")
                             kind = update.get("kind", "")
                             tool_id = update.get("toolCallId", "")
                             panel = ToolCallPanel(tool_id, title, kind)
                             panel.tool_status = status
                             panel._collapsed = True
-                            content_list = update.get("content", [])
-                            for item in content_list:
-                                if item.get("type") == "content":
-                                    inner = item.get("content", {})
-                                    raw = inner.get("text", "")
-                                    clean, intj_msgs = self._extract_interjections(raw)
-                                    for msg in intj_msgs:
-                                        key = interjection_key(msg)
-                                        if key in self._seen_interjections:
-                                            continue
-                                        self._seen_interjections.add(key)
-                                        widgets_to_prepend.append(InterjectionBlock(msg))
-                                    panel.tool_output = clean
+                            # Collect raw text from content[] and rawOutput (interjections live here)
+                            raw_parts = []
+                            content_list = update.get("content") or []
+                            if isinstance(content_list, list):
+                                for item in content_list:
+                                    if not isinstance(item, dict):
+                                        continue
+                                    if item.get("type") == "content":
+                                        inner = item.get("content", {})
+                                        if isinstance(inner, dict):
+                                            raw_parts.append(inner.get("text") or "")
+                                        elif isinstance(inner, str):
+                                            raw_parts.append(inner)
+                            raw_out = update.get("rawOutput")
+                            if isinstance(raw_out, str) and raw_out:
+                                raw_parts.append(raw_out)
+                            raw = "\n".join(raw_parts)
+                            clean, intj_msgs = self._extract_interjections(raw)
+                            for msg in intj_msgs:
+                                key = interjection_key(msg)
+                                if key in self._seen_interjections:
+                                    continue
+                                self._seen_interjections.add(key)
+                                widgets_to_prepend.append(InterjectionBlock(msg))
+                            if clean.strip():
+                                panel.tool_output = clean
                             widgets_to_prepend.append(panel)
                         elif event_type == "hook_annotation":
                             message = update.get("message", "")

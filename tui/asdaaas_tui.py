@@ -2702,6 +2702,65 @@ Type anything else to send a message to the agent.
         self._scroll_to_bottom()
         self.notify(f"Interrupt sent to {self._active_agent}", severity="warning")
 
+
+    def _refresh_header_for_agent(self, agent_name: str) -> None:
+        """Immediately refresh top-bar telemetry for agent (tab switch).
+
+        The background poller only runs every ~2s and only for the active agent,
+        so without this the header keeps the previous agent's ctx/health/gaze.
+        Main-thread synchronous FS reads — health.json/gaze.json are tiny.
+        """
+        try:
+            header = self.query_one("#agent-header", AgentHeader)
+        except NoMatches:
+            return
+        header.agent_name = agent_name
+        asdaaas_dir = Config.agent_home(agent_name) / "asdaaas"
+        # Health
+        try:
+            with open(asdaaas_dir / "health.json") as f:
+                health = __import__("json").load(f)
+            status = health.get("status", "unknown")
+            header.health_status = status
+            header.is_generating = status == "working"
+            tokens = health.get("totalTokens")
+            window = health.get("contextWindow")
+            if isinstance(tokens, int) and isinstance(window, int) and window > 0:
+                header.context_pct = int(tokens / window * 100)
+            else:
+                header.context_pct = 0
+            cv = health.get("code_version", "")
+            header.code_version = cv or ""
+            header.code_version_stale = bool(self._abide_head and cv and cv != self._abide_head)
+            model = health.get("model", "")
+            if model:
+                header.model_name = model
+        except Exception:
+            header.health_status = "unknown"
+            header.is_generating = False
+        # Gaze
+        try:
+            with open(asdaaas_dir / "gaze.json") as f:
+                gaze = __import__("json").load(f)
+            speech = gaze.get("speech", {})
+            target = speech.get("target", "?")
+            params = speech.get("params", {})
+            room = params.get("room", "") or params.get("pm", "")
+            header.gaze_target = f"{target}/{room}" if room else target
+        except Exception:
+            header.gaze_target = "unknown"
+        # Footer generating flag
+        try:
+            footer = self.query_one("#dynamic-footer", DynamicFooter)
+            footer.is_generating = header.is_generating
+        except NoMatches:
+            pass
+        # Logical turn from agent state
+        try:
+            header.turn_logical = self._agent_state.get(agent_name, {}).get("logical_turn", 0)
+        except Exception:
+            pass
+
     def action_switch_agent(self, agent_name: str) -> None:
         """Switch to a different agent tab."""
         if agent_name not in self._agents:
@@ -2737,12 +2796,8 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
-        # Update header
-        try:
-            header = self.query_one("#agent-header", AgentHeader)
-            header.agent_name = agent_name
-        except NoMatches:
-            pass
+        # Update header telemetry immediately (don't wait for 2s poller)
+        self._refresh_header_for_agent(agent_name)
 
         # Update tab bar
         try:

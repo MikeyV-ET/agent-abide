@@ -6,7 +6,7 @@ from rich.markdown import Markdown as RichMarkdown
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
-from rich.console import Group
+from rich.console import Console as RichConsole, Group
 
 from theme import Theme
 

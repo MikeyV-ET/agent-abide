@@ -62,6 +62,7 @@ from rich.console import Console as RichConsole, Group
 from ephact_parser import extract_ephacts, has_partial_ephact
 from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
 from event_coalesce import coalesce_events
+from chat_model import extract_interjections as _cm_extract_interjections
 
 
 def _flatten_to_text(renderable, width: int = 120) -> Text:
@@ -3802,24 +3803,8 @@ Type anything else to send a message to the agent.
 
     @staticmethod
     def _extract_interjections(text: str) -> tuple[str, list[str]]:
-        """Extract <interjection> blocks from text.
-
-        Returns (clean_text, list_of_interjection_messages).
-        """
-        import re
-        if "<interjection>" not in text:
-            return text, []
-        messages = []
-        for m in re.finditer(r"<interjection>\n?(.*?)</interjection>\n?", text, re.DOTALL):
-            body = m.group(1).strip()
-            if body:
-                # Strip the [system: ...] header line if present
-                lines = body.split("\n")
-                if lines and lines[0].startswith("[system:"):
-                    body = "\n".join(lines[1:]).strip()
-                messages.append(body)
-        clean = re.sub(r"<interjection>\n?(.*?)</interjection>\n?", "", text, flags=re.DOTALL)
-        return clean, messages
+        """Extract <interjection> blocks — pure logic in chat_model."""
+        return _cm_extract_interjections(text)
 
     def _dispatch_event(self, event: dict) -> None:
         """Dispatch an updates.jsonl event to the appropriate renderer."""

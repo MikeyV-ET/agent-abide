@@ -61,6 +61,7 @@ from rich.console import Console as RichConsole, Group
 
 from ephact_parser import extract_ephacts, has_partial_ephact
 from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
+from event_coalesce import coalesce_events
 
 
 def _flatten_to_text(renderable, width: int = 120) -> Text:
@@ -515,7 +516,7 @@ class AgentHeader(Static):
     def watch_is_generating(self, generating: bool) -> None:
         """Start/stop spinner refresh timer."""
         if generating:
-            self._spinner_timer = self.set_interval(1 / 8, self.refresh)
+            self._spinner_timer = self.set_interval(1 / 4, self.refresh)
         else:
             if hasattr(self, "_spinner_timer") and self._spinner_timer:
                 self._spinner_timer.stop()
@@ -1007,8 +1008,16 @@ class MessageInput(TextArea):
 
 
 class ToolCallPanel(Static):
-    """Renders a tool call as a bordered panel. Completed panels collapse to one line.
-    Click to expand/collapse."""
+    """Tool call panel: default snippet view, full body on click expand.
+
+    Display policy (Eric 2026-08-04): tools are secondary to thinking; Grok-4.5
+    tool dumps should not dominate scrollback. Default = small snippet + expand.
+    """
+
+    SNIPPET_LINES = 4
+    MAX_EXPANDED_LINES = 80
+    MAX_STORED_CHARS = 65536
+    MAX_ACTIVE_LINES = 15  # legacy alias
 
     def __init__(self, tool_id: str, title: str, kind: str = "", **kwargs):
         super().__init__(**kwargs)
@@ -1018,33 +1027,41 @@ class ToolCallPanel(Static):
         self.tool_status = "running"
         self.tool_output = ""
         self.border_title = title.replace("[", "\\[")
-        self._collapsed = False
+        self._collapsed = True  # snippet mode by default
         self._mounted_interjections: set[str] = set()
+
+    def _cap_output(self, content: str) -> str:
+        if len(content) <= self.MAX_STORED_CHARS:
+            return content
+        keep = self.MAX_STORED_CHARS - 80
+        return f"[… truncated {len(content) - keep} chars …]\n" + content[-keep:]
 
     def set_status(self, status: str):
         self.tool_status = status
-        # Auto-collapse completed/failed panels
         if status in ("completed", "failed"):
             self._collapsed = True
         self.refresh(layout=True)
 
     def set_output(self, content: str):
-        self.tool_output = content
-        self.refresh(layout=True)
+        self.tool_output = self._cap_output(content)
+        if self._collapsed:
+            self.refresh()
+        else:
+            self.refresh(layout=True)
 
     def append_output(self, content: str):
-        self.tool_output += content
-        self.refresh(layout=True)
-
-    MAX_ACTIVE_LINES = 15  # Max lines shown for active/running tool panels
+        self.tool_output = self._cap_output(self.tool_output + content)
+        if self._collapsed:
+            self.refresh()
+        else:
+            self.refresh(layout=True)
 
     def on_click(self, event) -> None:
-        """Toggle collapsed state on click."""
+        """Toggle snippet vs full body."""
         self._collapsed = not self._collapsed
         self.refresh(layout=True)
 
     def render(self):
-        # Status indicator
         if self.tool_status == "completed":
             status_icon = "✓"
             border_style = Theme.BR_GREEN
@@ -1058,57 +1075,58 @@ class ToolCallPanel(Static):
             status_icon = "…"
             border_style = Theme.BR_BLUE
 
-        # Kind icon
         kind_icons = {
             "read": "📖", "execute": "⚡", "edit": "✏️",
             "search": "🔍", "think": "💭", "other": "📋",
         }
         kind_icon = kind_icons.get(self.tool_kind, "🔧")
-
         title = f"{kind_icon} {self.tool_title} {status_icon}"
 
-        # Set CSS border dynamically based on status
         from textual.color import Color as TextualColor
         try:
             color = TextualColor.parse(border_style)
         except Exception:
             color = TextualColor.parse("blue")
 
-        # Collapsed: no border, single line
-        if self._collapsed:
-            self.styles.border = ("none", color)
-            self.styles.padding = (0, 0)
-            self.border_title = ""
-            text = Text()
-            text.append(f"  {title}", style=border_style)
-            if self.tool_output:
-                text.append("  ▸ click to expand", style=Theme.DARK4)
-            return text
+        lines = self.tool_output.split("\n") if self.tool_output else []
+        n_lines = len(lines) if self.tool_output else 0
 
-        # Expanded: CSS border + content as Text
+        if self._collapsed:
+            self.styles.border = ("round", color)
+            self.styles.padding = (0, 1)
+            self.border_title = title.replace("[", "\\[")
+            body = Text()
+            if not self.tool_output:
+                body.append("(no output yet)", style=f"italic {Theme.DARK4}")
+            else:
+                snippet = lines[: self.SNIPPET_LINES]
+                body.append("\n".join(snippet), style=Theme.GRAY)
+                hidden = n_lines - len(snippet)
+                if hidden > 0 or len(self.tool_output) > 200:
+                    body.append(
+                        f"\n  ▸ +{max(hidden, 0)} lines — click to expand",
+                        style=Theme.DARK4,
+                    )
+                else:
+                    body.append("\n  ▸ click to expand", style=Theme.DARK4)
+            return body
+
         self.styles.border = ("round", color)
         self.styles.padding = (0, 1)
-        self.border_title = title.replace("[", "\\[")
+        self.border_title = (title + " [expanded — click to collapse]").replace("[", "\\[")
 
         if self.tool_output:
-            output = self.tool_output
-            lines = output.split("\n")
-            is_active = self.tool_status not in ("completed", "failed")
-
-            if is_active and len(lines) > self.MAX_ACTIVE_LINES:
-                display = "\n".join(lines[-self.MAX_ACTIVE_LINES:])
-                header = f"... ({len(lines) - self.MAX_ACTIVE_LINES} more lines above, click to expand) ...\n"
-                content = Text(header, style=Theme.DARK4)
-                content.append(display, style=Theme.GRAY)
-            elif not is_active and len(output) > 2000:
-                display = output[:1000] + "\n... (truncated) ...\n" + output[-500:]
+            if n_lines > self.MAX_EXPANDED_LINES:
+                display = "\n".join(
+                    lines[:40] + [f"... ({n_lines - 60} lines) ..."] + lines[-20:]
+                )
                 content = Text(display, style=Theme.GRAY)
             else:
-                content = Text(output, style=Theme.GRAY)
+                content = Text(self.tool_output, style=Theme.GRAY)
         else:
             content = Text("(no output)", style=f"italic {Theme.DARK4}")
-
         return content
+
 
 
 class PlanPanel(Static):
@@ -1445,7 +1463,8 @@ class AgentMessage(Static):
     def append_chunk(self, text: str):
         self._chunks.append(text)
         self._text = "".join(self._chunks)
-        self.refresh(layout=True)
+        # Streaming: repaint only — full layout on every chunk starves input/scroll
+        self.refresh()
 
     @property
     def full_text(self) -> str:
@@ -1507,7 +1526,8 @@ class ThinkingBlock(Static):
         self._chunks.append(text)
         self._text = "".join(self._chunks)
         self._token_estimate = len(self._text) // 4
-        self.refresh(layout=True)
+        # Keep thinking visible; avoid layout thrash on every thought chunk
+        self.refresh()
 
     def on_click(self, event) -> None:
         """Toggle expanded/collapsed state."""
@@ -3547,20 +3567,25 @@ Type anything else to send a message to the agent.
                             state["updates_offset"] = offset + len(complete.encode("utf-8"))
                             lines = complete.strip().split("\n")
 
-                    parsed_count = 0
+                    parsed = []
                     skip_count = 0
                     for line in lines:
                         if not line.strip():
                             continue
                         try:
-                            event = json.loads(line)
-                            self.call_from_thread(
-                                self._dispatch_event_for_agent, event, agent_name
-                            )
-                            parsed_count += 1
+                            parsed.append(json.loads(line))
                         except json.JSONDecodeError:
                             skip_count += 1
-                    self._debug(f"TAIL_POLL read={len(new_data)} lines={len(lines)} parsed={parsed_count} skipped={skip_count} offset={state['updates_offset']}")
+                    batch = coalesce_events(parsed)
+                    for event in batch:
+                        self.call_from_thread(
+                            self._dispatch_event_for_agent, event, agent_name
+                        )
+                    self._debug(
+                        f"TAIL_POLL read={len(new_data)} lines={len(lines)} "
+                        f"parsed={len(parsed)} coalesced={len(batch)} "
+                        f"skipped={skip_count} offset={state['updates_offset']}"
+                    )
                 elif current_size < offset:
                     state["updates_offset"] = 0
 

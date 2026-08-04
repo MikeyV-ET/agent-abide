@@ -981,6 +981,32 @@ def queue_continue_doorbell(agent_name, text=None, env=None):
     return True
 
 
+
+def queue_interjection_doorbell(agent_name, text, env=None):
+    """Queue a drained mid-turn interjection as its own doorbell (never drop).
+
+    Unlike queue_continue_doorbell, this always writes a unique file so
+    leftover interjections are not silently lost when a cont_* already exists.
+    """
+    import secrets
+    bell_dir = agent_dir(agent_name, env=env) / "doorbells"
+    bell_dir.mkdir(parents=True, exist_ok=True)
+    bell_id = f"bell_{secrets.token_hex(4)}"
+    bell = {
+        "adapter": "interjection",
+        "priority": 5,
+        "text": text,
+        "source": "interjection_drain",
+        "id": bell_id,
+        "ts": time.time(),
+    }
+    fd, tmp_path = tempfile.mkstemp(dir=str(bell_dir), suffix=".tmp", prefix=f"inj_{bell_id}_")
+    with os.fdopen(fd, "w") as f:
+        json.dump(bell, f)
+    os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
+    return True
+
+
 def write_to_outbox(agent_name, content, gaze_target, content_type="speech", env=None):
     """Write a message to an adapter's per-agent outbox."""
     if gaze_target is None:

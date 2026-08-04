@@ -492,8 +492,11 @@ class TurnEngine:
             from interjection import drain_interjection_queue
             leftover = drain_interjection_queue(agent_name, env=self.env)
             if leftover:
+                # Always write unique doorbells — queue_continue_doorbell silently
+                # drops text when cont_* already exists (Squiggy interjection loss).
+                from asdaaas import queue_interjection_doorbell
                 for msg_text in leftover:
-                    queue_continue_doorbell(agent_name, text=msg_text, env=self.env)
+                    queue_interjection_doorbell(agent_name, msg_text, env=self.env)
                 ptr.interjections_drained = len(leftover)
                 print(f"[asdaaas] Drained {len(leftover)} leftover interjection(s) → doorbells")
 

@@ -2991,7 +2991,7 @@ Type anything else to send a message to the agent.
         self._current_thinking = None
 
         content = self._content_scroll()
-        panel = ToolCallPanel(tool_id, title)
+        panel = ToolCallPanel(tool_id, title, ts=self._event_ts_str())
         self._tool_panels[tool_id] = panel
         content.mount(panel)
         if self._following_tail():
@@ -3013,7 +3013,7 @@ Type anything else to send a message to the agent.
             # Tool call announcement might have been missed (e.g., started before TUI)
             # Create a panel for it
             display_title = title or f"tool {tool_id[:8]}"
-            panel = ToolCallPanel(tool_id, display_title, kind)
+            panel = ToolCallPanel(tool_id, display_title, kind, ts=self._event_ts_str())
             self._tool_panels[tool_id] = panel
             content = self._content_scroll()
             content.mount(panel)
@@ -3288,7 +3288,12 @@ Type anything else to send a message to the agent.
                             status = update.get("status", "completed" if event_type == "tool_call_update" else "running")
                             kind = update.get("kind", "")
                             tool_id = update.get("toolCallId", "")
-                            panel = ToolCallPanel(tool_id, title, kind)
+                            ts_raw = event.get("timestamp")
+                            try:
+                                ts_str = datetime.datetime.fromtimestamp(float(ts_raw)).strftime("%H:%M:%S") if ts_raw else ""
+                            except Exception:
+                                ts_str = ""
+                            panel = ToolCallPanel(tool_id, title, kind, ts=ts_str)
                             panel.tool_status = status
                             panel._collapsed = True
                             # Collect raw text from content[] and rawOutput (interjections live here)
@@ -3353,6 +3358,16 @@ Type anything else to send a message to the agent.
 
     _dispatching_agent = None
 
+
+    def _event_ts_str(self) -> str:
+        """HH:MM:SS from last event timestamp for panel citations."""
+        ts = getattr(self, "_last_event_ts", None)
+        if not ts:
+            return time.strftime("%H:%M:%S")
+        try:
+            return datetime.datetime.fromtimestamp(float(ts)).strftime("%H:%M:%S")
+        except Exception:
+            return time.strftime("%H:%M:%S")
 
     def _following_tail(self) -> bool:
         """True if the visible content scroll is pinned to the live tail."""

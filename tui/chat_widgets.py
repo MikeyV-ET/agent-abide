@@ -128,9 +128,12 @@ class ToolCallPanel(Static):
         if label.lower() in ("tool", "unknown tool", "unknown"):
             label = self.tool_kind or "tool"
         ref = short_ref(self.tool_id)
-        # e.g. "🔧 bash · id:a6f1a470 ⟳" — Eric can cite id:a6f1a470 to the agent
-        if ref:
-            title = f"{kind_icon} {label} · {ref} {status_icon}"
+        # Prefer clock time for human citation ("the 15:08 tool"); keep short id as backup
+        cite = self.tool_ts or ref
+        if cite and ref and self.tool_ts:
+            title = f"{kind_icon} {label} · {self.tool_ts} · {ref} {status_icon}"
+        elif cite:
+            title = f"{kind_icon} {label} · {cite} {status_icon}"
         else:
             title = f"{kind_icon} {label} {status_icon}"
 
@@ -150,7 +153,8 @@ class ToolCallPanel(Static):
             body = Text()
             if not self.tool_output:
                 ref = short_ref(self.tool_id)
-                empty = f"(no output yet — cite {ref})" if ref else "(no output yet)"
+                cite = self.tool_ts or ref
+                empty = f"(no output yet — cite {cite})" if cite else "(no output yet)"
                 body.append(empty, style=f"italic {Theme.DARK4}")
             else:
                 snippet = lines[: self.SNIPPET_LINES]

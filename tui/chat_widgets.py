@@ -62,13 +62,14 @@ class ToolCallPanel(Static):
     MAX_STORED_CHARS = 65536
     MAX_ACTIVE_LINES = 15  # legacy alias
 
-    def __init__(self, tool_id: str, title: str, kind: str = "", **kwargs):
+    def __init__(self, tool_id: str, title: str, kind: str = "", ts: str = "", **kwargs):
         super().__init__(**kwargs)
         self.tool_id = tool_id
         self.tool_title = title
         self.tool_kind = kind
         self.tool_status = "running"
         self.tool_output = ""
+        self.tool_ts = ts or ""
         self.border_title = title.replace("[", "\\[")
         self._collapsed = True  # snippet mode by default
         self._mounted_interjections: set[str] = set()
@@ -129,9 +130,9 @@ class ToolCallPanel(Static):
             label = self.tool_kind or "tool"
         ref = short_ref(self.tool_id)
         # Prefer clock time for human citation ("the 15:08 tool"); keep short id as backup
-        cite = self.tool_ts or ref
-        if cite and ref and self.tool_ts:
-            title = f"{kind_icon} {label} · {self.tool_ts} · {ref} {status_icon}"
+        cite = getattr(self, "tool_ts", "") or ref
+        if cite and ref and getattr(self, "tool_ts", ""):
+            title = f"{kind_icon} {label} · {getattr(self, "tool_ts", "")} · {ref} {status_icon}"
         elif cite:
             title = f"{kind_icon} {label} · {cite} {status_icon}"
         else:
@@ -153,7 +154,7 @@ class ToolCallPanel(Static):
             body = Text()
             if not self.tool_output:
                 ref = short_ref(self.tool_id)
-                cite = self.tool_ts or ref
+        cite = getattr(self, "tool_ts", "") or ref
                 empty = f"(no output yet — cite {cite})" if cite else "(no output yet)"
                 body.append(empty, style=f"italic {Theme.DARK4}")
             else:

@@ -3306,12 +3306,20 @@ Type anything else to send a message to the agent.
                 except Exception:
                     pass
 
-                # Read turn count from profile
+                # Read turn count from profile — cache by size to avoid re-scan every 2s
                 try:
                     profile_path = asdaaas_dir / "profile" / f"{active}.jsonl"
                     if profile_path.exists():
-                        with open(profile_path, "rb") as f:
-                            count = sum(1 for _ in f)
+                        st = profile_path.stat()
+                        cache = getattr(self, "_profile_turn_cache", {})
+                        key = (active, st.st_mtime_ns, st.st_size)
+                        if key in cache:
+                            count = cache[key]
+                        else:
+                            with open(profile_path, "rb") as f:
+                                count = f.read().count(b"\n")
+                            cache = {key: count}  # keep only latest
+                            self._profile_turn_cache = cache
                         self.call_from_thread(
                             setattr, header, "turn_physical", count
                         )
@@ -3863,7 +3871,8 @@ Type anything else to send a message to the agent.
         if was_none:
             self._current_agent_msg = AgentMessage()
             content.mount(self._current_agent_msg)
-            content.refresh(layout=True)
+            if self._following_tail():
+                content.refresh(layout=True)
 
         self._current_agent_msg.append_chunk(text)
 
@@ -3901,7 +3910,8 @@ Type anything else to send a message to the agent.
             self._current_thinking = ThinkingBlock()
             self._current_thinking.display = self._show_thinking
             content.mount(self._current_thinking)
-            content.refresh(layout=True)
+            if self._following_tail():
+                content.refresh(layout=True)
 
         self._current_thinking.append_chunk(text)
         if self._show_thinking:
@@ -3920,7 +3930,8 @@ Type anything else to send a message to the agent.
         panel = ToolCallPanel(tool_id, title)
         self._tool_panels[tool_id] = panel
         content.mount(panel)
-        content.refresh(layout=True)
+        if self._following_tail():
+            content.refresh(layout=True)
         self._debug(f"TOOL_CALL id={tool_id[:8]} title={title}")
         self._scroll_to_bottom()
 
@@ -4242,6 +4253,26 @@ Type anything else to send a message to the agent.
     _pending_scroll_timer = None
 
     _dispatching_agent = None
+
+
+    def _following_tail(self) -> bool:
+        """True if the visible content scroll is pinned to the live tail."""
+        try:
+            if self._dispatching_agent and self._dispatching_agent != self._active_agent:
+                return False  # background agent — don't thrash visible layout
+            return bool(self._content_scroll()._follow_tail)
+        except Exception:
+            return True
+
+    def _stream_refresh(self, widget) -> None:
+        """Refresh a streaming widget; layout only when following tail."""
+        if widget is None:
+            return
+        if self._following_tail():
+            widget.refresh()
+        else:
+            # User reading history: update data only, minimal layout cost
+            widget.refresh()
 
     def _scroll_to_bottom(self) -> None:
         """Scroll the content area to the bottom (only for the visible agent).

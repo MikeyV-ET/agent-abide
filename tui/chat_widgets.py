@@ -55,6 +55,7 @@ class ToolCallPanel(Static):
 
     Display policy (Eric 2026-08-04): tools are secondary to thinking; Grok-4.5
     tool dumps should not dominate scrollback. Default = small snippet + expand.
+    Border shows HH:MM:SS + short id for citation.
     """
 
     SNIPPET_LINES = 4
@@ -105,6 +106,26 @@ class ToolCallPanel(Static):
         self._collapsed = not self._collapsed
         self.refresh(layout=True)
 
+    def _title_line(self, status_icon: str) -> str:
+        kind_icons = {
+            "read": "📖", "execute": "⚡", "edit": "✏️",
+            "search": "🔍", "think": "💭", "other": "📋",
+        }
+        kind_icon = kind_icons.get(self.tool_kind, "🔧")
+        label = (self.tool_title or "").strip() or (self.tool_kind or "tool")
+        if label.lower() in ("tool", "unknown tool", "unknown"):
+            label = self.tool_kind or "tool"
+        ref = short_ref(self.tool_id)
+        ts = self.tool_ts or ""
+        # Prefer clock time for citation ("the 15:08 tool")
+        if ts and ref:
+            return f"{kind_icon} {label} · {ts} · {ref} {status_icon}"
+        if ts:
+            return f"{kind_icon} {label} · {ts} {status_icon}"
+        if ref:
+            return f"{kind_icon} {label} · {ref} {status_icon}"
+        return f"{kind_icon} {label} {status_icon}"
+
     def render(self):
         if self.tool_status == "completed":
             status_icon = "✓"
@@ -119,24 +140,7 @@ class ToolCallPanel(Static):
             status_icon = "…"
             border_style = Theme.BR_BLUE
 
-        kind_icons = {
-            "read": "📖", "execute": "⚡", "edit": "✏️",
-            "search": "🔍", "think": "💭", "other": "📋",
-        }
-        kind_icon = kind_icons.get(self.tool_kind, "🔧")
-        # Prefer a real title; generic "tool" is useless for reference
-        label = (self.tool_title or "").strip() or (self.tool_kind or "tool")
-        if label.lower() in ("tool", "unknown tool", "unknown"):
-            label = self.tool_kind or "tool"
-        ref = short_ref(self.tool_id)
-        # Prefer clock time for human citation ("the 15:08 tool"); keep short id as backup
-        cite = getattr(self, "tool_ts", "") or ref
-        if cite and ref and getattr(self, "tool_ts", ""):
-            title = f"{kind_icon} {label} · {getattr(self, "tool_ts", "")} · {ref} {status_icon}"
-        elif cite:
-            title = f"{kind_icon} {label} · {cite} {status_icon}"
-        else:
-            title = f"{kind_icon} {label} {status_icon}"
+        title = self._title_line(status_icon)
 
         from textual.color import Color as TextualColor
         try:
@@ -153,8 +157,7 @@ class ToolCallPanel(Static):
             self.border_title = title.replace("[", "\\[")
             body = Text()
             if not self.tool_output:
-                ref = short_ref(self.tool_id)
-        cite = getattr(self, "tool_ts", "") or ref
+                cite = self.tool_ts or short_ref(self.tool_id)
                 empty = f"(no output yet — cite {cite})" if cite else "(no output yet)"
                 body.append(empty, style=f"italic {Theme.DARK4}")
             else:
@@ -185,6 +188,7 @@ class ToolCallPanel(Static):
         else:
             content = Text("(no output)", style=f"italic {Theme.DARK4}")
         return content
+
 
 class PlanPanel(Static):
     """Renders the agent's todo/plan list."""

@@ -62,7 +62,8 @@ from rich.console import Console as RichConsole, Group
 from ephact_parser import extract_ephacts, has_partial_ephact
 from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
 from event_coalesce import coalesce_events
-from chat_model import extract_interjections as _cm_extract_interjections
+from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event
+from tui_env import TuiEnv
 
 
 def _flatten_to_text(renderable, width: int = 120) -> Text:
@@ -283,6 +284,21 @@ class Config:
         with open(cls.OPERATOR_FILE, "w") as f:
             json.dump({"name": name}, f)
 
+    _env: "TuiEnv | None" = None  # type: ignore[assignment]
+
+    @classmethod
+    def get_env(cls) -> "TuiEnv":
+        """Injectable path root; built from AGENTS_HOME when unset."""
+        if cls._env is None:
+            cls._env = TuiEnv.from_defaults(cls.AGENTS_HOME)
+            # Prefer agents.json homes via agent_home still
+        return cls._env
+
+    @classmethod
+    def set_env(cls, env: "TuiEnv") -> None:
+        cls._env = env
+        cls.AGENTS_HOME = str(env.agents_home)
+
     @classmethod
     def agent_home(cls, agent_name: str) -> Path:
         """Return home directory for an agent, using agents.json 'home' field.
@@ -294,7 +310,7 @@ class Config:
         home = agent_cfg.get("home")
         if home:
             return Path(home)
-        return Path(cls.AGENTS_HOME) / agent_name
+        return cls.get_env().agent_home(agent_name)
 
     @classmethod
     def agent_dir(cls) -> Path:
@@ -1936,6 +1952,7 @@ class AsdaaasTUI(App):
                 "input_draft": "",  # Saved input text when switching tabs
                 "backend": Config.agent_backend(agent),  # "grok" or "claude"
                 "logical_turn": 0,  # Logical turn counter (user_message_chunk events)
+                "chat_state": ChatState(),  # pure model, dual-path with widgets
             }
         # Shared state
         self._abide_head = self._get_abide_head()
@@ -3813,6 +3830,22 @@ Type anything else to send a message to the agent.
         # Stash event timestamp for turn separators
         self._last_event_ts = event.get("timestamp")
 
+        # Dual-path: pure ChatState always updated (testable; future UI driver)
+        try:
+            agent = self._active_agent
+            st = self._agent_state.get(agent)
+            if st is not None:
+                cs = st.get("chat_state")
+                if cs is None:
+                    cs = ChatState()
+                    st["chat_state"] = cs
+                apply_event(cs, event)
+                # Keep logical_turn in sync for header
+                if cs.logical_turn:
+                    st["logical_turn"] = cs.logical_turn
+        except Exception:
+            pass
+
         if event_type == "agent_message_chunk":
             self._on_agent_message_chunk(update)
         elif event_type == "tool_call":
@@ -4372,6 +4405,7 @@ def main():
 
     Config.AGENT_NAME = args.agent
     Config.AGENTS_HOME = args.agents_home
+    Config.set_env(TuiEnv.from_defaults(args.agents_home))
     Config.UPDATES_FILE = args.updates
     Config.GROK_SESSIONS_DIR = args.sessions_dir
     Config.API_URL = args.api_url

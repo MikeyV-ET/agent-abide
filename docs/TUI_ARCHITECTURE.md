@@ -25,3 +25,11 @@ TuiEnv (tui_env.py)                           # injectable paths
 - Thinking: almost always fully visible
 - Tools: snippet default, expand on click
 - Smooth UI and usable history both required
+
+## Dual-path dispatch (2026-08-04)
+`AsdaaasTUI._dispatch_event` now:
+1. `apply_event(chat_state, event)` on per-agent pure `ChatState`
+2. Existing widget mount/update path (unchanged UX)
+
+`Config.get_env()` / `set_env(TuiEnv)` — CLI sets env from `--agents-home`.
+`agent_home` falls back through `TuiEnv` when agents.json has no `home`.

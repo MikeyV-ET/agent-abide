@@ -37,3 +37,10 @@ TuiEnv (tui_env.py)                           # injectable paths
 ## status_read (2026-08-04)
 Pure health.json/gaze.json → AgentTelemetry. Used by tab-switch header refresh.
 Shadow tests: tests/test_chat_shadow.py validates ChatState under coalesced tool storms.
+
+## Widget / theme extract (2026-08-04)
+| Module | Contents |
+|--------|----------|
+| `tui/theme.py` | Palettes, THEMES, Theme proxy, set_theme() |
+| `tui/chat_widgets.py` | ToolCallPanel, PlanPanel, UserMessage, AgentMessage, ThinkingBlock, InterjectionBlock, _flatten_to_text |
+| `tui/asdaaas_tui.py` | App shell, remaining chrome widgets, workers (~4.0k lines) |

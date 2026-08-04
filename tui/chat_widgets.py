@@ -10,6 +10,22 @@ from rich.console import Console as RichConsole, Group
 
 from theme import Theme
 
+
+def short_ref(tool_id: str, prefix: str = "id") -> str:
+    """Human-citable short id from toolCallId / task id / bell id."""
+    if not tool_id:
+        return ""
+    s = tool_id.strip()
+    if s.startswith("call-"):
+        s = s[5:]
+    if s.startswith("bell_"):
+        return f"bell:{(s[5:13] if len(s) > 13 else s[5:])}"
+    chunk = s.replace("_", "-").split("-")[0]
+    if len(chunk) > 10:
+        chunk = chunk[:8]
+    return f"{prefix}:{chunk}" if chunk else ""
+
+
 def _flatten_to_text(renderable, width: int = 120) -> Text:
     """Render a Rich renderable through Console, return as Text for native selectability.
 
@@ -107,7 +123,16 @@ class ToolCallPanel(Static):
             "search": "🔍", "think": "💭", "other": "📋",
         }
         kind_icon = kind_icons.get(self.tool_kind, "🔧")
-        title = f"{kind_icon} {self.tool_title} {status_icon}"
+        # Prefer a real title; generic "tool" is useless for reference
+        label = (self.tool_title or "").strip() or (self.tool_kind or "tool")
+        if label.lower() in ("tool", "unknown tool", "unknown"):
+            label = self.tool_kind or "tool"
+        ref = short_ref(self.tool_id)
+        # e.g. "🔧 bash · id:a6f1a470 ⟳" — Eric can cite id:a6f1a470 to the agent
+        if ref:
+            title = f"{kind_icon} {label} · {ref} {status_icon}"
+        else:
+            title = f"{kind_icon} {label} {status_icon}"
 
         from textual.color import Color as TextualColor
         try:
@@ -124,7 +149,9 @@ class ToolCallPanel(Static):
             self.border_title = title.replace("[", "\\[")
             body = Text()
             if not self.tool_output:
-                body.append("(no output yet)", style=f"italic {Theme.DARK4}")
+                ref = short_ref(self.tool_id)
+                empty = f"(no output yet — cite {ref})" if ref else "(no output yet)"
+                body.append(empty, style=f"italic {Theme.DARK4}")
             else:
                 snippet = lines[: self.SNIPPET_LINES]
                 body.append("\n".join(snippet), style=Theme.GRAY)
@@ -390,9 +417,18 @@ class InterjectionBlock(Static):
     def __init__(self, message: str, **kwargs):
         super().__init__(**kwargs)
         self._message = message
+        self._ref = short_ref(message, prefix="bell") if "id=bell_" in (message or "") or "(id=" in (message or "") else ""
+        # pull id=bell_xxx from message
+        import re
+        m = re.search(r"id=(bell_[a-zA-Z0-9_]+)", message or "")
+        if m:
+            self._ref = short_ref(m.group(1))
 
     def render(self):
-        self.border_title = "🔔 Interjection"
+        if self._ref:
+            self.border_title = f"🔔 Interjection · {self._ref}"
+        else:
+            self.border_title = "🔔 Interjection"
         return Text(self._message, style=Theme.BR_ORANGE)
 
 

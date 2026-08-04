@@ -62,7 +62,7 @@ from rich.console import Console as RichConsole, Group
 from ephact_parser import extract_ephacts, has_partial_ephact
 from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
 from event_coalesce import coalesce_events
-from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event
+from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event, interjection_key
 from tui_env import TuiEnv
 from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme
 from chat_widgets import (
@@ -1022,6 +1022,7 @@ class AsdaaasTUI(App):
         self._tail_count: Optional[int] = None
         self._show_thinking: bool = True
         self._available_commands: list[dict] = []
+        self._seen_interjections: set[str] = set()  # global dedup by bell id / text
 
     @staticmethod
     def _get_abide_head() -> str:
@@ -3033,12 +3034,20 @@ Type anything else to send a message to the agent.
                     clean_text, interjections = self._extract_interjections(text)
                     if interjections:
                         content = self._content_scroll()
+                        mounted_any = False
                         for msg in interjections:
-                            if msg not in panel._mounted_interjections:
-                                panel._mounted_interjections.add(msg)
-                                block = InterjectionBlock(msg)
-                                content.mount(block, before=panel)
-                        content.refresh(layout=True)
+                            key = interjection_key(msg)
+                            # App-level + per-panel dedup: same interjection is
+                            # re-emitted on every tool_call_update as stdout grows,
+                            # and BASH_ENV injects into every concurrent tool stream.
+                            if key in self._seen_interjections or msg in panel._mounted_interjections:
+                                continue
+                            self._seen_interjections.add(key)
+                            panel._mounted_interjections.add(msg)
+                            content.mount(InterjectionBlock(msg), before=panel)
+                            mounted_any = True
+                        if mounted_any and self._following_tail():
+                            content.refresh(layout=True)
                     panel.set_output(clean_text)
             elif item.get("type") == "diff":
                 # Show diff info
@@ -3274,6 +3283,10 @@ Type anything else to send a message to the agent.
                                     raw = inner.get("text", "")
                                     clean, intj_msgs = self._extract_interjections(raw)
                                     for msg in intj_msgs:
+                                        key = interjection_key(msg)
+                                        if key in self._seen_interjections:
+                                            continue
+                                        self._seen_interjections.add(key)
                                         widgets_to_prepend.append(InterjectionBlock(msg))
                                     panel.tool_output = clean
                             widgets_to_prepend.append(panel)

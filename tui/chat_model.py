@@ -80,6 +80,14 @@ def extract_interjections(text: str) -> tuple[str, list[str]]:
     return clean, messages
 
 
+def interjection_key(message: str) -> str:
+    """Stable dedup key: prefer doorbell id=…, else full stripped text."""
+    m = re.search(r"\(id=([a-zA-Z0-9_]+)", message or "")
+    if m:
+        return f"bell:{m.group(1)}"
+    return (message or "").strip()
+
+
 def classify_turn_trigger(text: str) -> str:
     """Mirror asdaaas_tui.classify_turn_trigger for pure tests."""
     t = text or ""

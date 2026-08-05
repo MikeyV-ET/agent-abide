@@ -968,10 +968,10 @@ class AsdaaasTUI(App):
     }
 
     #ephact-viewer {
-        height: auto;
+        height: 40%;
         max-height: 50%;
+        min-height: 10;
         margin: 0 0 0 0;
-        overflow-y: auto;
     }
 
 
@@ -1755,9 +1755,11 @@ Type anything else to send a message to the agent.
             if viewer.display:
                 viewer.close()
             elif viewer.has_content:
-                viewer._visible = True
                 viewer.display = True
-                viewer.refresh(layout=True)
+                if hasattr(viewer, "_refresh_display"):
+                    viewer._refresh_display()
+                else:
+                    viewer.refresh(layout=True)
         except NoMatches:
             pass
 

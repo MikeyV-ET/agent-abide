@@ -29,7 +29,9 @@ def short_ref(tool_id: str, prefix: str = "id") -> str:
 def _flatten_to_text(renderable, width: int = 120) -> Text:
     """Render a Rich renderable through Console, return as Text for native selectability.
 
-    Strips trailing whitespace on lines without background color."""
+    Strips trailing whitespace on lines without background color.
+    Strips Rich blockquote bars (▌) so select/copy gets prose, not the bar chrome.
+    """
     from io import StringIO
     from rich.style import Style as RichStyle
     buf = StringIO()
@@ -37,8 +39,26 @@ def _flatten_to_text(renderable, width: int = 120) -> Text:
     console.print(renderable, end="")
     result = Text.from_ansi(buf.getvalue())
     lines = result.split("\n")
+    cleaned: list[Text] = []
     for line in lines:
         plain = line.plain
+        # Rich MD blockquotes: leading ▌ (U+258C), often with a following space
+        if "▌" in plain[:4] or plain.lstrip().startswith("▌"):
+            s = plain
+            i = 0
+            while i < len(s) and s[i] == " ":
+                i += 1
+            if i < len(s) and s[i] == "▌":
+                i += 1
+                if i < len(s) and s[i] == " ":
+                    i += 1
+            rest = s[i:]
+            new_line = Text()
+            if rest:
+                new_line.append("  ")
+                new_line.append(rest, style=Theme.FG)
+            cleaned.append(new_line)
+            continue
         stripped_len = len(plain.rstrip())
         if stripped_len < len(plain):
             has_bg = any(
@@ -47,7 +67,9 @@ def _flatten_to_text(renderable, width: int = 120) -> Text:
             )
             if not has_bg:
                 line.rstrip()
-    return Text("\n").join(lines)
+        cleaned.append(line)
+    return Text("\n").join(cleaned)
+
 
 
 class ToolCallPanel(Static):

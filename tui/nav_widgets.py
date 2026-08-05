@@ -6,7 +6,7 @@ from textual.reactive import reactive
 from textual.widgets.option_list import Option
 from rich.text import Text
 
-from theme import Theme, THEMES, set_theme
+from theme import Theme, THEMES, set_theme, reload_themes
 
 class RoomMessage(Static):
     """A single IRC channel message displayed in the room tab."""
@@ -163,10 +163,16 @@ class ThemeSelector(OptionList):
 
     def populate(self) -> None:
         """Refresh the option list with available themes."""
+        # Pick up new JSON files dropped in tui/themes/
+        from theme import THEMES as themes_map
+        reload_themes()
         self.clear_options()
-        for key, palette in THEMES.items():
-            current = " *" if palette is Theme.current() else ""
-            self.add_option(Option(f"  {palette.NAME}{current}", id=key))
+        for key, palette in themes_map.items():
+            # after reload, Theme.current() is palette object
+            from theme import Theme as T, THEMES as TM
+            current = " *" if key == getattr(T, "_key", None) or palette is T.current() else ""
+            name = getattr(palette, "NAME", key)
+            self.add_option(Option(f"  {name}{current}", id=key))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         """Apply selected theme."""

@@ -294,3 +294,93 @@ def apply_auto_if_needed() -> bool:
 GruvboxDark = THEMES["gruvbox-dark"]
 GruvboxLight = THEMES["gruvbox-light"]
 SolarizedDark = THEMES["solarized-dark"]
+
+
+def theme_css() -> str:
+    """Textual CSS rules bound to the active Theme palette (full-screen light/dark)."""
+    # Use concrete hex so we are not stuck on Textual $surface dark defaults
+    return f"""
+/* dynamic theme — injected on set_theme / startup */
+Screen {{
+    background: {Theme.BG};
+    color: {Theme.FG};
+}}
+#top-bar {{
+    background: {Theme.DARK1};
+    color: {Theme.FG};
+}}
+#agent-tab-bar {{
+    background: {Theme.DARK1};
+    color: {Theme.FG};
+}}
+#agent-header {{
+    background: {Theme.DARK2};
+    color: {Theme.FG};
+}}
+VerticalScroll {{
+    background: {Theme.BG};
+    color: {Theme.FG};
+}}
+#bottom-bar {{
+    background: {Theme.DARK1};
+    color: {Theme.FG};
+}}
+#input-bar {{
+    background: {Theme.BG};
+    color: {Theme.FG};
+    border: heavy {Theme.DARK2};
+}}
+#input-bar:focus {{
+    border: heavy {Theme.DARK3};
+}}
+#dynamic-footer {{
+    background: {Theme.DARK1};
+    color: {Theme.GRAY};
+}}
+ThinkingBlock {{
+    background: {Theme.DARK1};
+    color: {Theme.DARK4};
+    border: round {Theme.DARK3};
+}}
+InterjectionBlock {{
+    background: {Theme.DARK1};
+    border: round {Theme.BR_ORANGE};
+}}
+SystemReminderPanel {{
+    background: {Theme.DARK1};
+    color: {Theme.DARK4};
+}}
+ThemeSelector {{
+    background: {Theme.DARK1};
+    color: {Theme.FG};
+    border: solid {Theme.BR_AQUA};
+}}
+GazeSelector {{
+    background: {Theme.DARK1};
+    color: {Theme.FG};
+    border: solid {Theme.BR_AQUA};
+}}
+SlashMenu {{
+    background: {Theme.DARK1};
+    color: {Theme.FG};
+    border: solid {Theme.BR_AQUA};
+}}
+"""
+
+
+def apply_theme_to_app(app) -> None:
+    """Push current Theme colors into the running Textual app stylesheet."""
+    css = theme_css()
+    # Replace previous dynamic block if present
+    try:
+        # Textual: stylesheet.add_source with a path-like name we can re-add
+        app.stylesheet.add_source(css, path="asdaaas-dynamic-theme.tcss")
+        app.stylesheet.reparse()
+        app.refresh_css(animate=False)
+    except Exception:
+        # Fallback: set screen background directly
+        try:
+            app.screen.styles.background = Theme.BG
+            app.screen.styles.color = Theme.FG
+        except Exception:
+            pass

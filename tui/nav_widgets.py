@@ -237,6 +237,11 @@ class ThemeSelector(OptionList):
         if theme_key and set_theme(theme_key):
             self.display = False
             self.border_subtitle = ""
+            try:
+                from theme import apply_theme_to_app
+                apply_theme_to_app(self.app)
+            except Exception:
+                pass
             self.app.refresh(layout=True)
 
 

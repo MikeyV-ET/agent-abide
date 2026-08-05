@@ -64,7 +64,7 @@ from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
 from event_coalesce import coalesce_events
 from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event, interjection_key
 from tui_env import TuiEnv
-from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme, apply_auto_if_needed
+from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme, apply_auto_if_needed, apply_theme_to_app
 from chat_widgets import (
     ToolCallPanel, PlanPanel, UserMessage, AgentMessage, ThinkingBlock, InterjectionBlock,
     SystemReminderPanel, is_system_reminder,
@@ -897,12 +897,10 @@ class AsdaaasTUI(App):
 
     #agent-tab-bar {
         height: 1;
-        background: #3c3836;
     }
 
     #agent-header {
         height: 1;
-        background: $surface;
     }
 
     VerticalScroll {
@@ -1172,6 +1170,7 @@ class AsdaaasTUI(App):
         self.query_one("#input-bar", MessageInput).focus()
         # OS appearance poll (~5s) when theme preference is auto
         self.set_interval(5.0, self._poll_auto_theme)
+        apply_theme_to_app(self)
 
 
         # Set the header
@@ -1690,6 +1689,7 @@ Type anything else to send a message to the agent.
         """If theme is auto, follow OS light/dark (Grok-style ~5s poll)."""
         try:
             if apply_auto_if_needed():
+                apply_theme_to_app(self)
                 self.refresh(layout=True)
         except Exception:
             pass

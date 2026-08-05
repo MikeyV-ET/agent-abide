@@ -142,43 +142,89 @@ class DynamicFooter(Static):
         return text
 
 class ThemeSelector(OptionList):
-    """Dropdown overlay for selecting color theme."""
+    """Dropdown overlay for selecting color theme.
+
+    Each row shows a live color sample (swatches + mini UI line) so you can
+    see what the theme does before applying it.
+    """
 
     DEFAULT_CSS = """
     ThemeSelector {
         layer: overlay;
         dock: top;
         margin: 2 0 0 0;
-        width: 30;
-        max-height: 10;
+        width: 56;
+        max-height: 16;
         border: solid $accent;
         background: $surface;
         display: none;
-        offset-x: 50;
+        offset-x: 30;
     }
     """
 
     def on_blur(self, event) -> None:
         self.display = False
 
+    @staticmethod
+    def _preview_line(palette, name: str, current: bool) -> Text:
+        """Build a one-line visual sample of the palette."""
+        bg = getattr(palette, "BG", "#000000")
+        fg = getattr(palette, "FG", "#ffffff")
+        gray = getattr(palette, "GRAY", "#888888")
+        aqua = getattr(palette, "BR_AQUA", "#00ffff")
+        green = getattr(palette, "BR_GREEN", "#00ff00")
+        orange = getattr(palette, "BR_ORANGE", "#ff8800")
+        red = getattr(palette, "BR_RED", "#ff0000")
+        yellow = getattr(palette, "BR_YELLOW", "#ffff00")
+        blue = getattr(palette, "BR_BLUE", "#0088ff")
+
+        line = Text()
+        # Color chips
+        for color in (green, aqua, orange, red, yellow, blue):
+            line.append("█", style=color)
+        line.append(" ")
+        # Mini chrome: user chevron + speech + tool + dim
+        line.append("❯", style=f"bold {blue}")
+        line.append(" you ", style=fg)
+        line.append("speech ", style=fg)
+        line.append("🔧", style=aqua)
+        line.append(" tool ", style=gray)
+        line.append("warn", style=orange)
+        line.append(" ")
+        # Theme name on its own bg so you see surface contrast
+        mark = " *" if current else ""
+        line.append(f" {name}{mark} ", style=f"{fg} on {bg}")
+        return line
+
     def populate(self) -> None:
-        """Refresh the option list with available themes."""
-        # Pick up new JSON files dropped in tui/themes/
-        from theme import THEMES as themes_map
+        """Refresh options with per-theme color previews."""
         reload_themes()
+        from theme import Theme as T, THEMES as themes_map
         self.clear_options()
+        # Header hint (not selectable as a theme — use a disabled-looking first row via prompt)
+        self.border_title = "Themes — preview · Enter to apply · Esc"
+        cur_key = getattr(T, "_key", None)
         for key, palette in themes_map.items():
-            # after reload, Theme.current() is palette object
-            from theme import Theme as T, THEMES as TM
-            current = " *" if key == getattr(T, "_key", None) or palette is T.current() else ""
             name = getattr(palette, "NAME", key)
-            self.add_option(Option(f"  {name}{current}", id=key))
+            current = key == cur_key or palette is T.current()
+            preview = self._preview_line(palette, name, current)
+            self.add_option(Option(preview, id=key))
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        """Show which theme is focused in the border subtitle."""
+        opt = event.option
+        if opt and opt.id:
+            from theme import THEMES as themes_map
+            pal = themes_map.get(opt.id)
+            name = getattr(pal, "NAME", opt.id) if pal else opt.id
+            self.border_subtitle = f"preview: {name}"
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         """Apply selected theme."""
         theme_key = event.option.id
         if theme_key and set_theme(theme_key):
             self.display = False
+            self.border_subtitle = ""
             self.app.refresh(layout=True)
 
 

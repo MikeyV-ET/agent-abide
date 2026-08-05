@@ -64,7 +64,7 @@ from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
 from event_coalesce import coalesce_events
 from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event, interjection_key
 from tui_env import TuiEnv
-from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme
+from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme, apply_auto_if_needed
 from chat_widgets import (
     ToolCallPanel, PlanPanel, UserMessage, AgentMessage, ThinkingBlock, InterjectionBlock,
     SystemReminderPanel, is_system_reminder,
@@ -1170,6 +1170,9 @@ class AsdaaasTUI(App):
         self.run_worker(self._tail_room_log, thread=True, name="room_tailer")
         # Focus the input bar
         self.query_one("#input-bar", MessageInput).focus()
+        # OS appearance poll (~5s) when theme preference is auto
+        self.set_interval(5.0, self._poll_auto_theme)
+
 
         # Set the header
         header = self.query_one("#agent-header", AgentHeader)
@@ -1680,6 +1683,15 @@ Type anything else to send a message to the agent.
                 selector.display = True
                 selector.focus()
         except NoMatches:
+            pass
+
+
+    def _poll_auto_theme(self) -> None:
+        """If theme is auto, follow OS light/dark (Grok-style ~5s poll)."""
+        try:
+            if apply_auto_if_needed():
+                self.refresh(layout=True)
+        except Exception:
             pass
 
     def action_toggle_theme_selector(self) -> None:
@@ -3497,6 +3509,14 @@ def main():
         "--api-url", default=None,
         help="asdaaas API base URL (e.g. http://localhost:8420). Uses WebSocket for live tail."
     )
+    parser.add_argument(
+        "--light", action="store_true",
+        help="Use Grok Day light theme (alias for --theme grokday)",
+    )
+    parser.add_argument(
+        "--theme", default=None,
+        help="Theme id or 'auto' (see tui/themes/). Overrides saved preference for this run.",
+    )
     args = parser.parse_args()
 
     Config.AGENT_NAME = args.agent
@@ -3508,6 +3528,11 @@ def main():
     if args.operator:
         Config.OPERATOR_NAME = args.operator
         # Don't save to disk — --operator is ephemeral for test instances
+
+    if args.light:
+        set_theme("grokday")
+    elif args.theme:
+        set_theme(args.theme)
 
     # Ensure adapter directories exist
     Config.tui_inbox().mkdir(parents=True, exist_ok=True)

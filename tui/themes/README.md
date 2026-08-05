@@ -41,3 +41,29 @@ Drop a JSON file here to add a theme. No code changes required (restart TUI or r
 - **colors**: all keys above are required (missing keys fall back to Gruvbox Dark)
 
 Built-ins: `gruvbox-dark`, `gruvbox-light`, `solarized-dark`.
+
+## Built-in-ish presets (JSON)
+
+| id | Role |
+|----|------|
+| `gruvbox-dark` | Classic dark |
+| `gruvbox-light` | Warm light |
+| `solarized-dark` | Solarized dark |
+| `groknight` | Neutral dark + cool accents (Grok Night–ish) |
+| `grokday` | Neutral light for bright terminals (Grok Day–ish) |
+
+## Auto (system appearance)
+
+In the theme picker choose **Auto (system)** or set config:
+
+```json
+// ~/.config/abidetui/theme.json
+{
+  "theme": "auto",
+  "auto_dark_theme": "groknight",
+  "auto_light_theme": "grokday"
+}
+```
+
+Linux: reads GNOME `color-scheme` or XDG portal `org.freedesktop.appearance` `color-scheme`.
+Polls about every 5s while the TUI is open so OS light/dark toggles apply without restart.

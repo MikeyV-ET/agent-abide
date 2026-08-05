@@ -1,0 +1,27 @@
+{
+  "id": "grokday",
+  "name": "Grok Day",
+  "colors": {
+    "BG": "#f7f7f8",
+    "FG": "#1a1a1e",
+    "GRAY": "#6b6b76",
+    "RED": "#b91c1c",
+    "GREEN": "#2d8a4e",
+    "YELLOW": "#a67c00",
+    "BLUE": "#3b6ea5",
+    "PURPLE": "#8b5cf6",
+    "AQUA": "#0d9488",
+    "ORANGE": "#c2410c",
+    "BR_RED": "#dc2626",
+    "BR_GREEN": "#16a34a",
+    "BR_YELLOW": "#ca8a04",
+    "BR_BLUE": "#2563eb",
+    "BR_PURPLE": "#a855f7",
+    "BR_AQUA": "#14b8a6",
+    "BR_ORANGE": "#ea580c",
+    "DARK1": "#e8e8ec",
+    "DARK2": "#d4d4dc",
+    "DARK3": "#a1a1aa",
+    "DARK4": "#71717a"
+  }
+}

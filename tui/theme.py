@@ -105,27 +105,126 @@ THEMES: dict[str, SimpleNamespace] = {}
 reload_themes()
 
 
-def _load_saved_theme() -> str:
+def load_theme_config() -> dict[str, Any]:
+    """Load ~/.config/abidetui/theme.json (theme + auto mappings)."""
+    defaults = {
+        "theme": "gruvbox-dark",
+        "auto_dark_theme": "groknight",
+        "auto_light_theme": "grokday",
+    }
     try:
         with open(THEME_CONFIG_FILE) as f:
-            return json.load(f).get("theme", "gruvbox-dark")
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return defaults
+        defaults.update({k: v for k, v in data.items() if v is not None})
+        return defaults
     except (FileNotFoundError, json.JSONDecodeError):
-        return "gruvbox-dark"
+        return defaults
+
+
+def save_theme_config(cfg: dict[str, Any]) -> None:
+    THEME_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(THEME_CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+
+
+def _load_saved_theme() -> str:
+    return str(load_theme_config().get("theme") or "gruvbox-dark")
 
 
 def _save_theme(name: str) -> None:
-    THEME_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(THEME_CONFIG_FILE, "w") as f:
-        json.dump({"theme": name}, f)
+    cfg = load_theme_config()
+    cfg["theme"] = name
+    save_theme_config(cfg)
+
+
+def detect_system_appearance() -> str:
+    """Return 'dark' or 'light' (default dark if unknown).
+
+    Linux (in order):
+      1. gsettings org.gnome.desktop.interface color-scheme
+      2. XDG Desktop Portal Settings Read color-scheme (0=no pref, 1=dark, 2=light)
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("gsettings"):
+        try:
+            r = subprocess.run(
+                ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+                capture_output=True, text=True, timeout=1.5,
+            )
+            if r.returncode == 0:
+                val = (r.stdout or "").strip().strip("'\"")
+                if "prefer-light" in val:
+                    return "light"
+                if "prefer-dark" in val:
+                    return "dark"
+        except Exception:
+            pass
+
+    if shutil.which("gdbus"):
+        try:
+            r = subprocess.run(
+                [
+                    "gdbus", "call", "--session",
+                    "--dest", "org.freedesktop.portal.Desktop",
+                    "--object-path", "/org/freedesktop/portal/desktop",
+                    "--method", "org.freedesktop.portal.Settings.Read",
+                    "org.freedesktop.appearance", "color-scheme",
+                ],
+                capture_output=True, text=True, timeout=1.5,
+            )
+            out = r.stdout or ""
+            if "uint32 2" in out or ", 2)" in out:
+                return "light"
+            if "uint32 1" in out or ", 1)" in out:
+                return "dark"
+        except Exception:
+            pass
+
+    return "dark"
+
+
+def resolve_theme_key(key: str | None = None) -> str:
+    """Map 'auto' / aliases to a concrete theme id."""
+    reload_themes()
+    cfg = load_theme_config()
+    raw = (key if key is not None else cfg.get("theme")) or "gruvbox-dark"
+    raw = str(raw).lower().strip()
+    if raw in ("auto", "system"):
+        appearance = detect_system_appearance()
+        if appearance == "light":
+            cand = cfg.get("auto_light_theme") or "grokday"
+        else:
+            cand = cfg.get("auto_dark_theme") or "groknight"
+        cand = str(cand)
+        if cand not in THEMES:
+            cand = "gruvbox-light" if appearance == "light" else "gruvbox-dark"
+        return cand
+    # aliases
+    aliases = {
+        "dark": "groknight",
+        "light": "grokday",
+        "day": "grokday",
+        "night": "groknight",
+    }
+    raw = aliases.get(raw, raw)
+    if raw not in THEMES:
+        return "gruvbox-dark"
+    return raw
 
 
 class _ThemeProxy:
     """Attribute access delegates to active palette; set_theme swaps it globally."""
 
     def __init__(self):
-        key = _load_saved_theme()
-        self._key = key if key in THEMES else "gruvbox-dark"
-        self._palette = THEMES[self._key]
+        self._preference = _load_saved_theme()  # may be "auto"
+        resolved = resolve_theme_key(self._preference)
+        self._key = resolved
+        self._palette = THEMES.get(resolved) or THEMES["gruvbox-dark"]
 
     def set(self, palette) -> None:
         self._palette = palette
@@ -136,6 +235,10 @@ class _ThemeProxy:
     def current_key(self) -> str:
         return getattr(self, "_key", "gruvbox-dark")
 
+    def preference(self) -> str:
+        """User preference including 'auto'."""
+        return getattr(self, "_preference", self.current_key())
+
     def __getattr__(self, name: str):
         return getattr(self._palette, name)
 
@@ -144,17 +247,50 @@ Theme = _ThemeProxy()
 
 
 def set_theme(key: str) -> bool:
-    if key not in THEMES:
-        reload_themes()
-    if key not in THEMES:
+    """Apply theme by id, or 'auto'/'system' for OS appearance.
+
+    Saves preference to config. Returns False if concrete theme cannot be resolved.
+    """
+    reload_themes()
+    pref = key.lower().strip()
+    resolved = resolve_theme_key(pref)
+    if resolved not in THEMES:
         return False
-    Theme.set(THEMES[key])
-    Theme._key = key
-    _save_theme(key)
+    Theme.set(THEMES[resolved])
+    Theme._key = resolved
+    Theme._preference = pref if pref in ("auto", "system") or pref in THEMES or pref in (
+        "dark", "light", "day", "night"
+    ) else resolved
+    # Normalize stored preference
+    if pref in ("system",):
+        pref = "auto"
+    if pref in ("dark", "night"):
+        # store as concrete unless user wanted alias — store concrete for clarity
+        pass
+    _save_theme(pref if pref in THEMES or pref == "auto" else resolved)
+    Theme._preference = load_theme_config().get("theme", resolved)
     return True
 
 
-# Back-compat aliases for code that referenced class objects
+def apply_auto_if_needed() -> bool:
+    """If preference is auto, re-resolve from OS and apply if concrete theme changed.
+
+    Returns True if the active palette changed.
+    """
+    pref = Theme.preference()
+    if str(pref).lower() not in ("auto", "system"):
+        return False
+    resolved = resolve_theme_key("auto")
+    if resolved == Theme.current_key() and THEMES.get(resolved) is Theme.current():
+        return False
+    if resolved not in THEMES:
+        return False
+    Theme.set(THEMES[resolved])
+    Theme._key = resolved
+    return True
+
+
+# Back-compat aliases
 GruvboxDark = THEMES["gruvbox-dark"]
 GruvboxLight = THEMES["gruvbox-light"]
 SolarizedDark = THEMES["solarized-dark"]

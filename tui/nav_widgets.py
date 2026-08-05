@@ -197,16 +197,28 @@ class ThemeSelector(OptionList):
         return line
 
     def populate(self) -> None:
-        """Refresh options with per-theme color previews."""
+        """Refresh options with per-theme color previews + Auto (system)."""
         reload_themes()
-        from theme import Theme as T, THEMES as themes_map
+        from theme import (
+            Theme as T, THEMES as themes_map, resolve_theme_key,
+            detect_system_appearance, load_theme_config,
+        )
         self.clear_options()
-        # Header hint (not selectable as a theme — use a disabled-looking first row via prompt)
         self.border_title = "Themes — preview · Enter to apply · Esc"
+        pref = T.preference() if hasattr(T, "preference") else getattr(T, "_key", None)
+        # Auto first
+        appearance = detect_system_appearance()
+        resolved = resolve_theme_key("auto")
+        pal = themes_map.get(resolved)
+        auto_current = str(pref).lower() in ("auto", "system")
+        if pal is not None:
+            label = f"Auto (system → {appearance} → {getattr(pal, 'NAME', resolved)})"
+            preview = self._preview_line(pal, label, auto_current)
+            self.add_option(Option(preview, id="auto"))
         cur_key = getattr(T, "_key", None)
         for key, palette in themes_map.items():
             name = getattr(palette, "NAME", key)
-            current = key == cur_key or palette is T.current()
+            current = (not auto_current) and (key == cur_key or key == pref)
             preview = self._preview_line(palette, name, current)
             self.add_option(Option(preview, id=key))
 

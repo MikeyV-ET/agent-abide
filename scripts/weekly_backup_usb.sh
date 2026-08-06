@@ -120,40 +120,62 @@ do_incremental() {
 }
 
 cleanup_old_backups() {
-    # Keep only the most recent full backup + its incrementals
-    # Find all full backups, sort, keep latest, delete rest + their incrementals
-    local latest_full
-    latest_full=$(ls -1 "${USB_DIR}"/home_eric_full_*.tar.gz.aa 2>/dev/null | sort | tail -1 || true)
+    # Only remove old backups when free space drops below threshold.
+    # Deletes oldest files first (incrementals, then old fulls) until
+    # free space is restored or nothing is left to remove.
+    local min_free_gb=15
 
-    if [[ -z "$latest_full" ]]; then
+    local free_kb
+    free_kb=$(df --output=avail "$USB_DIR" | tail -1 | tr -d ' ')
+    local free_gb=$(( free_kb / 1048576 ))
+
+    if (( free_gb >= min_free_gb )); then
+        log "Free space: ${free_gb}G (threshold: ${min_free_gb}G) — skipping cleanup"
         return
     fi
 
-    # Extract date from latest full (home_eric_full_YYYYMMDD.tar.gz.aa)
-    local latest_date
-    latest_date=$(basename "$latest_full" | sed 's/home_eric_full_\([0-9]*\).*/\1/')
+    log "Free space: ${free_gb}G < ${min_free_gb}G threshold — cleaning old backups"
 
-    # Delete older fulls
-    for f in "${USB_DIR}"/home_eric_full_*.tar.gz.a*; do
-        [[ -f "$f" ]] || continue
-        local fdate
-        fdate=$(basename "$f" | sed 's/home_eric_full_\([0-9]*\).*/\1/')
-        if [[ "$fdate" < "$latest_date" ]]; then
-            rm -f "$f"
-            log "Cleaned old full chunk: $(basename "$f")"
-        fi
-    done
+    local latest_full
+    latest_full=$(ls -1 "${USB_DIR}"/home_eric_full_*.tar.gz.aa 2>/dev/null | sort | tail -1 || true)
+    local latest_date=""
+    if [[ -n "$latest_full" ]]; then
+        latest_date=$(basename "$latest_full" | sed 's/home_eric_full_\([0-9]*\).*/\1/')
+    fi
 
-    # Delete incrementals older than latest full
-    for f in "${USB_DIR}"/home_eric_inc_*.tar.gz; do
+    # Delete oldest incrementals first (older than latest full)
+    for f in $(ls -1 "${USB_DIR}"/home_eric_inc_*.tar.gz 2>/dev/null | sort); do
         [[ -f "$f" ]] || continue
         local fdate
         fdate=$(basename "$f" | sed 's/home_eric_inc_\([0-9]*\).*/\1/')
-        if [[ "$fdate" < "$latest_date" ]]; then
+        if [[ -n "$latest_date" && "$fdate" < "$latest_date" ]]; then
             rm -f "$f"
             log "Cleaned old incremental: $(basename "$f")"
+            free_kb=$(df --output=avail "$USB_DIR" | tail -1 | tr -d ' ')
+            free_gb=$(( free_kb / 1048576 ))
+            (( free_gb >= min_free_gb )) && { log "Free space restored: ${free_gb}G"; return; }
         fi
     done
+
+    # If still tight, delete older full backups (keep latest)
+    if [[ -n "$latest_date" ]]; then
+        for f in $(ls -1 "${USB_DIR}"/home_eric_full_*.tar.gz.a* 2>/dev/null | sort); do
+            [[ -f "$f" ]] || continue
+            local fdate
+            fdate=$(basename "$f" | sed 's/home_eric_full_\([0-9]*\).*/\1/')
+            if [[ "$fdate" < "$latest_date" ]]; then
+                rm -f "$f"
+                log "Cleaned old full chunk: $(basename "$f")"
+                free_kb=$(df --output=avail "$USB_DIR" | tail -1 | tr -d ' ')
+                free_gb=$(( free_kb / 1048576 ))
+                (( free_gb >= min_free_gb )) && { log "Free space restored: ${free_gb}G"; return; }
+            fi
+        done
+    fi
+
+    free_kb=$(df --output=avail "$USB_DIR" | tail -1 | tr -d ' ')
+    free_gb=$(( free_kb / 1048576 ))
+    log "Cleanup done. Free space: ${free_gb}G"
 }
 
 do_list() {

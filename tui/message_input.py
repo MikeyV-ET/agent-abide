@@ -49,17 +49,64 @@ class MessageInput(TextArea):
         self.theme = "underscore"
         self._update_mode_label()
 
+    # Soft guidance only — Textual has no hard paste cap; terminals often do (~8KB–1MB).
+    PASTE_WARN_CHARS = 50_000
+    MAX_INPUT_HEIGHT = 40  # was 10; large pastes need visible room
+
     async def _on_paste(self, event) -> None:
-        """Handle bracketed paste. Multi-line paste auto-switches to edit mode."""
+        """Handle bracketed paste. Multi-line paste auto-switches to edit mode.
+
+        No TUI-imposed character limit. Failures usually come from:
+        - Terminal/WSL truncating the bracketed-paste stream
+        - Paste containing ESC sequences that end bracketed mode early (Textual)
+        - Input not focused / copy-mode (F7) eating selection paste
+        """
         if self.read_only:
             return
-        text = event.text
-        if "\n" in text:
+        text = event.text or ""
+        if not text:
+            try:
+                self.app.notify("Paste was empty (terminal may have truncated)", severity="warning")
+            except Exception:
+                pass
+            event.prevent_default()
+            event.stop()
+            return
+        if "\n" in text or "\r" in text:
             self.multiline_mode = True
-        self.insert(text)
+        # Normalize CRLF from Windows paste
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        n = len(text)
+        lines = text.count("\n") + (1 if text else 0)
+        try:
+            self.insert(text)
+        except Exception as e:
+            try:
+                self.app.notify(f"Paste insert failed: {e}", severity="error")
+            except Exception:
+                pass
+            event.prevent_default()
+            event.stop()
+            return
         self.focus()
+        try:
+            visual = max(self.virtual_size.height, lines, 1)
+            self.styles.height = max(2, min(visual + 2, self.MAX_INPUT_HEIGHT))
+        except Exception:
+            pass
+        try:
+            if n >= self.PASTE_WARN_CHARS:
+                self.app.notify(
+                    f"Pasted {n:,} chars / ~{lines} lines (large — if truncated, use a file path)",
+                    severity="warning",
+                )
+            else:
+                self.app.notify(f"Pasted {n:,} chars", severity="information", timeout=2)
+        except Exception:
+            pass
         event.prevent_default()
         event.stop()
+
 
     def _update_mode_label(self) -> None:
         """Update border title to show current input mode."""
@@ -111,7 +158,7 @@ class MessageInput(TextArea):
         """Recalculate height when text changes, using TextArea's own virtual size."""
         def _update_height():
             visual_lines = max(self.virtual_size.height, 1)
-            target_height = max(2, min(visual_lines + 2, 10))  # +2 for borders
+            target_height = max(2, min(visual_lines + 2, self.MAX_INPUT_HEIGHT))  # +2 for borders
             self.styles.height = target_height
             if visual_lines > 8:
                 self.scroll_cursor_visible()

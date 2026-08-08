@@ -40,7 +40,7 @@ pip install textual
 - **Persistence panel** -- F2 shows health, notebook, git, compaction status
 - **Turn separators** -- visual dividers between agent turns with turn number and timestamp
 - **History loading** -- PageUp loads older events from the session
-- **Ctrl+E edit mode** -- toggle between Enter-sends and Enter-inserts-newline
+- **Multiline input** -- Ctrl+Enter / Shift+Enter / Ctrl+J insert newline; Enter always sends
 - **Plan/todo display** -- agent todo lists rendered inline
 - **Alert system** -- system alerts (errors, warnings, info) displayed in the conversation
 - **Dark/Light themes** -- Gruvbox dark (default) or light (`--light`)
@@ -50,8 +50,7 @@ pip install textual
 | Key | Action |
 |-----|--------|
 | Enter | Send message |
-| Ctrl+E | Toggle edit mode (Enter = newline) |
-| Ctrl+Enter | Insert newline (when edit mode off) |
+| Ctrl+Enter / Shift+Enter / Ctrl+J | Insert newline |
 | Ctrl+C | Interrupt running agent |
 | Ctrl+G | Open gaze selector |
 | Ctrl+N | Switch to next agent tab |

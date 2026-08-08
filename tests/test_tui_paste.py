@@ -60,40 +60,39 @@ async def test_multiline_paste_does_not_fire_submitted():
 
 
 @pytest.mark.asyncio
-async def test_multiline_paste_switches_to_edit_mode():
-    """After pasting multi-line text, input should be in edit mode
-    so Enter inserts newlines instead of sending."""
+async def test_multiline_paste_enter_still_sends():
+    """No EDIT mode: after multi-line paste, Enter still sends (Ctrl+Enter = newline)."""
     async with PasteTestApp().run_test() as pilot:
         app = pilot.app
         msg_input = app.query_one("#msg-input", MessageInput)
 
-        # Start in normal mode
-        assert not msg_input.multiline_mode
-
-        # Paste multi-line text
         await msg_input._on_paste(Paste(MULTI_LINE_TEXT))
         await pilot.pause()
 
-        assert msg_input.multiline_mode, (
-            "Multi-line paste should auto-switch to edit mode"
-        )
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert len(app.submitted_messages) == 1
+        assert "line one" in app.submitted_messages[0]
+        assert "line three" in app.submitted_messages[0]
 
 
 @pytest.mark.asyncio
-async def test_single_line_paste_stays_in_normal_mode():
-    """Pasting single-line text should NOT switch to edit mode."""
+async def test_ctrl_enter_inserts_newline():
+    """Ctrl+Enter inserts a newline without sending."""
     async with PasteTestApp().run_test() as pilot:
         app = pilot.app
         msg_input = app.query_one("#msg-input", MessageInput)
 
-        assert not msg_input.multiline_mode
-
-        await msg_input._on_paste(Paste(SINGLE_LINE_TEXT))
+        msg_input.insert("hello")
+        await pilot.pause()
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        msg_input.insert("world")
         await pilot.pause()
 
-        assert not msg_input.multiline_mode, (
-            "Single-line paste should stay in normal mode"
-        )
+        assert len(app.submitted_messages) == 0
+        assert "hello\nworld" in msg_input.text or msg_input.text == "hello\nworld"
 
 
 @pytest.mark.asyncio
@@ -268,26 +267,22 @@ async def test_multiline_paste_stays_inside_bottom_bar():
         assert bar.size.height <= 20, (
             f"bottom-bar h={bar.size.height} ate the screen (terminal=40)"
         )
-        # Still in edit mode for multi-line, but contained
-        assert msg_input.multiline_mode
         assert "line 0" in msg_input.text
         assert "line 39" in msg_input.text
 
 
 @pytest.mark.asyncio
-async def test_submit_exits_edit_mode():
-    """After sending a multiline paste, return to normal Enter=send mode."""
+async def test_multiline_paste_then_enter_sends_once():
+    """Paste multi-line then Enter: one submit, not N (no EDIT mode needed)."""
     async with PasteTestApp().run_test() as pilot:
         app = pilot.app
         msg_input = app.query_one("#msg-input", MessageInput)
 
         await msg_input._on_paste(Paste(MULTI_LINE_TEXT))
         await pilot.pause()
-        assert msg_input.multiline_mode
 
-        # In edit mode, ctrl+j sends
-        await pilot.press("ctrl+j")
+        await pilot.press("enter")
         await pilot.pause()
 
         assert len(app.submitted_messages) == 1
-        assert not msg_input.multiline_mode, "should leave EDIT mode after send"
+        assert app.submitted_messages[0].count("line") >= 3

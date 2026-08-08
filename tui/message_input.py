@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 from textual.widgets import TextArea
-from textual.reactive import reactive
 from textual.events import Paste
 
 from theme import Theme
 
-class MessageInput(TextArea):
-    """Multiline input with mode toggle. Normal: Enter sends, ^J newline. Edit: Enter newline, ^J sends."""
 
-    multiline_mode = reactive(False)
+class MessageInput(TextArea):
+    """Multiline chat input. Enter sends; Ctrl+Enter / Shift+Enter / ^J insert newline.
+
+    No separate EDIT mode — one key map always.
+    """
 
     DEFAULT_CSS = """
     MessageInput {
@@ -22,11 +23,10 @@ class MessageInput(TextArea):
     MessageInput:focus {
         border: heavy #7c6f64;
     }
-    
     """
 
     class Submitted(TextArea.Changed):
-        """Fired when user presses Enter (without Shift)."""
+        """Fired when user presses Enter (without Shift/Ctrl)."""
         def __init__(self, text_area: "MessageInput", text: str):
             super().__init__(text_area)
             self.text = text
@@ -47,7 +47,8 @@ class MessageInput(TextArea):
         )
         self.register_theme(underscore_theme)
         self.theme = "underscore"
-        self._update_mode_label()
+        self.border_title = ""
+        self.border_subtitle = ""
 
     # Soft guidance only — Textual has no hard paste cap; terminals often do (~8KB–1MB).
     PASTE_WARN_CHARS = 50_000
@@ -58,7 +59,6 @@ class MessageInput(TextArea):
         """Max input height in rows: leave ~half the screen for chat + 1 for footer."""
         try:
             screen_h = self.app.size.height
-            # half screen minus footer strip, at least 4, at most MAX_INPUT_HEIGHT
             return max(4, min(self.MAX_INPUT_HEIGHT, (screen_h // 2) - 1))
         except Exception:
             return min(self.MAX_INPUT_HEIGHT, 10)
@@ -73,7 +73,7 @@ class MessageInput(TextArea):
             pass
 
     async def _on_paste(self, event) -> None:
-        """Handle bracketed paste. Multi-line paste auto-switches to edit mode.
+        """Handle bracketed paste: insert text as one block (no send, no mode switch).
 
         No TUI-imposed character limit. Failures usually come from:
         - Terminal/WSL truncating the bracketed-paste stream
@@ -91,8 +91,6 @@ class MessageInput(TextArea):
             event.prevent_default()
             event.stop()
             return
-        if "\n" in text or "\r" in text:
-            self.multiline_mode = True
         # Normalize CRLF from Windows paste
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         n = len(text)
@@ -121,19 +119,6 @@ class MessageInput(TextArea):
             pass
         event.prevent_default()
         event.stop()
-
-
-    def _update_mode_label(self) -> None:
-        """Update border title to show current input mode."""
-        if self.multiline_mode:
-            self.border_subtitle = "EDIT: Enter=newline ^J=send | Esc/^E=normal"
-        else:
-            self.border_subtitle = ""
-        self.border_title = ""
-
-    def watch_multiline_mode(self, value: bool) -> None:
-        """React to mode toggle — update border subtitle."""
-        self._update_mode_label()
 
     def _get_wrap_width(self) -> int:
         """Get the actual character width available for text wrapping."""
@@ -181,7 +166,7 @@ class MessageInput(TextArea):
         self.call_after_refresh(_update_height)
 
     def _on_key(self, event) -> None:
-        """Handle input keys. Ctrl+E toggles mode. Mode determines Enter vs Ctrl+J behavior."""
+        """Enter sends; Ctrl+Enter / Shift+Enter / Ctrl+J insert newline."""
         # Pass Home/End/PageUp/PageDown to the app for scroll/history actions
         if event.key in ("f3", "f5", "f6"):
             return  # Let these bubble to app-level bindings
@@ -201,31 +186,15 @@ class MessageInput(TextArea):
                 except Exception:
                     pass
             return
-        # Escape exits EDIT mode (back to Enter=send) without clearing text
-        if event.key == "escape" and self.multiline_mode:
-            event.prevent_default()
-            event.stop()
-            self.multiline_mode = False
-            return
-        # Ctrl+E toggles multiline mode
-        if event.key == "ctrl+e":
-            event.prevent_default()
-            event.stop()
-            self.multiline_mode = not self.multiline_mode
-            return
-        # Determine which key sends and which inserts newline based on mode
-        if self.multiline_mode:
-            send_key = "ctrl+j"
-            newline_keys = ("enter", "shift+enter", "ctrl+enter")
-        else:
-            send_key = "enter"
-            newline_keys = ("shift+enter", "ctrl+enter", "ctrl+j")
+
+        newline_keys = ("shift+enter", "ctrl+enter", "ctrl+j")
         if event.key in newline_keys:
             event.prevent_default()
             event.stop()
             self.insert("\n")
             return
-        elif event.key == send_key:
+
+        if event.key == "enter":
             # If slash menu is visible, select the highlighted option
             try:
                 slash_menu = self.app.query_one("#slash-menu")
@@ -245,10 +214,10 @@ class MessageInput(TextArea):
                 self._draft = ""
                 self.post_message(self.Submitted(self, text))
                 self.clear()
-                # Leave EDIT mode after send so next message is normal Enter-to-send
-                self.multiline_mode = False
                 self._set_height_for_content(min_lines=1)
-        elif event.key in ("up", "down") and self._is_multiline():
+            return
+
+        if event.key in ("up", "down") and self._is_multiline():
             # Multiline: move cursor within text, prevent bubbling to parent scroll
             event.prevent_default()
             event.stop()
@@ -257,7 +226,8 @@ class MessageInput(TextArea):
             else:
                 self.action_cursor_down()
             return
-        elif event.key == "up":
+
+        if event.key == "up":
             # If slash menu is visible, navigate it
             try:
                 slash_menu = self.app.query_one("#slash-menu")
@@ -279,7 +249,9 @@ class MessageInput(TextArea):
                     self._history_index -= 1
                 self.clear()
                 self.insert(self._history[self._history_index])
-        elif event.key == "down":
+            return
+
+        if event.key == "down":
             # If slash menu is visible, navigate it
             try:
                 slash_menu = self.app.query_one("#slash-menu")
@@ -301,5 +273,4 @@ class MessageInput(TextArea):
                     self._history_index = -1
                     self.clear()
                     self.insert(self._draft)
-
-
+            return

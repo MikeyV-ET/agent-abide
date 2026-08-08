@@ -51,7 +51,26 @@ class MessageInput(TextArea):
 
     # Soft guidance only — Textual has no hard paste cap; terminals often do (~8KB–1MB).
     PASTE_WARN_CHARS = 50_000
-    MAX_INPUT_HEIGHT = 40  # was 10; large pastes need visible room
+    # Absolute ceiling; actual cap is min(this, ~half terminal) so chat stays visible.
+    MAX_INPUT_HEIGHT = 20
+
+    def _max_height_cells(self) -> int:
+        """Max input height in rows: leave ~half the screen for chat + 1 for footer."""
+        try:
+            screen_h = self.app.size.height
+            # half screen minus footer strip, at least 4, at most MAX_INPUT_HEIGHT
+            return max(4, min(self.MAX_INPUT_HEIGHT, (screen_h // 2) - 1))
+        except Exception:
+            return min(self.MAX_INPUT_HEIGHT, 10)
+
+    def _set_height_for_content(self, min_lines: int = 1) -> None:
+        """Grow/shrink height with content, never past _max_height_cells."""
+        try:
+            visual = max(self.virtual_size.height, min_lines, 1)
+            cap = self._max_height_cells()
+            self.styles.height = max(2, min(visual + 2, cap))
+        except Exception:
+            pass
 
     async def _on_paste(self, event) -> None:
         """Handle bracketed paste. Multi-line paste auto-switches to edit mode.
@@ -89,11 +108,7 @@ class MessageInput(TextArea):
             event.stop()
             return
         self.focus()
-        try:
-            visual = max(self.virtual_size.height, lines, 1)
-            self.styles.height = max(2, min(visual + 2, self.MAX_INPUT_HEIGHT))
-        except Exception:
-            pass
+        self._set_height_for_content(min_lines=lines)
         try:
             if n >= self.PASTE_WARN_CHARS:
                 self.app.notify(
@@ -111,7 +126,7 @@ class MessageInput(TextArea):
     def _update_mode_label(self) -> None:
         """Update border title to show current input mode."""
         if self.multiline_mode:
-            self.border_subtitle = "EDIT: Enter=newline ^J=send | ^E=normal"
+            self.border_subtitle = "EDIT: Enter=newline ^J=send | Esc/^E=normal"
         else:
             self.border_subtitle = ""
         self.border_title = ""
@@ -157,11 +172,12 @@ class MessageInput(TextArea):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Recalculate height when text changes, using TextArea's own virtual size."""
         def _update_height():
-            visual_lines = max(self.virtual_size.height, 1)
-            target_height = max(2, min(visual_lines + 2, self.MAX_INPUT_HEIGHT))  # +2 for borders
-            self.styles.height = target_height
-            if visual_lines > 8:
-                self.scroll_cursor_visible()
+            self._set_height_for_content()
+            try:
+                if self.virtual_size.height > 8:
+                    self.scroll_cursor_visible()
+            except Exception:
+                pass
         self.call_after_refresh(_update_height)
 
     def _on_key(self, event) -> None:
@@ -184,6 +200,12 @@ class MessageInput(TextArea):
                     scroll.scroll_page_down(animate=False)
                 except Exception:
                     pass
+            return
+        # Escape exits EDIT mode (back to Enter=send) without clearing text
+        if event.key == "escape" and self.multiline_mode:
+            event.prevent_default()
+            event.stop()
+            self.multiline_mode = False
             return
         # Ctrl+E toggles multiline mode
         if event.key == "ctrl+e":
@@ -223,6 +245,9 @@ class MessageInput(TextArea):
                 self._draft = ""
                 self.post_message(self.Submitted(self, text))
                 self.clear()
+                # Leave EDIT mode after send so next message is normal Enter-to-send
+                self.multiline_mode = False
+                self._set_height_for_content(min_lines=1)
         elif event.key in ("up", "down") and self._is_multiline():
             # Multiline: move cursor within text, prevent bubbling to parent scroll
             event.prevent_default()

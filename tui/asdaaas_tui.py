@@ -916,7 +916,10 @@ class AsdaaasTUI(App):
     #bottom-bar {
         dock: bottom;
         height: auto;
-        max-height: 12;
+        /* Was 12: multiline paste grew MessageInput past this and the child
+           overflowed the dock (looked like an "escaped" full-screen text window).
+           Cap at half the terminal so chat stays visible; TextArea scrolls. */
+        max-height: 50%;
     }
 
     AgentMessage {
@@ -1709,10 +1712,18 @@ Type anything else to send a message to the agent.
             pass
 
     def action_dismiss_overlay(self) -> None:
-        """Dismiss any open overlay, exit copy mode, or focus input."""
+        """Dismiss any open overlay, exit copy mode / EDIT mode, or focus input."""
         if getattr(self, '_copy_mode', False):
             self.action_toggle_copy_mode()
             return
+        # Multiline paste auto-enters EDIT mode; Escape should leave it (not a trap).
+        try:
+            input_bar = self.query_one("#input-bar", MessageInput)
+            if input_bar.multiline_mode:
+                input_bar.multiline_mode = False
+                return
+        except Exception:
+            pass
         try:
             selector = self.query_one("#gaze-selector", GazeSelector)
             if selector.display:

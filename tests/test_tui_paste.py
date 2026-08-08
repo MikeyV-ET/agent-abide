@@ -223,3 +223,71 @@ async def test_paste_undo_redo_cycle():
         assert len(app.submitted_messages) == 0, (
             f"Paste-undo-paste-undo cycle triggered submit: {app.submitted_messages}"
         )
+
+
+@pytest.mark.asyncio
+async def test_multiline_paste_stays_inside_bottom_bar():
+    """Regression: large multiline paste must not overflow #bottom-bar.
+
+    Bug (2026-08-07): MessageInput grew past bottom-bar max-height:12 and
+    painted outside the dock — looked like an "escaped text window".
+    """
+    from textual.containers import Vertical
+
+    class LayoutPasteApp(App):
+        CSS = """
+        #bottom-bar {
+            dock: bottom;
+            height: auto;
+            max-height: 50%;
+        }
+        """
+        def compose(self) -> ComposeResult:
+            yield Vertical(id="main")
+            with Vertical(id="bottom-bar"):
+                yield MessageInput(id="msg-input")
+
+        def on_message_input_submitted(self, event: MessageInput.Submitted) -> None:
+            pass
+
+    big = "\n".join(f"line {i}" for i in range(40))
+    async with LayoutPasteApp().run_test(size=(80, 40)) as pilot:
+        app = pilot.app
+        msg_input = app.query_one("#msg-input", MessageInput)
+        bar = app.query_one("#bottom-bar")
+
+        await msg_input._on_paste(Paste(big))
+        await pilot.pause()
+        await pilot.pause()
+
+        # Input must not be taller than its docked parent
+        assert msg_input.size.height <= bar.size.height, (
+            f"input h={msg_input.size.height} escaped bar h={bar.size.height}"
+        )
+        # Parent must not consume the whole screen
+        assert bar.size.height <= 20, (
+            f"bottom-bar h={bar.size.height} ate the screen (terminal=40)"
+        )
+        # Still in edit mode for multi-line, but contained
+        assert msg_input.multiline_mode
+        assert "line 0" in msg_input.text
+        assert "line 39" in msg_input.text
+
+
+@pytest.mark.asyncio
+async def test_submit_exits_edit_mode():
+    """After sending a multiline paste, return to normal Enter=send mode."""
+    async with PasteTestApp().run_test() as pilot:
+        app = pilot.app
+        msg_input = app.query_one("#msg-input", MessageInput)
+
+        await msg_input._on_paste(Paste(MULTI_LINE_TEXT))
+        await pilot.pause()
+        assert msg_input.multiline_mode
+
+        # In edit mode, ctrl+j sends
+        await pilot.press("ctrl+j")
+        await pilot.pause()
+
+        assert len(app.submitted_messages) == 1
+        assert not msg_input.multiline_mode, "should leave EDIT mode after send"

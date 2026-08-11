@@ -7,6 +7,7 @@
 #   bash restart_agent.sh --list              # list configured agents
 #   bash restart_agent.sh --force <Agent>     # skip graceful shutdown
 #   bash restart_agent.sh --no-check <Agent>  # skip startup verification
+#   bash restart_agent.sh --proxy <Agent>     # route through signature-fix proxy
 #
 # Reads configuration from agents.json (same directory as this script).
 #
@@ -49,6 +50,11 @@ TIMEOUT_GRACEFUL=30
 TIMEOUT_TERM=10
 STARTUP_TIMEOUT=60  # max seconds to wait for agent to reach "Ready."
 
+# Proxy settings
+PROXY_ADDON="$HOME/projects/agent-science/code/fix_signature.py"
+PROXY_CERT="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
+PROXY_BASE_PORT=8080  # each agent gets base + index
+
 # ---- Helper: write a structured startup history record ----
 write_startup_record() {
     local agent="$1"
@@ -82,12 +88,14 @@ with open('$history_file', 'a') as f:
 FORCE=false
 LIST=false
 NO_CHECK=false
+USE_PROXY=false
 TARGETS=()
 for arg in "$@"; do
     case "$arg" in
         --force)    FORCE=true ;;
         --list)     LIST=true ;;
         --no-check) NO_CHECK=true ;;
+        --proxy)    USE_PROXY=true ;;
         *)          TARGETS+=("$arg") ;;
     esac
 done
@@ -110,8 +118,97 @@ if [ ${#TARGETS[@]} -eq 0 ]; then
     echo "       restart_agent.sh --list"
     echo "       restart_agent.sh --force <AgentName>"
     echo "       restart_agent.sh --no-check <AgentName>"
+    echo "       restart_agent.sh --proxy <AgentName>"
     exit 1
 fi
+
+# ---- Helper: determine if proxy should be used for an agent ----
+agent_wants_proxy() {
+    local agent="$1"
+    # CLI flag overrides everything
+    if [ "$USE_PROXY" = true ]; then
+        return 0
+    fi
+    # Check per-agent config in agents.json
+    local proxy_cfg
+    proxy_cfg=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent'].get('proxy', False))" 2>/dev/null || echo "False")
+    if [ "$proxy_cfg" = "True" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# ---- Helper: compute proxy port for an agent ----
+proxy_port_for() {
+    local agent="$1"
+    # Deterministic port: hash agent name to a small offset from base port
+    local offset
+    offset=$(python3 -c "
+import json
+agents = list(json.load(open('$CONFIG'))['agents'].keys())
+try:
+    print(agents.index('$agent'))
+except ValueError:
+    print(0)
+")
+    echo $(( PROXY_BASE_PORT + offset ))
+}
+
+# ---- Helper: start signature-fix proxy for an agent ----
+start_proxy() {
+    local agent="$1"
+    local port
+    port=$(proxy_port_for "$agent")
+
+    # Check prerequisites
+    if ! command -v mitmdump &>/dev/null; then
+        echo "  FAIL: mitmdump not found in PATH"
+        return 1
+    fi
+    if [ ! -f "$PROXY_ADDON" ]; then
+        echo "  FAIL: Proxy addon not found: $PROXY_ADDON"
+        return 1
+    fi
+    if [ ! -f "$PROXY_CERT" ]; then
+        echo "  FAIL: mitmproxy CA cert not found: $PROXY_CERT"
+        return 1
+    fi
+
+    # Kill any existing proxy on this port
+    pkill -f "mitmdump.*-p $port" 2>/dev/null || true
+    sleep 1
+
+    local proxy_log="$LOG_DIR/proxy_$(echo "$agent" | tr '[:upper:]' '[:lower:]').log"
+    setsid nohup mitmdump -s "$PROXY_ADDON" -p "$port" --set ssl_insecure=true > "$proxy_log" 2>&1 &
+    local proxy_pid=$!
+
+    # Wait for proxy to be ready (listen on port)
+    local elapsed=0
+    while [ $elapsed -lt 5 ]; do
+        if ss -tlnp 2>/dev/null | grep -q ":$port "; then
+            echo "  OK   Proxy started (PID $proxy_pid, port $port)"
+            AGENT_PROXY_PORT=$port
+            AGENT_PROXY_PID=$proxy_pid
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    echo "  FAIL: Proxy did not start within 5s"
+    show_log_tail "$proxy_log" 10
+    return 1
+}
+
+# ---- Helper: stop proxy for an agent ----
+stop_proxy() {
+    local agent="$1"
+    local port
+    port=$(proxy_port_for "$agent")
+    if pkill -f "mitmdump.*-p $port" 2>/dev/null; then
+        echo "  OK   Proxy stopped (port $port)"
+    fi
+}
 
 # ---- Helper: wait for a pattern in the log file ----
 # Returns 0 if pattern found, 1 if timeout.
@@ -278,6 +375,11 @@ stage_stop() {
         return 0
     fi
 
+    # Stop any associated proxy
+    if agent_wants_proxy "$agent"; then
+        stop_proxy "$agent"
+    fi
+
     if [ "$FORCE" = true ]; then
         pkill -KILL -f "asdaaas.py --agent $agent" 2>/dev/null
         sleep 1
@@ -363,6 +465,19 @@ stage_launch() {
     # Agents see "[asdaaas: N doorbell(s) waiting]" in tool output.
     export PROMPT_COMMAND='_asdaaas_inbox() { local n=$(ls ~/agents/'"$agent"'/asdaaas/doorbells/*.json 2>/dev/null | wc -l); [ "$n" -gt 0 ] && echo "[asdaaas: $n doorbell(s) waiting]"; }; _asdaaas_inbox'
 
+    # Start signature-fix proxy if requested
+    AGENT_PROXY_PORT=""
+    AGENT_PROXY_PID=""
+    if agent_wants_proxy "$agent"; then
+        echo "  [4a/8] Proxy..."
+        start_proxy "$agent" || { echo "  ABORT: Proxy failed to start"; return 1; }
+        export HTTPS_PROXY="http://localhost:$AGENT_PROXY_PORT"
+        export SSL_CERT_FILE="$PROXY_CERT"
+    else
+        unset HTTPS_PROXY 2>/dev/null || true
+        unset SSL_CERT_FILE 2>/dev/null || true
+    fi
+
     setsid nohup python3 -u "$ASDAAAS" --agent "$agent" --cwd "$home" $extra_args >> "$log_file" 2>&1 &
     local pid=$!
 
@@ -392,6 +507,9 @@ os.rename(raf + '.tmp', raf)
 
     echo "  OK   PID $pid alive (session=$session, model=${model:-default})"
     echo "         Log: $log_file"
+    if [ -n "$AGENT_PROXY_PORT" ]; then
+        echo "         Proxy: port $AGENT_PROXY_PORT (PID $AGENT_PROXY_PID)"
+    fi
 
     # Export for later stages
     AGENT_PID=$pid

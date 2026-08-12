@@ -74,7 +74,8 @@ from chrome_widgets import (
     SystemAlert, ContentScroll, HookAnnotation, TurnSeparator, classify_turn_trigger,
 )
 from nav_widgets import (
-    RoomMessage, RoomSystemMessage, AgentTabBar, ThemeSelector, DynamicFooter,
+    RoomMessage, RoomSystemMessage, AgentTabBar, AgentAddSelector,
+    ThemeSelector, DynamicFooter,
 )
 
 from status_read import telemetry_from_files, code_version_stale
@@ -107,12 +108,38 @@ class Config:
                 elif ep and ep.is_file():
                     p = ep
                 else:
-                    p = Path(__file__).resolve().parent.parent / "agents.json"
+                    # Prefer agents-home config, then repo-root agents.json
+                    cand = [
+                        Path(cls.AGENTS_HOME).parent / "config" / "agents.json",
+                        Path(cls.AGENTS_HOME) / "config" / "agents.json",
+                        Path(__file__).resolve().parent.parent / "agents.json",
+                    ]
+                    p = next((c for c in cand if c.exists()), cand[-1])
                 with open(p) as f:
                     cls._agents_cfg = json.load(f)
             except Exception:
                 cls._agents_cfg = {}
         return cls._agents_cfg
+
+    @classmethod
+    def list_catalog_agents(cls) -> list[str]:
+        """Agents from agents.json that have an asdaaas directory (openable in TUI)."""
+        cfg = cls.load_agents_cfg()
+        agents_home = Path(cls.AGENTS_HOME)
+        names: list[str] = []
+        for name, acfg in (cfg.get("agents") or {}).items():
+            if not isinstance(acfg, dict):
+                continue
+            home = Path(acfg.get("home", str(agents_home / name)))
+            if (home / "asdaaas").exists():
+                names.append(name)
+        if not names:
+            # filesystem fallback
+            if agents_home.exists():
+                for d in sorted(agents_home.iterdir()):
+                    if d.is_dir() and (d / "asdaaas").exists():
+                        names.append(d.name)
+        return names
 
     @classmethod
     def agent_backend(cls, agent_name: str) -> str:
@@ -1079,11 +1106,12 @@ class AsdaaasTUI(App):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="top-bar"):
-            if len(self._agents) > 1:
-                yield AgentTabBar(self._agents, id="agent-tab-bar")
+            # Always show tab bar so [+] / × agent management is available
+            yield AgentTabBar(self._agents, id="agent-tab-bar")
             yield AgentHeader(id="agent-header")
         yield GazeSelector(id="gaze-selector")
         yield ThemeSelector(id="theme-selector")
+        yield AgentAddSelector(id="agent-add-selector")
         yield SlashMenu(id="slash-menu")
         # One content scroll per agent
         for agent in self._agents:
@@ -1143,6 +1171,11 @@ class AsdaaasTUI(App):
         try:
             viewer = self.query_one("#ephact-viewer", EphactViewer)
             viewer.set_active_agent(self._active_agent)
+        except NoMatches:
+            pass
+        try:
+            tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
+            tab_bar.active_agent = self._active_agent
         except NoMatches:
             pass
         # Start the status poller
@@ -1733,6 +1766,14 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
         try:
+            add_sel = self.query_one("#agent-add-selector", AgentAddSelector)
+            if add_sel.display:
+                add_sel.display = False
+                self.query_one("#input-bar", MessageInput).focus()
+                return
+        except NoMatches:
+            pass
+        try:
             slash_menu = self.query_one("#slash-menu", SlashMenu)
             if slash_menu.display:
                 slash_menu.display = False
@@ -1931,6 +1972,125 @@ Type anything else to send a message to the agent.
             self.action_switch_to_room()
         else:
             self.action_switch_agent(next_tab)
+
+    def _new_agent_state(self, agent: str) -> dict:
+        return {
+            "tool_panels": {},
+            "current_agent_msg": None,
+            "current_thinking": None,
+            "updates_offset": 0,
+            "replay_done": False,
+            "earliest_offset": 0,
+            "updates_path": None,
+            "loading_history": False,
+            "input_draft": "",
+            "backend": Config.agent_backend(agent),
+            "logical_turn": 0,
+            "chat_state": ChatState(),
+            "removed": False,
+        }
+
+    def _sync_tab_bar(self) -> None:
+        try:
+            tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
+            tab_bar.set_agents(self._agents)
+            if self._room_active:
+                tab_bar.active_agent = AgentTabBar.ROOM_TAB
+            else:
+                tab_bar.active_agent = self._active_agent
+        except NoMatches:
+            pass
+
+    def action_add_agent_menu(self) -> None:
+        """Open picker of agents.json entries not already in the tab bar."""
+        open_set = set(self._agents)
+        candidates = [n for n in Config.list_catalog_agents() if n not in open_set]
+        try:
+            sel = self.query_one("#agent-add-selector", AgentAddSelector)
+        except NoMatches:
+            self.notify("Add-agent UI missing", severity="error")
+            return
+        # Hide other overlays
+        for oid, cls in (("#gaze-selector", GazeSelector), ("#theme-selector", ThemeSelector)):
+            try:
+                w = self.query_one(oid, cls)
+                w.display = False
+            except NoMatches:
+                pass
+        sel.populate(candidates)
+        sel.display = True
+        sel.focus()
+
+    def action_add_agent(self, agent_name: str) -> None:
+        """Open an agent tab (from catalog) and start tailing it."""
+        if not agent_name or agent_name in self._agents:
+            return
+        catalog = Config.list_catalog_agents()
+        if agent_name not in catalog:
+            self.notify(f"Unknown agent: {agent_name}", severity="warning")
+            return
+
+        self._agent_state[agent_name] = self._new_agent_state(agent_name)
+        self._agents.append(agent_name)
+
+        # Mount content scroll before room scroll
+        vs = ContentScroll(id=f"content-{agent_name}")
+        vs.display = False
+        try:
+            room = self.query_one("#content-room", ContentScroll)
+            self.mount(vs, before=room)
+        except NoMatches:
+            self.mount(vs)
+
+        # Start tail worker
+        use_api = Config.API_URL is not None
+        if use_api:
+            self.run_worker(
+                lambda a=agent_name: self._tail_via_api(a),
+                thread=True, name=f"updates_{agent_name}",
+            )
+        else:
+            self.run_worker(
+                lambda a=agent_name: self._tail_updates_for_agent(a),
+                thread=True, name=f"updates_{agent_name}",
+            )
+
+        self._sync_tab_bar()
+        self.action_switch_agent(agent_name)
+        self.notify(f"Added {agent_name}", severity="information", timeout=2)
+
+    def action_remove_agent(self, agent_name: str) -> None:
+        """Close an agent tab (does not delete agents.json entry)."""
+        if agent_name not in self._agents:
+            return
+        if len(self._agents) <= 1:
+            self.notify("Keep at least one agent open", severity="warning")
+            return
+
+        # Pick next active if removing current
+        if self._active_agent == agent_name and not self._room_active:
+            others = [a for a in self._agents if a != agent_name]
+            self.action_switch_agent(others[0])
+
+        # Mark removed so tail workers exit
+        st = self._agent_state.get(agent_name)
+        if st is not None:
+            st["removed"] = True
+
+        self._agents = [a for a in self._agents if a != agent_name]
+
+        # Remove content widget
+        try:
+            scroll = self.query_one(f"#content-{agent_name}", ContentScroll)
+            scroll.remove()
+        except NoMatches:
+            pass
+
+        # Drop state (after workers can see removed flag)
+        self._agent_state.pop(agent_name, None)
+
+        self._sync_tab_bar()
+        self.notify(f"Closed {agent_name}", severity="information", timeout=2)
 
     def action_switch_to_room(self) -> None:
         """Switch to the IRC room tab."""
@@ -2687,6 +2847,9 @@ Type anything else to send a message to the agent.
             self._replay_done = True
 
         while not worker.is_cancelled:
+            # Exit if tab was closed
+            if agent_name not in self._agents or self._agent_state.get(agent_name, {}).get("removed"):
+                return
             try:
                 current_size = updates_path.stat().st_size
                 offset = state["updates_offset"]
@@ -2795,6 +2958,8 @@ Type anything else to send a message to the agent.
 
         # --- Phase 2: Live tail via WebSocket (raw mode) ---
         while not worker.is_cancelled:
+            if agent_name not in self._agents or self._agent_state.get(agent_name, {}).get("removed"):
+                return
             try:
                 with ws_sync.connect(ws_url) as ws:
                     init = {"raw": True, "after_id": last_tail_id}
@@ -3479,8 +3644,8 @@ def main():
         description="asdaaas TUI — Full-screen development interface for agent sessions"
     )
     parser.add_argument(
-        "--agent", "-a", default="Trip",
-        help="Agent name (default: Trip)"
+        "--agent", "-a", action="append", dest="agents", default=None,
+        help="Agent to open (repeatable). Default: Trip only. Use tab [+] to add more.",
     )
     parser.add_argument(
         "--agents-home", default=os.path.expanduser("~/agents"),
@@ -3524,7 +3689,8 @@ def main():
     )
     args = parser.parse_args()
 
-    Config.AGENT_NAME = args.agent
+    open_agents = args.agents if args.agents else ["Trip"]
+    Config.AGENT_NAME = open_agents[0]
     Config.AGENTS_HOME = args.agents_home
     Config.set_env(TuiEnv.from_defaults(args.agents_home))
     Config.UPDATES_FILE = args.updates
@@ -3552,37 +3718,17 @@ def main():
             print(f"Warning: No updates.jsonl found for agent {Config.AGENT_NAME}")
             print("The TUI will wait for the file to appear...")
 
-    # Discover agents from agents.json (authoritative) or fall back to filesystem
-    agents_home = Path(Config.AGENTS_HOME)
-    all_agents = []
-    # Config resolution: ASDAAAS_CONFIG env var, then repo root
-    _env = os.environ.get("ASDAAAS_CONFIG", "")
-    _ep = Path(_env) if _env else None
-    if _ep and _ep.is_dir():
-        agents_json_path = _ep / "agents.json"
-    elif _ep and _ep.is_file():
-        agents_json_path = _ep
-    else:
-        agents_json_path = Path(__file__).resolve().parent.parent / "agents.json"
-    try:
-        with open(agents_json_path) as f:
-            agents_cfg = json.load(f)
-        for name, acfg in agents_cfg.get("agents", {}).items():
-            home = Path(acfg.get("home", str(agents_home / name)))
-            if (home / "asdaaas").exists():
-                all_agents.append(name)
-    except Exception:
-        # Fallback: discover from filesystem
-        if agents_home.exists():
-            for d in sorted(agents_home.iterdir()):
-                if d.is_dir() and (d / "asdaaas").exists():
-                    all_agents.append(d.name)
-    # Ensure primary agent is first
-    if Config.AGENT_NAME in all_agents:
-        all_agents.remove(Config.AGENT_NAME)
-    all_agents.insert(0, Config.AGENT_NAME)
-
-    app = AsdaaasTUI(agents=all_agents)
+    # Open only CLI-selected agents; [+] adds more from agents.json catalog.
+    # Dedupe preserving order.
+    seen = set()
+    open_list = []
+    for name in open_agents:
+        if name not in seen:
+            seen.add(name)
+            open_list.append(name)
+    catalog = set(Config.list_catalog_agents())
+    # Allow CLI names even if catalog miss (still try to open)
+    app = AsdaaasTUI(agents=open_list)
 
     if args.debug_log:
         AsdaaasTUI.enable_debug_log(args.debug_log)

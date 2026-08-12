@@ -71,26 +71,25 @@ def layout_agent_tabs(
     width: int,
     scroll: int = 0,
     room_tab: str = "#room",
+    show_close: bool = True,
+    show_add: bool = True,
 ) -> dict:
-    """Lay out agent tabs into a fixed terminal width without mid-tab clipping.
+    """Lay out agent tabs into a fixed width without mid-tab clipping.
 
-    Mid-tab clips rendered as black boxes when Textual/Rich truncates a styled
-    segment. We only emit whole tabs (or one ellipsized tab if a single name
-    is wider than the bar).
+    Each agent tab may include a close control (×). Room has no close.
+    A trailing [+] add control is optional. Overflow uses ‹ / +N scroll hints.
 
-    Returns:
-      segments: list of (tab_id|None, label, width, kind)
-                kind in {"tab", "left_hint", "right_hint"}
-      scroll: first visible tab index (may be adjusted to show active)
-      indices: indices of visible tabs
-      hidden_left, hidden_right: counts off-screen
+    Segment kinds: tab | close | left_hint | right_hint | add
     """
     if width < 4:
         width = 4
     n = len(tabs)
     if n == 0:
+        segs = []
+        if show_add:
+            segs.append((None, "+", 4, "add"))  # " [+] "
         return {
-            "segments": [],
+            "segments": segs,
             "scroll": 0,
             "indices": [],
             "hidden_left": 0,
@@ -100,28 +99,30 @@ def layout_agent_tabs(
     def label_for(tab: str) -> str:
         return "Room" if tab == room_tab else tab
 
-    def tab_w(tab: str, lab: str | None = None) -> int:
+    def unit_width(tab: str, lab: str | None = None) -> int:
         lab = label_for(tab) if lab is None else lab
-        return len(lab) + 4  # "  name  " or " [name] "
+        w = len(lab) + 4  # "  name  " / " [name] "
+        if show_close and tab != room_tab:
+            w += 2  # "× "
+        return w
 
     scroll = max(0, min(int(scroll), n - 1))
+    add_w = 4 if show_add else 0  # " [+] "
 
     def right_hint_w(hidden: int) -> int:
         if hidden <= 0:
             return 0
-        return len(f"+{hidden}") + 2  # " +N "
+        return len(f"+{hidden}") + 2
 
     def pack_from(start: int, budget: int) -> tuple[list[int], list[str]]:
-        """Return tab indices and labels that fully fit in budget from start."""
         idxs: list[int] = []
         labs: list[str] = []
         used = 0
         for i in range(start, n):
             lab = label_for(tabs[i])
-            w = tab_w(tabs[i], lab)
+            w = unit_width(tabs[i], lab)
             if not idxs and w > budget:
-                # Single tab wider than budget — ellipsize label
-                max_lab = max(1, budget - 4)
+                max_lab = max(1, budget - 4 - (2 if show_close and tabs[i] != room_tab else 0))
                 if len(lab) > max_lab:
                     lab = lab[: max(1, max_lab - 1)] + "…"
                 idxs.append(i)
@@ -139,18 +140,16 @@ def layout_agent_tabs(
             return True
         return tabs.index(active) in idxs
 
-    # If active is left of scroll, pull scroll back
     if active in tabs and tabs.index(active) < scroll:
         scroll = tabs.index(active)
 
-    # Try packing; if active not visible, re-home scroll so active is included
     for _attempt in range(n + 1):
         left_hint = scroll > 0
-        left_w = 2 if left_hint else 0  # "‹ "
+        left_w = 2 if left_hint else 0
+        budget_full = width - left_w - add_w
+        if budget_full < 4:
+            budget_full = max(4, width - left_w - (3 if show_add else 0))
 
-        # Estimate right hidden assuming we fill the bar
-        # Iterate once: pack without right reserve, measure remainder, re-pack
-        budget_full = width - left_w
         idxs, labs = pack_from(scroll, budget_full)
         end = (idxs[-1] + 1) if idxs else scroll
         hidden_right = n - end
@@ -159,48 +158,37 @@ def layout_agent_tabs(
             idxs, labs = pack_from(scroll, max(4, budget_full - rh))
             end = (idxs[-1] + 1) if idxs else scroll
             hidden_right = n - end
-            rh = right_hint_w(hidden_right)
-            if rh:
-                idxs, labs = pack_from(scroll, max(4, budget_full - rh))
-                end = (idxs[-1] + 1) if idxs else scroll
-                hidden_right = n - end
 
         if fits_active(idxs):
             break
 
-        # Active not visible — set scroll so active is the rightmost visible tab
         ai = tabs.index(active)
-        # Walk left from ai packing into (width - left - right estimates)
-        # Assume left hint if ai > 0, right if ai < n-1
         left_w_est = 2 if ai > 0 else 0
         right_w_est = right_hint_w(max(0, n - ai - 1)) or (0 if ai == n - 1 else 4)
-        budget = max(4, width - left_w_est - right_w_est)
-        # Greedily include tabs ending at ai
-        acc = 0
-        start = ai
+        budget = max(4, width - left_w_est - right_w_est - add_w)
         lab_ai = label_for(tabs[ai])
-        w_ai = tab_w(tabs[ai], lab_ai)
+        w_ai = unit_width(tabs[ai], lab_ai)
         if w_ai > budget:
             scroll = ai
             continue
         acc = w_ai
+        start = ai
         j = ai - 1
         while j >= 0:
-            w = tab_w(tabs[j])
+            w = unit_width(tabs[j])
             if acc + w > budget:
                 break
             acc += w
             start = j
             j -= 1
         if start == scroll:
-            # Could not improve — force active alone
             scroll = ai
             break
         scroll = start
 
     left_hint = scroll > 0
     left_w = 2 if left_hint else 0
-    budget_full = width - left_w
+    budget_full = max(4, width - left_w - add_w)
     idxs, labs = pack_from(scroll, budget_full)
     end = (idxs[-1] + 1) if idxs else scroll
     hidden_right = n - end
@@ -214,10 +202,17 @@ def layout_agent_tabs(
     if left_hint:
         segments.append((None, "‹", 2, "left_hint"))
     for i, lab in zip(idxs, labs):
-        segments.append((tabs[i], lab, tab_w(tabs[i], lab), "tab"))
+        tab = tabs[i]
+        # label portion width without close
+        lab_w = len(lab) + 4
+        segments.append((tab, lab, lab_w, "tab"))
+        if show_close and tab != room_tab:
+            segments.append((tab, "×", 2, "close"))
     if hidden_right > 0:
         hlab = f"+{hidden_right}"
         segments.append((None, hlab, len(hlab) + 2, "right_hint"))
+    if show_add:
+        segments.append((None, "+", 4, "add"))
 
     return {
         "segments": segments,
@@ -229,7 +224,7 @@ def layout_agent_tabs(
 
 
 class AgentTabBar(Static):
-    """Tab bar showing available agents. Overflow scrolls; no mid-tab clip."""
+    """Agent tabs with overflow, per-tab close (×), and add (+)."""
 
     DEFAULT_CSS = """
     AgentTabBar {
@@ -244,6 +239,7 @@ class AgentTabBar(Static):
     active_agent = reactive("")
 
     ROOM_TAB = "#room"
+    ADD_ID = "#add"
 
     def __init__(self, agents: list[str], **kwargs):
         super().__init__(**kwargs)
@@ -251,6 +247,14 @@ class AgentTabBar(Static):
         self._tabs = list(agents) + [self.ROOM_TAB]
         self._scroll = 0
         self._layout_cache: dict | None = None
+
+    def set_agents(self, agents: list[str]) -> None:
+        """Replace open agent list (Room tab always last)."""
+        self._agents = list(agents)
+        self._tabs = list(agents) + [self.ROOM_TAB]
+        self._scroll = min(self._scroll, max(0, len(self._tabs) - 1))
+        self._layout_cache = None
+        self.refresh()
 
     def _width(self) -> int:
         try:
@@ -271,13 +275,14 @@ class AgentTabBar(Static):
             self._width(),
             scroll=self._scroll,
             room_tab=self.ROOM_TAB,
+            show_close=True,
+            show_add=True,
         )
         self._scroll = layout["scroll"]
         self._layout_cache = layout
         return layout
 
     def watch_active_agent(self, _value: str) -> None:
-        """Keep the active tab on-screen when selection changes."""
         self._layout_cache = None
         self._recompute()
         self.refresh()
@@ -294,11 +299,14 @@ class AgentTabBar(Static):
                 text.append("‹ ", style=f"bold {Theme.BR_AQUA} on {Theme.DARK1}")
             elif kind == "right_hint":
                 text.append(f" {lab} ", style=f"bold {Theme.BR_AQUA} on {Theme.DARK1}")
+            elif kind == "close":
+                text.append("× ", style=f"bold {Theme.BR_RED} on {Theme.DARK1}")
+            elif kind == "add":
+                text.append(" [+] ", style=f"bold {Theme.BR_GREEN} on {Theme.DARK1}")
             elif tab == self.active_agent:
                 text.append(f" [{lab}] ", style=f"bold {Theme.FG} on {Theme.DARK2}")
             else:
                 text.append(f"  {lab}  ", style=f"{Theme.GRAY} on {Theme.DARK1}")
-        # Pad remainder so clipped tail doesn't leave a black strip
         try:
             used = text.cell_len
             pad = self._width() - used
@@ -309,7 +317,6 @@ class AgentTabBar(Static):
         return text
 
     def on_click(self, event) -> None:
-        """Switch agent/room, or scroll when overflow hints are clicked."""
         layout = self._layout_cache or self._recompute()
         x = event.x
         pos = 0
@@ -329,6 +336,18 @@ class AgentTabBar(Static):
                     self._layout_cache = None
                     self.refresh()
                     return
+                if kind == "close" and tab and tab != self.ROOM_TAB:
+                    try:
+                        self.app.action_remove_agent(tab)
+                    except Exception:
+                        pass
+                    return
+                if kind == "add":
+                    try:
+                        self.app.action_add_agent_menu()
+                    except Exception:
+                        pass
+                    return
                 if kind == "tab" and tab is not None and tab != self.active_agent:
                     self.active_agent = tab
                     if tab == self.ROOM_TAB:
@@ -337,6 +356,46 @@ class AgentTabBar(Static):
                         self.app.action_switch_agent(tab)
                 return
             pos += w
+
+
+class AgentAddSelector(OptionList):
+    """Dropdown to add an agent from agents.json that is not already open."""
+
+    DEFAULT_CSS = """
+    AgentAddSelector {
+        layer: overlay;
+        dock: top;
+        margin: 1 0 0 0;
+        width: 40;
+        max-height: 16;
+        border: solid $accent;
+        background: $surface;
+        display: none;
+        offset-x: 2;
+    }
+    """
+
+    def on_blur(self, event) -> None:
+        self.display = False
+
+    def populate(self, candidates: list[str]) -> None:
+        self.clear_options()
+        self.border_title = "Add agent — Enter · Esc"
+        if not candidates:
+            self.add_option(Option("(all agents already open)", id="__none__"))
+            return
+        for name in candidates:
+            self.add_option(Option(name, id=name))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        opt_id = event.option.id if event.option else None
+        self.display = False
+        if not opt_id or opt_id == "__none__":
+            return
+        try:
+            self.app.action_add_agent(opt_id)
+        except Exception:
+            pass
 
 
 class DynamicFooter(Static):

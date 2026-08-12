@@ -246,14 +246,14 @@ class AgentTabBar(Static):
         self._agents = list(agents)
         self._tabs = list(agents) + [self.ROOM_TAB]
         self._scroll = 0
-        self._layout_cache: dict | None = None
+        self._tab_layout_cache: dict | None = None
 
     def set_agents(self, agents: list[str]) -> None:
         """Replace open agent list (Room tab always last)."""
         self._agents = list(agents)
         self._tabs = list(agents) + [self.ROOM_TAB]
         self._scroll = min(self._scroll, max(0, len(self._tabs) - 1))
-        self._layout_cache = None
+        self._tab_layout_cache = None
         self.refresh()
 
     def _width(self) -> int:
@@ -279,16 +279,16 @@ class AgentTabBar(Static):
             show_add=True,
         )
         self._scroll = layout["scroll"]
-        self._layout_cache = layout
+        self._tab_layout_cache = layout
         return layout
 
     def watch_active_agent(self, _value: str) -> None:
-        self._layout_cache = None
+        self._tab_layout_cache = None
         self._recompute()
         self.refresh()
 
     def on_resize(self, event) -> None:
-        self._layout_cache = None
+        self._tab_layout_cache = None
         self.refresh()
 
     def render(self) -> Text:
@@ -317,14 +317,14 @@ class AgentTabBar(Static):
         return text
 
     def on_click(self, event) -> None:
-        layout = self._layout_cache or self._recompute()
+        layout = self._tab_layout_cache or self._recompute()
         x = event.x
         pos = 0
         for tab, lab, w, kind in layout["segments"]:
             if x < pos + w:
                 if kind == "left_hint":
                     self._scroll = max(0, self._scroll - 1)
-                    self._layout_cache = None
+                    self._tab_layout_cache = None
                     self.refresh()
                     return
                 if kind == "right_hint":
@@ -333,7 +333,7 @@ class AgentTabBar(Static):
                         self._scroll = min(idxs[0] + 1, len(self._tabs) - 1)
                     else:
                         self._scroll = min(self._scroll + 1, len(self._tabs) - 1)
-                    self._layout_cache = None
+                    self._tab_layout_cache = None
                     self.refresh()
                     return
                 if kind == "close" and tab and tab != self.ROOM_TAB:

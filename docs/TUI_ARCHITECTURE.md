@@ -1,0 +1,46 @@
+# asdaaas TUI architecture (in progress)
+
+Branch work: `tui/perf-and-modularize`. Display policy: see Trip-G METHOD.
+
+## Target shape
+```
+EventSource (file tail / API)
+  → coalesce_events (event_coalesce.py)
+  → ChatState / apply_event (chat_model.py)   # pure
+  → AsdaaasTUI widgets (asdaaas_tui.py)       # Textual shell
+TuiEnv (tui_env.py)                           # injectable paths
+```
+
+## Modules today
+| File | Role |
+|------|------|
+| `tui/asdaaas_tui.py` | Textual App, widgets, workers, still owns live mount path |
+| `tui/event_coalesce.py` | Batch merge before main-thread apply |
+| `tui/chat_events.py` | Pure event field accessors |
+| `tui/chat_model.py` | Pure ChatState + apply_event reducer |
+| `tui/tui_env.py` | Injectable agents_home / asdaaas paths |
+| `tui/ephact_*.py` | Ephact parser/viewer |
+
+## Display policy (summary)
+- Thinking: almost always fully visible
+- Tools: snippet default, expand on click
+- Smooth UI and usable history both required
+
+## Dual-path dispatch (2026-08-04)
+`AsdaaasTUI._dispatch_event` now:
+1. `apply_event(chat_state, event)` on per-agent pure `ChatState`
+2. Existing widget mount/update path (unchanged UX)
+
+`Config.get_env()` / `set_env(TuiEnv)` — CLI sets env from `--agents-home`.
+`agent_home` falls back through `TuiEnv` when agents.json has no `home`.
+
+## status_read (2026-08-04)
+Pure health.json/gaze.json → AgentTelemetry. Used by tab-switch header refresh.
+Shadow tests: tests/test_chat_shadow.py validates ChatState under coalesced tool storms.
+
+## Widget / theme extract (2026-08-04)
+| Module | Contents |
+|--------|----------|
+| `tui/theme.py` | Palettes, THEMES, Theme proxy, set_theme() |
+| `tui/chat_widgets.py` | ToolCallPanel, PlanPanel, UserMessage, AgentMessage, ThinkingBlock, InterjectionBlock, _flatten_to_text |
+| `tui/asdaaas_tui.py` | App shell, remaining chrome widgets, workers (~4.0k lines) |

@@ -1,0 +1,27 @@
+{
+  "id": "solarized-dark",
+  "name": "Solarized Dark",
+  "colors": {
+    "BG": "#002b36",
+    "FG": "#839496",
+    "GRAY": "#586e75",
+    "RED": "#dc322f",
+    "GREEN": "#859900",
+    "YELLOW": "#b58900",
+    "BLUE": "#268bd2",
+    "PURPLE": "#6c71c4",
+    "AQUA": "#2aa198",
+    "ORANGE": "#cb4b16",
+    "BR_RED": "#dc322f",
+    "BR_GREEN": "#859900",
+    "BR_YELLOW": "#b58900",
+    "BR_BLUE": "#268bd2",
+    "BR_PURPLE": "#6c71c4",
+    "BR_AQUA": "#2aa198",
+    "BR_ORANGE": "#cb4b16",
+    "DARK1": "#073642",
+    "DARK2": "#094959",
+    "DARK3": "#586e75",
+    "DARK4": "#657b83"
+  }
+}

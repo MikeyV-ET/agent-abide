@@ -61,141 +61,24 @@ from rich.console import Console as RichConsole, Group
 
 from ephact_parser import extract_ephacts, has_partial_ephact
 from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
+from event_coalesce import coalesce_events
+from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event, interjection_key
+from tui_env import TuiEnv
+from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme, apply_auto_if_needed, apply_theme_to_app
+from chat_widgets import (
+    ToolCallPanel, PlanPanel, UserMessage, AgentMessage, ThinkingBlock, InterjectionBlock,
+    SystemReminderPanel, is_system_reminder,
+)
+from message_input import MessageInput
+from chrome_widgets import (
+    SystemAlert, ContentScroll, HookAnnotation, TurnSeparator, classify_turn_trigger,
+)
+from nav_widgets import (
+    RoomMessage, RoomSystemMessage, AgentTabBar, AgentAddSelector,
+    ThemeSelector, DynamicFooter,
+)
 
-
-def _flatten_to_text(renderable, width: int = 120) -> Text:
-    """Render a Rich renderable through Console, return as Text for native selectability.
-
-    Strips trailing whitespace on lines without background color."""
-    from io import StringIO
-    from rich.style import Style as RichStyle
-    buf = StringIO()
-    console = RichConsole(file=buf, force_terminal=True, width=width, no_color=False)
-    console.print(renderable, end="")
-    result = Text.from_ansi(buf.getvalue())
-    lines = result.split("\n")
-    for line in lines:
-        plain = line.plain
-        stripped_len = len(plain.rstrip())
-        if stripped_len < len(plain):
-            has_bg = any(
-                end > stripped_len and RichStyle.parse(str(s)).bgcolor
-                for start, end, s in line._spans
-            )
-            if not has_bg:
-                line.rstrip()
-    return Text("\n").join(lines)
-
-
-# =============================================================================
-# Color Palette — Gruvbox Dark
-# =============================================================================
-
-class GruvboxDark:
-    """Gruvbox dark mode color palette."""
-    NAME = "Gruvbox Dark"
-    BG = "#282828"
-    FG = "#ebdbb2"
-    GRAY = "#928374"
-    RED = "#cc241d"
-    GREEN = "#98971a"
-    YELLOW = "#d79921"
-    BLUE = "#458588"
-    PURPLE = "#b16286"
-    AQUA = "#689d6a"
-    ORANGE = "#d65d0e"
-    BR_RED = "#fb4934"
-    BR_GREEN = "#b8bb26"
-    BR_YELLOW = "#fabd2f"
-    BR_BLUE = "#83a598"
-    BR_PURPLE = "#d3869b"
-    BR_AQUA = "#8ec07c"
-    BR_ORANGE = "#fe8019"
-    DARK1 = "#3c3836"
-    DARK2 = "#504945"
-    DARK3 = "#665c54"
-    DARK4 = "#7c6f64"
-
-
-class GruvboxLight:
-    """Gruvbox light mode color palette."""
-    NAME = "Gruvbox Light"
-    BG = "#fbf1c7"
-    FG = "#3c3836"
-    GRAY = "#928374"
-    RED = "#cc241d"
-    GREEN = "#98971a"
-    YELLOW = "#d79921"
-    BLUE = "#458588"
-    PURPLE = "#b16286"
-    AQUA = "#689d6a"
-    ORANGE = "#d65d0e"
-    BR_RED = "#9d0006"
-    BR_GREEN = "#79740e"
-    BR_YELLOW = "#b57614"
-    BR_BLUE = "#076678"
-    BR_PURPLE = "#8f3f71"
-    BR_AQUA = "#427b58"
-    BR_ORANGE = "#af3a03"
-    DARK1 = "#ebdbb2"
-    DARK2 = "#d5c4a1"
-    DARK3 = "#bdae93"
-    DARK4 = "#a89984"
-
-
-class SolarizedDark:
-    """Solarized dark color palette."""
-    NAME = "Solarized Dark"
-    BG = "#002b36"
-    FG = "#839496"
-    GRAY = "#586e75"
-    RED = "#dc322f"
-    GREEN = "#859900"
-    YELLOW = "#b58900"
-    BLUE = "#268bd2"
-    PURPLE = "#6c71c4"
-    AQUA = "#2aa198"
-    ORANGE = "#cb4b16"
-    BR_RED = "#dc322f"
-    BR_GREEN = "#859900"
-    BR_YELLOW = "#b58900"
-    BR_BLUE = "#268bd2"
-    BR_PURPLE = "#6c71c4"
-    BR_AQUA = "#2aa198"
-    BR_ORANGE = "#cb4b16"
-    DARK1 = "#073642"
-    DARK2 = "#094959"
-    DARK3 = "#586e75"
-    DARK4 = "#657b83"
-
-
-THEMES = {
-    "gruvbox-dark": GruvboxDark,
-    "gruvbox-light": GruvboxLight,
-    "solarized-dark": SolarizedDark,
-}
-
-THEME_CONFIG_FILE = Path.home() / ".config" / "abidetui" / "theme.json"
-
-
-def _load_saved_theme() -> str:
-    """Load saved theme name from config file."""
-    try:
-        with open(THEME_CONFIG_FILE) as f:
-            return json.load(f).get("theme", "gruvbox-dark")
-    except (FileNotFoundError, json.JSONDecodeError):
-        return "gruvbox-dark"
-
-
-def _save_theme(name: str) -> None:
-    """Save theme selection to config file."""
-    THEME_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(THEME_CONFIG_FILE, "w") as f:
-        json.dump({"theme": name}, f)
-
-
-# Module-level active theme — all widgets reference this
-Theme = THEMES.get(_load_saved_theme(), GruvboxDark)
+from status_read import telemetry_from_files, code_version_stale
 
 
 # =============================================================================
@@ -225,12 +108,38 @@ class Config:
                 elif ep and ep.is_file():
                     p = ep
                 else:
-                    p = Path(__file__).resolve().parent.parent / "agents.json"
+                    # Prefer agents-home config, then repo-root agents.json
+                    cand = [
+                        Path(cls.AGENTS_HOME).parent / "config" / "agents.json",
+                        Path(cls.AGENTS_HOME) / "config" / "agents.json",
+                        Path(__file__).resolve().parent.parent / "agents.json",
+                    ]
+                    p = next((c for c in cand if c.exists()), cand[-1])
                 with open(p) as f:
                     cls._agents_cfg = json.load(f)
             except Exception:
                 cls._agents_cfg = {}
         return cls._agents_cfg
+
+    @classmethod
+    def list_catalog_agents(cls) -> list[str]:
+        """Agents from agents.json that have an asdaaas directory (openable in TUI)."""
+        cfg = cls.load_agents_cfg()
+        agents_home = Path(cls.AGENTS_HOME)
+        names: list[str] = []
+        for name, acfg in (cfg.get("agents") or {}).items():
+            if not isinstance(acfg, dict):
+                continue
+            home = Path(acfg.get("home", str(agents_home / name)))
+            if (home / "asdaaas").exists():
+                names.append(name)
+        if not names:
+            # filesystem fallback
+            if agents_home.exists():
+                for d in sorted(agents_home.iterdir()):
+                    if d.is_dir() and (d / "asdaaas").exists():
+                        names.append(d.name)
+        return names
 
     @classmethod
     def agent_backend(cls, agent_name: str) -> str:
@@ -281,6 +190,21 @@ class Config:
         with open(cls.OPERATOR_FILE, "w") as f:
             json.dump({"name": name}, f)
 
+    _env: "TuiEnv | None" = None  # type: ignore[assignment]
+
+    @classmethod
+    def get_env(cls) -> "TuiEnv":
+        """Injectable path root; built from AGENTS_HOME when unset."""
+        if cls._env is None:
+            cls._env = TuiEnv.from_defaults(cls.AGENTS_HOME)
+            # Prefer agents.json homes via agent_home still
+        return cls._env
+
+    @classmethod
+    def set_env(cls, env: "TuiEnv") -> None:
+        cls._env = env
+        cls.AGENTS_HOME = str(env.agents_home)
+
     @classmethod
     def agent_home(cls, agent_name: str) -> Path:
         """Return home directory for an agent, using agents.json 'home' field.
@@ -292,7 +216,7 @@ class Config:
         home = agent_cfg.get("home")
         if home:
             return Path(home)
-        return Path(cls.AGENTS_HOME) / agent_name
+        return cls.get_env().agent_home(agent_name)
 
     @classmethod
     def agent_dir(cls) -> Path:
@@ -515,7 +439,7 @@ class AgentHeader(Static):
     def watch_is_generating(self, generating: bool) -> None:
         """Start/stop spinner refresh timer."""
         if generating:
-            self._spinner_timer = self.set_interval(1 / 8, self.refresh)
+            self._spinner_timer = self.set_interval(1 / 4, self.refresh)
         else:
             if hasattr(self, "_spinner_timer") and self._spinner_timer:
                 self._spinner_timer.stop()
@@ -760,804 +684,6 @@ class SlashMenu(OptionList):
         self.display = False
 
 
-class SystemAlert(Static):
-    """System notification bar for retry, doom loop, compaction events."""
-
-    def __init__(self, message: str, severity: str = "warning", **kwargs):
-        super().__init__(**kwargs)
-        self.alert_message = message
-        self.severity = severity
-
-    def render(self) -> Text:
-        text = Text()
-        if self.severity == "error":
-            text.append(" ⚠ ", style=f"bold {Theme.BR_RED}")
-            text.append(self.alert_message, style=Theme.BR_RED)
-        elif self.severity == "warning":
-            text.append(" ⚠ ", style=f"bold {Theme.BR_YELLOW}")
-            text.append(self.alert_message, style=Theme.BR_YELLOW)
-        else:
-            text.append(" ℹ ", style=f"bold {Theme.BR_BLUE}")
-            text.append(self.alert_message, style=Theme.BR_BLUE)
-        return text
-
-
-class MessageInput(TextArea):
-    """Multiline input with mode toggle. Normal: Enter sends, ^J newline. Edit: Enter newline, ^J sends."""
-
-    multiline_mode = reactive(False)
-
-    DEFAULT_CSS = """
-    MessageInput {
-        height: auto;
-        min-height: 4;
-        border: heavy #504945;
-        padding: 0 1;
-    }
-    MessageInput:focus {
-        border: heavy #7c6f64;
-    }
-    
-    """
-
-    class Submitted(TextArea.Changed):
-        """Fired when user presses Enter (without Shift)."""
-        def __init__(self, text_area: "MessageInput", text: str):
-            super().__init__(text_area)
-            self.text = text
-
-    def __init__(self, placeholder: str = "", **kwargs):
-        super().__init__("", language=None, show_line_numbers=False, **kwargs)
-        self._placeholder = placeholder
-        self._history: list[str] = []
-        self._history_index: int = -1
-        self._draft: str = ""  # Saves current input when browsing history
-        # Register underscore cursor theme
-        from textual.widgets.text_area import TextAreaTheme
-        from rich.style import Style
-        underscore_theme = TextAreaTheme(
-            name="underscore",
-            cursor_style=Style(underline=True),
-            cursor_line_style=Style(),
-        )
-        self.register_theme(underscore_theme)
-        self.theme = "underscore"
-        self._update_mode_label()
-
-    async def _on_paste(self, event) -> None:
-        """Handle bracketed paste. Multi-line paste auto-switches to edit mode."""
-        if self.read_only:
-            return
-        text = event.text
-        if "\n" in text:
-            self.multiline_mode = True
-        self.insert(text)
-        self.focus()
-        event.prevent_default()
-        event.stop()
-
-    def _update_mode_label(self) -> None:
-        """Update border title to show current input mode."""
-        if self.multiline_mode:
-            self.border_subtitle = "EDIT: Enter=newline ^J=send | ^E=normal"
-        else:
-            self.border_subtitle = ""
-        self.border_title = ""
-
-    def watch_multiline_mode(self, value: bool) -> None:
-        """React to mode toggle — update border subtitle."""
-        self._update_mode_label()
-
-    def _get_wrap_width(self) -> int:
-        """Get the actual character width available for text wrapping."""
-        try:
-            region = self.scrollable_content_region
-            return max(region.width, 1)
-        except Exception:
-            return max(self.size.width - 4, 1)
-
-    def _is_multiline(self) -> bool:
-        """Check if input has multiple visual lines (newlines or wrapping)."""
-        if "\n" in self.text:
-            return True
-        return len(self.text) > self._get_wrap_width()
-
-    def undo(self) -> None:
-        """Override undo to handle Textual cursor desync bug.
-
-        Textual's _undo_batch calls _refresh_size() before updating the cursor.
-        With auto-height, the scrollbar refresh tries to scroll to a cursor
-        position that references lines removed by the undo.
-        """
-        try:
-            super().undo()
-        except ValueError:
-            line_count = self.document.line_count
-            row = min(self.cursor_location[0], max(0, line_count - 1))
-            last_line = self.document.get_line(row)
-            col = min(self.cursor_location[1], len(last_line))
-            self.move_cursor((row, col))
-            try:
-                self._refresh_size()
-            except ValueError:
-                pass
-
-    def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        """Recalculate height when text changes, using TextArea's own virtual size."""
-        def _update_height():
-            visual_lines = max(self.virtual_size.height, 1)
-            target_height = max(2, min(visual_lines + 2, 10))  # +2 for borders
-            self.styles.height = target_height
-            if visual_lines > 8:
-                self.scroll_cursor_visible()
-        self.call_after_refresh(_update_height)
-
-    def _on_key(self, event) -> None:
-        """Handle input keys. Ctrl+E toggles mode. Mode determines Enter vs Ctrl+J behavior."""
-        # Pass Home/End/PageUp/PageDown to the app for scroll/history actions
-        if event.key in ("f3", "f5", "f6"):
-            return  # Let these bubble to app-level bindings
-        if event.key in ("home", "end", "pageup", "pagedown"):
-            event.prevent_default()
-            event.stop()
-            if event.key == "home":
-                self.app.action_scroll_top()
-            elif event.key == "end":
-                self.app.action_scroll_bottom()
-            elif event.key == "pageup":
-                self.app.action_load_history()
-            elif event.key == "pagedown":
-                try:
-                    scroll = self.app._content_scroll()
-                    scroll.scroll_page_down(animate=False)
-                except Exception:
-                    pass
-            return
-        # Ctrl+E toggles multiline mode
-        if event.key == "ctrl+e":
-            event.prevent_default()
-            event.stop()
-            self.multiline_mode = not self.multiline_mode
-            return
-        # Determine which key sends and which inserts newline based on mode
-        if self.multiline_mode:
-            send_key = "ctrl+j"
-            newline_keys = ("enter", "shift+enter", "ctrl+enter")
-        else:
-            send_key = "enter"
-            newline_keys = ("shift+enter", "ctrl+enter", "ctrl+j")
-        if event.key in newline_keys:
-            event.prevent_default()
-            event.stop()
-            self.insert("\n")
-            return
-        elif event.key == send_key:
-            # If slash menu is visible, select the highlighted option
-            try:
-                slash_menu = self.app.query_one("#slash-menu")
-                if slash_menu.display and slash_menu.highlighted is not None:
-                    event.prevent_default()
-                    event.stop()
-                    slash_menu.action_select()
-                    return
-            except Exception:
-                pass
-            event.prevent_default()
-            event.stop()
-            text = self.text.strip()
-            if text:
-                self._history.append(text)
-                self._history_index = -1
-                self._draft = ""
-                self.post_message(self.Submitted(self, text))
-                self.clear()
-        elif event.key in ("up", "down") and self._is_multiline():
-            # Multiline: move cursor within text, prevent bubbling to parent scroll
-            event.prevent_default()
-            event.stop()
-            if event.key == "up":
-                self.action_cursor_up()
-            else:
-                self.action_cursor_down()
-            return
-        elif event.key == "up":
-            # If slash menu is visible, navigate it
-            try:
-                slash_menu = self.app.query_one("#slash-menu")
-                if slash_menu.display:
-                    event.prevent_default()
-                    event.stop()
-                    slash_menu.action_cursor_up()
-                    return
-            except Exception:
-                pass
-            # Only use history nav when input is single-line
-            event.prevent_default()
-            event.stop()
-            if self._history:
-                if self._history_index == -1:
-                    self._draft = self.text
-                    self._history_index = len(self._history) - 1
-                elif self._history_index > 0:
-                    self._history_index -= 1
-                self.clear()
-                self.insert(self._history[self._history_index])
-        elif event.key == "down":
-            # If slash menu is visible, navigate it
-            try:
-                slash_menu = self.app.query_one("#slash-menu")
-                if slash_menu.display:
-                    event.prevent_default()
-                    event.stop()
-                    slash_menu.action_cursor_down()
-                    return
-            except Exception:
-                pass
-            event.prevent_default()
-            event.stop()
-            if self._history_index >= 0:
-                if self._history_index < len(self._history) - 1:
-                    self._history_index += 1
-                    self.clear()
-                    self.insert(self._history[self._history_index])
-                else:
-                    self._history_index = -1
-                    self.clear()
-                    self.insert(self._draft)
-
-
-class ToolCallPanel(Static):
-    """Renders a tool call as a bordered panel. Completed panels collapse to one line.
-    Click to expand/collapse."""
-
-    def __init__(self, tool_id: str, title: str, kind: str = "", **kwargs):
-        super().__init__(**kwargs)
-        self.tool_id = tool_id
-        self.tool_title = title
-        self.tool_kind = kind
-        self.tool_status = "running"
-        self.tool_output = ""
-        self.border_title = title.replace("[", "\\[")
-        self._collapsed = False
-        self._mounted_interjections: set[str] = set()
-
-    def set_status(self, status: str):
-        self.tool_status = status
-        # Auto-collapse completed/failed panels
-        if status in ("completed", "failed"):
-            self._collapsed = True
-        self.refresh(layout=True)
-
-    def set_output(self, content: str):
-        self.tool_output = content
-        self.refresh(layout=True)
-
-    def append_output(self, content: str):
-        self.tool_output += content
-        self.refresh(layout=True)
-
-    MAX_ACTIVE_LINES = 15  # Max lines shown for active/running tool panels
-
-    def on_click(self, event) -> None:
-        """Toggle collapsed state on click."""
-        self._collapsed = not self._collapsed
-        self.refresh(layout=True)
-
-    def render(self):
-        # Status indicator
-        if self.tool_status == "completed":
-            status_icon = "✓"
-            border_style = Theme.BR_GREEN
-        elif self.tool_status == "failed":
-            status_icon = "✗"
-            border_style = Theme.BR_RED
-        elif self.tool_status == "in_progress":
-            status_icon = "⟳"
-            border_style = Theme.BR_YELLOW
-        else:
-            status_icon = "…"
-            border_style = Theme.BR_BLUE
-
-        # Kind icon
-        kind_icons = {
-            "read": "📖", "execute": "⚡", "edit": "✏️",
-            "search": "🔍", "think": "💭", "other": "📋",
-        }
-        kind_icon = kind_icons.get(self.tool_kind, "🔧")
-
-        title = f"{kind_icon} {self.tool_title} {status_icon}"
-
-        # Set CSS border dynamically based on status
-        from textual.color import Color as TextualColor
-        try:
-            color = TextualColor.parse(border_style)
-        except Exception:
-            color = TextualColor.parse("blue")
-
-        # Collapsed: no border, single line
-        if self._collapsed:
-            self.styles.border = ("none", color)
-            self.styles.padding = (0, 0)
-            self.border_title = ""
-            text = Text()
-            text.append(f"  {title}", style=border_style)
-            if self.tool_output:
-                text.append("  ▸ click to expand", style=Theme.DARK4)
-            return text
-
-        # Expanded: CSS border + content as Text
-        self.styles.border = ("round", color)
-        self.styles.padding = (0, 1)
-        self.border_title = title.replace("[", "\\[")
-
-        if self.tool_output:
-            output = self.tool_output
-            lines = output.split("\n")
-            is_active = self.tool_status not in ("completed", "failed")
-
-            if is_active and len(lines) > self.MAX_ACTIVE_LINES:
-                display = "\n".join(lines[-self.MAX_ACTIVE_LINES:])
-                header = f"... ({len(lines) - self.MAX_ACTIVE_LINES} more lines above, click to expand) ...\n"
-                content = Text(header, style=Theme.DARK4)
-                content.append(display, style=Theme.GRAY)
-            elif not is_active and len(output) > 2000:
-                display = output[:1000] + "\n... (truncated) ...\n" + output[-500:]
-                content = Text(display, style=Theme.GRAY)
-            else:
-                content = Text(output, style=Theme.GRAY)
-        else:
-            content = Text("(no output)", style=f"italic {Theme.DARK4}")
-
-        return content
-
-
-class PlanPanel(Static):
-    """Renders the agent's todo/plan list."""
-
-    def __init__(self, entries: list, **kwargs):
-        super().__init__(**kwargs)
-        self.entries = entries
-
-    def render(self) -> Panel:
-        table = Table(show_header=False, box=None, padding=(0, 1))
-        table.add_column("status", width=3)
-        table.add_column("task")
-
-        status_icons = {
-            "completed": f"[{Theme.BR_GREEN}]✓[/]",
-            "in_progress": f"[{Theme.BR_YELLOW}]▶[/]",
-            "pending": f"[{Theme.GRAY}]○[/]",
-            "cancelled": f"[{Theme.GRAY}]✗[/]",
-        }
-
-        for entry in self.entries:
-            icon = status_icons.get(entry.get("status", "pending"), "?")
-            content = entry.get("content", "")
-            style = "dim" if entry.get("status") == "completed" else ""
-            table.add_row(icon, Text(content, style=style))
-
-        return Panel(table, title="📋 Plan", title_align="left",
-                     border_style=Theme.BR_PURPLE, padding=(0, 1))
-
-
-class RoomMessage(Static):
-    """A single IRC channel message displayed in the room tab."""
-
-    DEFAULT_CSS = """
-    RoomMessage {
-        padding: 0 1;
-        margin: 0;
-    }
-    """
-
-    NICK_COLORS = [
-        Theme.BR_YELLOW, Theme.BR_GREEN, Theme.BR_BLUE,
-        Theme.BR_PURPLE, Theme.BR_AQUA, Theme.BR_ORANGE, Theme.BR_RED,
-    ]
-
-    def __init__(self, timestamp: str, nick: str, message: str, is_action: bool = False, **kwargs):
-        super().__init__(**kwargs)
-        self._timestamp = timestamp
-        self._nick = nick
-        self._message = message
-        self._is_action = is_action
-
-    def render(self) -> Text:
-        color = self.NICK_COLORS[hash(self._nick.lower()) % len(self.NICK_COLORS)]
-        ts_style = Theme.DARK4
-
-        text = Text()
-        text.append(f"{self._timestamp} ", style=ts_style)
-        if self._is_action:
-            text.append(f"* {self._nick} ", style=f"italic {color}")
-            text.append(self._message, style=f"italic {Theme.FG}")
-        else:
-            text.append(f"<{self._nick}> ", style=f"bold {color}")
-            text.append(self._message, style=Theme.FG)
-        return text
-
-
-class RoomSystemMessage(Static):
-    """Join/part/quit messages in the room tab."""
-
-    DEFAULT_CSS = """
-    RoomSystemMessage {
-        padding: 0 1;
-        margin: 0;
-    }
-    """
-
-    def __init__(self, timestamp: str, message: str, **kwargs):
-        super().__init__(**kwargs)
-        self._timestamp = timestamp
-        self._message = message
-
-    def render(self) -> Text:
-        text = Text()
-        text.append(f"{self._timestamp} ", style=Theme.DARK4)
-        text.append(self._message, style=f"italic {Theme.DARK3}")
-        return text
-
-
-class AgentTabBar(Static):
-    """Tab bar showing all available agents. Click to switch."""
-
-    DEFAULT_CSS = """
-    AgentTabBar {
-        dock: top;
-        height: 1;
-        background: $surface;
-    }
-    """
-
-    active_agent = reactive("")
-
-    ROOM_TAB = "#room"
-
-    def __init__(self, agents: list[str], **kwargs):
-        super().__init__(**kwargs)
-        self._agents = agents
-        self._tabs = agents + [self.ROOM_TAB]
-
-    def render(self) -> Text:
-        text = Text()
-        for tab in self._tabs:
-            label = "Room" if tab == self.ROOM_TAB else tab
-            if tab == self.active_agent:
-                text.append(f" [{label}] ", style=f"bold {Theme.FG} on {Theme.DARK2}")
-            else:
-                text.append(f"  {label}  ", style=f"{Theme.GRAY} on {Theme.DARK1}")
-        return text
-
-    def on_click(self, event) -> None:
-        """Switch agent/room on click by calculating which tab was clicked."""
-        x = event.x
-        pos = 0
-        for tab in self._tabs:
-            label = "Room" if tab == self.ROOM_TAB else tab
-            tab_width = len(label) + 4
-            if x < pos + tab_width:
-                if tab != self.active_agent:
-                    self.active_agent = tab
-                    if tab == self.ROOM_TAB:
-                        self.app.action_switch_to_room()
-                    else:
-                        self.app.action_switch_agent(tab)
-                return
-            pos += tab_width
-
-
-class ThemeSelector(OptionList):
-    """Dropdown overlay for selecting color theme."""
-
-    DEFAULT_CSS = """
-    ThemeSelector {
-        layer: overlay;
-        dock: top;
-        margin: 2 0 0 0;
-        width: 30;
-        max-height: 10;
-        border: solid $accent;
-        background: $surface;
-        display: none;
-        offset-x: 50;
-    }
-    """
-
-    def on_blur(self, event) -> None:
-        self.display = False
-
-    def populate(self) -> None:
-        """Refresh the option list with available themes."""
-        self.clear_options()
-        for key, palette in THEMES.items():
-            current = " *" if palette is Theme else ""
-            self.add_option(Option(f"  {palette.NAME}{current}", id=key))
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        """Apply selected theme."""
-        global Theme
-        theme_key = event.option.id
-        if theme_key and theme_key in THEMES:
-            Theme = THEMES[theme_key]
-            _save_theme(theme_key)
-            self.display = False
-            self.app.refresh(layout=True)
-
-
-class DynamicFooter(Static):
-    """Footer that shows different keybindings based on agent state."""
-
-    DEFAULT_CSS = """
-    DynamicFooter {
-        height: 1;
-        background: $surface;
-    }
-    """
-
-    is_generating = reactive(False)
-
-    IDLE_BINDINGS = [
-        ("^c", "Interrupt"), ("^l", "Clear"), ("^g", "Gaze"),
-        ("^n", "Next Agent"), ("f1", "Thinking"), ("f2", "Persist."), ("^q", "Quit"),
-    ]
-
-    GENERATING_BINDINGS = [
-        ("^c", "Interrupt"),
-    ]
-
-    def render(self) -> Text:
-        text = Text()
-        bindings = self.GENERATING_BINDINGS if self.is_generating else self.IDLE_BINDINGS
-        for key, label in bindings:
-            text.append(f" {key} ", style=f"bold {Theme.BR_ORANGE}")
-            text.append(f"{label} ", style=Theme.FG)
-        return text
-
-
-class ContentScroll(VerticalScroll):
-    """VerticalScroll for agent content. Auto-loads history on mouse scroll at top."""
-
-    _follow_tail: bool = True
-
-    def on_mount(self) -> None:
-        self.auto_scroll = False
-
-    def on_mouse_scroll_up(self, event) -> None:
-        """When user scrolls up, disable auto-follow and load history at top."""
-        self._follow_tail = False
-        if self.scroll_y <= 0:
-            try:
-                self.app._load_older_history()
-            except Exception:
-                pass
-
-    def on_mouse_scroll_down(self, event) -> None:
-        """When user scrolls down, check if we've reached the bottom."""
-        self.set_timer(0.1, self._check_at_bottom)
-
-    def on_key(self, event) -> None:
-        """Track keyboard scrolling."""
-        if event.key in ("up", "pageup", "home"):
-            self._follow_tail = False
-        elif event.key in ("down", "pagedown"):
-            self.set_timer(0.1, self._check_at_bottom)
-
-    def _check_at_bottom(self) -> None:
-        """Re-enable auto-follow when scrolled to bottom."""
-        if self.max_scroll_y > 0 and self.scroll_y >= self.max_scroll_y - 2:
-            self._follow_tail = True
-
-
-class HookAnnotation(Static):
-    """Dimmed status line for hook annotations."""
-
-    def __init__(self, message: str, **kwargs):
-        super().__init__(**kwargs)
-        self.annotation_message = message
-
-    def render(self) -> Text:
-        return Text(f"  {self.annotation_message}", style=f"italic {Theme.DARK4}")
-
-
-class TurnSeparator(Static):
-    """Visual separator between logical turns showing turn number and trigger."""
-
-    def __init__(self, turn_num: int, trigger: str, timestamp: str = "", **kwargs):
-        super().__init__(**kwargs)
-        self._turn_num = turn_num
-        self._trigger = trigger
-        self._timestamp = timestamp
-
-    def render(self) -> Text:
-        text = Text()
-        # Thin horizontal rule with turn info
-        text.append(" T", style=f"bold {Theme.DARK4}")
-        text.append(f"{self._turn_num}", style=f"bold {Theme.BR_AQUA}")
-        text.append(f" {self._trigger}", style=Theme.DARK4)
-        if self._timestamp:
-            text.append(f"  {self._timestamp}", style=Theme.DARK3)
-        # Fill remaining width with thin line
-        pad = max(0, 60 - len(text.plain))
-        text.append(" " + "\u2500" * pad, style=Theme.DARK3)
-        return text
-
-
-def classify_turn_trigger(text: str) -> str:
-    """Classify a user_message_chunk's content into a human-readable trigger label."""
-    t = text.strip()
-    # asdaaas doorbells
-    if "[continue" in t:
-        return "continue"
-    if "[context" in t and "%" in t:
-        # Extract percentage
-        import re
-        m = re.search(r'(\d+)%', t)
-        pct = m.group(1) if m else "?"
-        return f"context {pct}%"
-    if "[heartbeat" in t or "heartbeat" in t.lower()[:50]:
-        return "heartbeat"
-    if "[session:compact" in t:
-        return "compact"
-    if "[Compaction complete" in t:
-        return "compaction done"
-    # localmail
-    if "localmail" in t.lower()[:60] or "[FROM:" in t[:30]:
-        import re
-        m = re.search(r'from[:\s]+(\w+)', t[:80], re.IGNORECASE)
-        src = m.group(1) if m else "?"
-        return f"mail from {src}"
-    # Eric via TUI
-    if "<eric" in t.lower()[:30] or "(via tui)" in t.lower()[:50]:
-        return "Eric (tui)"
-    # IRC message
-    if "irc" in t.lower()[:30] or "#" in t[:20]:
-        return "IRC"
-    # Generic — show first 30 chars
-    preview = t[:30].replace("\n", " ")
-    if len(t) > 30:
-        preview += "..."
-    return preview
-
-
-class UserMessage(Static):
-    """User message display -- clean inline style with chevron prefix."""
-
-    def __init__(self, text: str, **kwargs):
-        super().__init__(**kwargs)
-        self.user_text = text
-
-    def render(self) -> Text:
-        text = Text()
-        text.append("❯ ", style=f"bold {Theme.BR_BLUE}")
-        text.append(self.user_text, style=Theme.FG)
-        return text
-
-
-class AgentMessage(Static):
-    """Agent message display — renders accumulated markdown."""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._chunks: list[str] = []
-        self._text = ""
-
-    def append_chunk(self, text: str):
-        self._chunks.append(text)
-        self._text = "".join(self._chunks)
-        self.refresh(layout=True)
-
-    @property
-    def full_text(self) -> str:
-        return self._text
-
-    @staticmethod
-    def _format_interjections(text: str) -> str:
-        """Replace <interjection> blocks with styled markdown blockquotes."""
-        import re
-        if "<interjection>" not in text:
-            return text
-        def _repl(m):
-            body = m.group(1).strip()
-            lines = body.split("\n")
-            quoted = "\n".join(f"> {line}" for line in lines)
-            return f"\n> 🔔 **[interjection]**\n{quoted}\n"
-        return re.sub(r"<interjection>\n?(.*?)</interjection>", _repl, text, flags=re.DOTALL)
-
-    @staticmethod
-    def _format_ephacts(text: str) -> str:
-        """Replace <ephact> blocks with visible markdown blockquotes so they render inline."""
-        import re
-        if "<ephact" not in text:
-            return text
-        def _repl(m):
-            etype = m.group(1)
-            title = m.group(2)
-            body = m.group(3).strip()
-            label = f"📌 {title}" if title else f"📌 {etype}"
-            lines = body.split("\n")
-            quoted = "\n".join(f"> {line}" for line in lines)
-            return f"\n> **{label}**\n{quoted}\n"
-        return re.sub(
-            r'<ephact\s+type=["\'](\w+)["\'](?:\s+title=["\']([^"\']*)["\'])?\s*>(.*?)</ephact>',
-            _repl, text, flags=re.DOTALL)
-
-    def render(self):
-        text = self._format_interjections(self._text)
-        text = self._format_ephacts(text)
-        w = self.size.width - 2 if self.size.width > 10 else 120
-        return _flatten_to_text(RichMarkdown(text), width=w)
-
-
-class ThinkingBlock(Static):
-    """Dimmed thinking/reasoning block with token counter. Click to expand/collapse."""
-
-    TRUNCATE_THRESHOLD = 50  # Lines before truncation kicks in
-    HEAD_LINES = 15          # Lines shown at top when truncated
-    TAIL_LINES = 15          # Lines shown at bottom when truncated
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._chunks: list[str] = []
-        self._text = ""
-        self._token_estimate = 0
-        self._expanded = False
-
-    def append_chunk(self, text: str):
-        self._chunks.append(text)
-        self._text = "".join(self._chunks)
-        self._token_estimate = len(self._text) // 4
-        self.refresh(layout=True)
-
-    def on_click(self, event) -> None:
-        """Toggle expanded/collapsed state."""
-        self._expanded = not self._expanded
-        self.refresh(layout=True)
-
-    def render(self):
-        text = self._text
-        lines = text.split("\n")
-        total = len(lines)
-        hidden = total - self.HEAD_LINES - self.TAIL_LINES
-
-        if not self._expanded and total > self.TRUNCATE_THRESHOLD:
-            display = (
-                "\n".join(lines[:self.HEAD_LINES])
-                + f"\n... ({hidden} more lines — click to expand) ...\n"
-                + "\n".join(lines[-self.TAIL_LINES:])
-            )
-        else:
-            display = text
-
-        # Token count in title
-        if self._token_estimate > 0:
-            title_str = f"💭 Thinking (↓ ~{self._token_estimate} tokens)"
-        else:
-            title_str = "💭 Thinking"
-
-        if self._expanded and total > self.TRUNCATE_THRESHOLD:
-            title_str += " \\[expanded — click to collapse]"
-
-        self.border_title = title_str
-        return Text(display, style=Theme.DARK4)
-
-
-class InterjectionBlock(Static):
-    """Renders an interjection message as a distinct panel, styled like ThinkingBlock."""
-
-    def __init__(self, message: str, **kwargs):
-        super().__init__(**kwargs)
-        self._message = message
-
-    def render(self):
-        self.border_title = "🔔 Interjection"
-        return Text(self._message, style=Theme.BR_ORANGE)
-
-
-# =============================================================================
-# Operator Identity Screen
-# =============================================================================
-
 class OperatorScreen(ModalScreen[str]):
     """Ask the operator for their name on first launch."""
 
@@ -1798,12 +924,10 @@ class AsdaaasTUI(App):
 
     #agent-tab-bar {
         height: 1;
-        background: #3c3836;
     }
 
     #agent-header {
         height: 1;
-        background: $surface;
     }
 
     VerticalScroll {
@@ -1819,7 +943,10 @@ class AsdaaasTUI(App):
     #bottom-bar {
         dock: bottom;
         height: auto;
-        max-height: 12;
+        /* Was 12: multiline paste grew MessageInput past this and the child
+           overflowed the dock (looked like an "escaped" full-screen text window).
+           Cap at half the terminal so chat stays visible; TextArea scrolls. */
+        max-height: 50%;
     }
 
     AgentMessage {
@@ -1861,16 +988,20 @@ class AsdaaasTUI(App):
         border-title-align: left;
     }
 
+    SystemReminderPanel {
+        margin: 0 0 0 2;
+    }
+
     SystemAlert {
         margin: 0 0 0 0;
         height: auto;
     }
 
     #ephact-viewer {
-        height: auto;
+        height: 40%;
         max-height: 50%;
+        min-height: 10;
         margin: 0 0 0 0;
-        overflow-y: auto;
     }
 
 
@@ -1915,6 +1046,7 @@ class AsdaaasTUI(App):
                 "input_draft": "",  # Saved input text when switching tabs
                 "backend": Config.agent_backend(agent),  # "grok" or "claude"
                 "logical_turn": 0,  # Logical turn counter (user_message_chunk events)
+                "chat_state": ChatState(),  # pure model, dual-path with widgets
             }
         # Shared state
         self._abide_head = self._get_abide_head()
@@ -1923,6 +1055,7 @@ class AsdaaasTUI(App):
         self._tail_count: Optional[int] = None
         self._show_thinking: bool = True
         self._available_commands: list[dict] = []
+        self._seen_interjections: set[str] = set()  # global dedup by bell id / text
 
     @staticmethod
     def _get_abide_head() -> str:
@@ -1973,11 +1106,12 @@ class AsdaaasTUI(App):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="top-bar"):
-            if len(self._agents) > 1:
-                yield AgentTabBar(self._agents, id="agent-tab-bar")
+            # Always show tab bar so [+] / × agent management is available
+            yield AgentTabBar(self._agents, id="agent-tab-bar")
             yield AgentHeader(id="agent-header")
         yield GazeSelector(id="gaze-selector")
         yield ThemeSelector(id="theme-selector")
+        yield AgentAddSelector(id="agent-add-selector")
         yield SlashMenu(id="slash-menu")
         # One content scroll per agent
         for agent in self._agents:
@@ -2039,6 +1173,11 @@ class AsdaaasTUI(App):
             viewer.set_active_agent(self._active_agent)
         except NoMatches:
             pass
+        try:
+            tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
+            tab_bar.active_agent = self._active_agent
+        except NoMatches:
+            pass
         # Start the status poller
         self.status_worker = self.run_worker(
             self._poll_status, thread=True, name="status_poller"
@@ -2058,13 +1197,21 @@ class AsdaaasTUI(App):
                     lambda a=agent: self._tail_updates_for_agent(a),
                     thread=True, name=f"updates_{agent}"
                 )
-        # Start IRC room log tailer
+        # Room tab (IRC) — connect on first visit; optional log tail for history
         self._room_channel = "#meetingroom1"
         self._room_active = False
         self._room_irc_sock = None
+        self._room_irc_nick = Config.OPERATOR_NAME or "eric"
+        self._room_irc_buf = ""
+        self._room_reader_started = False
+        self._room_history_loaded_for = None
         self.run_worker(self._tail_room_log, thread=True, name="room_tailer")
         # Focus the input bar
         self.query_one("#input-bar", MessageInput).focus()
+        # OS appearance poll (~5s) when theme preference is auto
+        self.set_interval(5.0, self._poll_auto_theme)
+        apply_theme_to_app(self)
+
 
         # Set the header
         header = self.query_one("#agent-header", AgentHeader)
@@ -2186,6 +1333,15 @@ class AsdaaasTUI(App):
         elif cmd == "/status":
             self._show_status_info(content)
             return
+        elif cmd == "/room":
+            # Room tab: change IRC channel (/room #meetingroom1)
+            if not arg.strip():
+                self.notify(f"Current room: {self._room_channel}", severity="information")
+                return
+            if not self._room_active:
+                self.action_switch_to_room()
+            self._change_room_channel(arg.strip())
+            return
         elif cmd == "/gaze":
             if arg:
                 # Set gaze to the specified room
@@ -2253,6 +1409,7 @@ class AsdaaasTUI(App):
 | `/clear` | Clear the screen |
 | `/status` | Show agent status |
 | `/gaze [room]` | Show/set gaze target |
+| `/room [#chan]` | Room tab: show/switch IRC channel |
 | `/awareness` | Show/edit background channels |
 | `/health` | Show health info |
 | `/todo` | Manage persistent todo list |
@@ -2577,6 +1734,16 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
+
+    def _poll_auto_theme(self) -> None:
+        """If theme is auto, follow OS light/dark (Grok-style ~5s poll)."""
+        try:
+            if apply_auto_if_needed():
+                apply_theme_to_app(self)
+                self.refresh(layout=True)
+        except Exception:
+            pass
+
     def action_toggle_theme_selector(self) -> None:
         """Toggle the theme selector dropdown."""
         try:
@@ -2613,6 +1780,14 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
         try:
+            add_sel = self.query_one("#agent-add-selector", AgentAddSelector)
+            if add_sel.display:
+                add_sel.display = False
+                self.query_one("#input-bar", MessageInput).focus()
+                return
+        except NoMatches:
+            pass
+        try:
             slash_menu = self.query_one("#slash-menu", SlashMenu)
             if slash_menu.display:
                 slash_menu.display = False
@@ -2638,9 +1813,11 @@ Type anything else to send a message to the agent.
             if viewer.display:
                 viewer.close()
             elif viewer.has_content:
-                viewer._visible = True
                 viewer.display = True
-                viewer.refresh(layout=True)
+                if hasattr(viewer, "_refresh_display"):
+                    viewer._refresh_display()
+                else:
+                    viewer.refresh(layout=True)
         except NoMatches:
             pass
 
@@ -2682,6 +1859,44 @@ Type anything else to send a message to the agent.
         self._scroll_to_bottom()
         self.notify(f"Interrupt sent to {self._active_agent}", severity="warning")
 
+
+    def _refresh_header_for_agent(self, agent_name: str) -> None:
+        """Immediately refresh top-bar telemetry for agent (tab switch).
+
+        Uses pure status_read.telemetry_from_files — no 2s poller wait.
+        """
+        try:
+            header = self.query_one("#agent-header", AgentHeader)
+        except NoMatches:
+            return
+        asdaaas_dir = Config.agent_home(agent_name) / "asdaaas"
+        tel = telemetry_from_files(
+            agent_name,
+            asdaaas_dir / "health.json",
+            asdaaas_dir / "gaze.json",
+            abide_head=getattr(self, "_abide_head", "") or "",
+        )
+        header.agent_name = tel.agent_name
+        header.health_status = tel.health_status
+        header.is_generating = tel.is_generating
+        header.context_pct = tel.context_pct
+        header.code_version = tel.code_version
+        header.code_version_stale = code_version_stale(
+            tel.code_version, getattr(self, "_abide_head", "") or ""
+        )
+        if tel.model_name:
+            header.model_name = tel.model_name
+        header.gaze_target = tel.gaze_target
+        try:
+            footer = self.query_one("#dynamic-footer", DynamicFooter)
+            footer.is_generating = tel.is_generating
+        except NoMatches:
+            pass
+        try:
+            header.turn_logical = self._agent_state.get(agent_name, {}).get("logical_turn", 0)
+        except Exception:
+            pass
+
     def action_switch_agent(self, agent_name: str) -> None:
         """Switch to a different agent tab."""
         if agent_name not in self._agents:
@@ -2717,12 +1932,8 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
-        # Update header
-        try:
-            header = self.query_one("#agent-header", AgentHeader)
-            header.agent_name = agent_name
-        except NoMatches:
-            pass
+        # Update header telemetry immediately (don't wait for 2s poller)
+        self._refresh_header_for_agent(agent_name)
 
         # Update tab bar
         try:
@@ -2776,8 +1987,127 @@ Type anything else to send a message to the agent.
         else:
             self.action_switch_agent(next_tab)
 
+    def _new_agent_state(self, agent: str) -> dict:
+        return {
+            "tool_panels": {},
+            "current_agent_msg": None,
+            "current_thinking": None,
+            "updates_offset": 0,
+            "replay_done": False,
+            "earliest_offset": 0,
+            "updates_path": None,
+            "loading_history": False,
+            "input_draft": "",
+            "backend": Config.agent_backend(agent),
+            "logical_turn": 0,
+            "chat_state": ChatState(),
+            "removed": False,
+        }
+
+    def _sync_tab_bar(self) -> None:
+        try:
+            tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
+            tab_bar.set_agents(self._agents)
+            if self._room_active:
+                tab_bar.active_agent = AgentTabBar.ROOM_TAB
+            else:
+                tab_bar.active_agent = self._active_agent
+        except NoMatches:
+            pass
+
+    def action_add_agent_menu(self) -> None:
+        """Open picker of agents.json entries not already in the tab bar."""
+        open_set = set(self._agents)
+        candidates = [n for n in Config.list_catalog_agents() if n not in open_set]
+        try:
+            sel = self.query_one("#agent-add-selector", AgentAddSelector)
+        except NoMatches:
+            self.notify("Add-agent UI missing", severity="error")
+            return
+        # Hide other overlays
+        for oid, cls in (("#gaze-selector", GazeSelector), ("#theme-selector", ThemeSelector)):
+            try:
+                w = self.query_one(oid, cls)
+                w.display = False
+            except NoMatches:
+                pass
+        sel.populate(candidates)
+        sel.display = True
+        sel.focus()
+
+    def action_add_agent(self, agent_name: str) -> None:
+        """Open an agent tab (from catalog) and start tailing it."""
+        if not agent_name or agent_name in self._agents:
+            return
+        catalog = Config.list_catalog_agents()
+        if agent_name not in catalog:
+            self.notify(f"Unknown agent: {agent_name}", severity="warning")
+            return
+
+        self._agent_state[agent_name] = self._new_agent_state(agent_name)
+        self._agents.append(agent_name)
+
+        # Mount content scroll before room scroll
+        vs = ContentScroll(id=f"content-{agent_name}")
+        vs.display = False
+        try:
+            room = self.query_one("#content-room", ContentScroll)
+            self.mount(vs, before=room)
+        except NoMatches:
+            self.mount(vs)
+
+        # Start tail worker
+        use_api = Config.API_URL is not None
+        if use_api:
+            self.run_worker(
+                lambda a=agent_name: self._tail_via_api(a),
+                thread=True, name=f"updates_{agent_name}",
+            )
+        else:
+            self.run_worker(
+                lambda a=agent_name: self._tail_updates_for_agent(a),
+                thread=True, name=f"updates_{agent_name}",
+            )
+
+        self._sync_tab_bar()
+        self.action_switch_agent(agent_name)
+        self.notify(f"Added {agent_name}", severity="information", timeout=2)
+
+    def action_remove_agent(self, agent_name: str) -> None:
+        """Close an agent tab (does not delete agents.json entry)."""
+        if agent_name not in self._agents:
+            return
+        if len(self._agents) <= 1:
+            self.notify("Keep at least one agent open", severity="warning")
+            return
+
+        # Pick next active if removing current
+        if self._active_agent == agent_name and not self._room_active:
+            others = [a for a in self._agents if a != agent_name]
+            self.action_switch_agent(others[0])
+
+        # Mark removed so tail workers exit
+        st = self._agent_state.get(agent_name)
+        if st is not None:
+            st["removed"] = True
+
+        self._agents = [a for a in self._agents if a != agent_name]
+
+        # Remove content widget
+        try:
+            scroll = self.query_one(f"#content-{agent_name}", ContentScroll)
+            scroll.remove()
+        except NoMatches:
+            pass
+
+        # Drop state (after workers can see removed flag)
+        self._agent_state.pop(agent_name, None)
+
+        self._sync_tab_bar()
+        self.notify(f"Closed {agent_name}", severity="information", timeout=2)
+
     def action_switch_to_room(self) -> None:
-        """Switch to the IRC room tab."""
+        """Switch to the IRC room tab and ensure a live connection."""
         # Hide current agent content
         if not self._room_active:
             try:
@@ -2792,7 +2122,7 @@ Type anything else to send a message to the agent.
                 if old_state is not None:
                     old_state["input_draft"] = input_bar.text
                 input_bar.clear()
-                input_bar._placeholder = f"Message {self._room_channel}..."
+                input_bar._placeholder = f"Message {self._room_channel}...  (/room #chan)"
             except NoMatches:
                 pass
 
@@ -2806,94 +2136,334 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
-        # Update header
-        try:
-            header = self.query_one("#agent-header", AgentHeader)
-            header.agent_name = self._room_channel
-        except NoMatches:
-            pass
+        self._update_room_header()
 
-        # Update tab bar
         try:
             tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
             tab_bar.active_agent = AgentTabBar.ROOM_TAB
         except NoMatches:
             pass
 
-    def _connect_room_irc(self):
-        """Establish and maintain the IRC connection for the Room tab."""
-        import socket as _socket
-        nick = Config.OPERATOR_NAME or "eric"
-        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        sock.connect(("127.0.0.1", 6667))
-        sock.sendall(f"NICK {nick}\r\n".encode())
-        sock.sendall(f"USER {nick} 0 * :{nick}\r\n".encode())
-        sock.sendall(f"JOIN {self._room_channel}\r\n".encode())
-        # Drain registration replies
-        sock.settimeout(1.0)
+        # Connect in background so UI doesn't freeze
+        import threading
+        threading.Thread(target=self._ensure_room_connected, args=(True,), daemon=True).start()
+
+    def _update_room_header(self, status: str | None = None) -> None:
+        """Show channel + connection status in the agent header."""
         try:
-            while True:
+            header = self.query_one("#agent-header", AgentHeader)
+            header.agent_name = self._room_channel
+            if status is None:
+                status = "connected" if self._room_irc_sock is not None else "disconnected"
+            header.health_status = status
+            header.gaze_target = f"irc/{self._room_channel}"
+        except NoMatches:
+            pass
+
+    def _room_log_path(self) -> Path:
+        # miniircd channel-log-dir uses channel name as filename including '#'
+        return Path.home() / ".grok" / "irc_logs" / f"{self._room_channel}.log"
+
+    def _ensure_room_connected(self, load_history: bool = False) -> bool:
+        """Connect to local IRC if needed. Optionally load recent log history.
+
+        Returns True if socket is ready for send/recv.
+        """
+        if self._room_irc_sock is not None:
+            if load_history:
+                self._load_room_history()
+            return True
+        ok = self._connect_room_irc()
+        if ok and load_history:
+            self._load_room_history()
+        return ok
+
+    def _try_start_irc_server(self) -> bool:
+        """Best-effort start miniircd via launch script (localhost only)."""
+        candidates = [
+            Path(__file__).resolve().parent.parent / "scripts" / "launch_irc_server.sh",
+            Path.home() / "projects" / "agent-abide" / "scripts" / "launch_irc_server.sh",
+        ]
+        script = next((c for c in candidates if c.exists()), None)
+        if script is None:
+            # Direct miniircd fallback
+            mini = Path.home() / ".local" / "bin" / "miniircd"
+            if not mini.exists():
+                return False
+            try:
+                log_dir = Path.home() / ".grok" / "irc_logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                import subprocess
+                subprocess.Popen(
+                    [
+                        "python3", str(mini),
+                        "--listen", "127.0.0.1", "--ports", "6667",
+                        "--channel-log-dir", str(log_dir),
+                    ],
+                    stdout=open("/tmp/miniircd.log", "a"),
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                time.sleep(0.8)
+                return True
+            except Exception:
+                return False
+        try:
+            import subprocess
+            subprocess.Popen(
+                ["bash", str(script)],
+                stdout=open("/tmp/miniircd_launch.log", "a"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            time.sleep(1.0)
+            return True
+        except Exception:
+            return False
+
+    def _connect_room_irc(self) -> bool:
+        """Establish IRC connection for the Room tab. Returns success."""
+        import socket as _socket
+        nick = (Config.OPERATOR_NAME or "eric").replace(" ", "_")[:16]
+        # Avoid empty / invalid nick
+        if not nick or not nick[0].isalpha():
+            nick = "op_" + (nick or "user")
+
+        def _open() -> "_socket.socket":
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect(("127.0.0.1", 6667))
+            sock.sendall(f"NICK {nick}\r\n".encode())
+            sock.sendall(f"USER {nick} 0 * :{nick}\r\n".encode())
+            sock.sendall(f"JOIN {self._room_channel}\r\n".encode())
+            return sock
+
+        try:
+            sock = _open()
+        except Exception as e1:
+            self.call_from_thread(
+                self._mount_room_system_msg,
+                time.strftime("%H:%M"),
+                f"IRC 127.0.0.1:6667 refused ({e1}). Starting miniircd…",
+            )
+            if not self._try_start_irc_server():
+                self.call_from_thread(
+                    self._mount_room_system_msg,
+                    time.strftime("%H:%M"),
+                    "Could not start IRC. Run: bash ~/projects/agent-abide-dev/scripts/launch_irc_server.sh",
+                )
+                self.call_from_thread(self._update_room_header, "disconnected")
+                return False
+            try:
+                sock = _open()
+            except Exception as e2:
+                self.call_from_thread(
+                    self._mount_room_system_msg,
+                    time.strftime("%H:%M"),
+                    f"Still cannot connect: {e2}",
+                )
+                self.call_from_thread(self._update_room_header, "disconnected")
+                return False
+
+        # Drain registration briefly (non-fatal)
+        sock.settimeout(0.5)
+        try:
+            for _ in range(10):
                 data = sock.recv(4096)
                 if not data:
                     break
-                for line in data.decode(errors="replace").split("\r\n"):
-                    if line.startswith("PING"):
-                        pong = line.replace("PING", "PONG", 1)
-                        sock.sendall(f"{pong}\r\n".encode())
-        except _socket.timeout:
+                self._handle_room_irc_bytes(data)
+        except Exception:
             pass
-        sock.settimeout(5.0)
-        self._room_irc_sock = sock
-        self.run_worker(self._room_irc_keepalive, thread=True, name="room_keepalive")
 
-    def _room_irc_keepalive(self):
-        """Background thread: respond to IRC PINGs to keep connection alive."""
-        import socket as _socket
-        while self._room_irc_sock is not None:
+        sock.settimeout(30.0)
+        self._room_irc_sock = sock
+        self._room_irc_nick = nick
+        if not getattr(self, "_room_reader_started", False):
+            self._room_reader_started = True
+            self.run_worker(self._room_irc_reader, thread=True, name="room_irc_reader")
+
+        self.call_from_thread(
+            self._mount_room_system_msg,
+            time.strftime("%H:%M"),
+            f"Connected as {nick} → {self._room_channel}",
+        )
+        self.call_from_thread(self._update_room_header, "connected")
+        return True
+
+    def _handle_room_irc_bytes(self, data: bytes) -> None:
+        """Parse IRC lines from socket data; update UI for channel traffic."""
+        if not hasattr(self, "_room_irc_buf"):
+            self._room_irc_buf = ""
+        self._room_irc_buf += data.decode(errors="replace")
+        while "\r\n" in self._room_irc_buf or "\n" in self._room_irc_buf:
+            if "\r\n" in self._room_irc_buf:
+                line, self._room_irc_buf = self._room_irc_buf.split("\r\n", 1)
+            else:
+                line, self._room_irc_buf = self._room_irc_buf.split("\n", 1)
+            line = line.strip("\r")
+            if not line:
+                continue
+            self._handle_room_irc_line(line)
+
+    def _handle_room_irc_line(self, line: str) -> None:
+        """Handle one IRC protocol line (PING, PRIVMSG, JOIN/PART, etc.)."""
+        sock = self._room_irc_sock
+        if line.startswith("PING"):
+            if sock is not None:
+                try:
+                    pong = line.replace("PING", "PONG", 1)
+                    if not pong.startswith("PONG"):
+                        # PING :server
+                        token = line.split(" ", 1)[1] if " " in line else ""
+                        pong = f"PONG {token}"
+                    sock.sendall(f"{pong}\r\n".encode())
+                except Exception:
+                    pass
+            return
+
+        # :nick!user@host PRIVMSG #chan :text
+        # :nick!user@host JOIN :#chan
+        prefix = ""
+        rest = line
+        if line.startswith(":"):
             try:
-                self._room_irc_sock.settimeout(30.0)
-                data = self._room_irc_sock.recv(4096)
+                prefix, rest = line[1:].split(" ", 1)
+            except ValueError:
+                return
+        nick = prefix.split("!", 1)[0] if prefix else ""
+        parts = rest.split(" ")
+        if not parts:
+            return
+        cmd = parts[0].upper()
+        ts = time.strftime("%H:%M")
+
+        if cmd == "PRIVMSG" and len(parts) >= 2:
+            target = parts[1]
+            # message after first :
+            msg = rest.split(" :", 1)[1] if " :" in rest else ""
+            # Only show traffic for our room (or CTCP ignore)
+            if target.lower() != self._room_channel.lower():
+                return
+            if msg.startswith("\x01") and msg.endswith("\x01"):
+                # CTCP — skip ACTION handling lightly
+                if msg.startswith("\x01ACTION ") and msg.endswith("\x01"):
+                    action = msg[8:-1]
+                    self.call_from_thread(self._mount_room_msg, ts, nick, action, True)
+                return
+            # Skip echo of our own messages if we already local-echoed
+            own = (getattr(self, "_room_irc_nick", None) or Config.OPERATOR_NAME or "").lower()
+            if nick.lower() == own:
+                return
+            self.call_from_thread(self._mount_room_msg, ts, nick, msg)
+            return
+
+        if cmd in ("JOIN", "PART", "QUIT", "NICK"):
+            detail = rest
+            if cmd == "JOIN":
+                chan = parts[1].lstrip(":") if len(parts) > 1 else self._room_channel
+                if chan.lower() != self._room_channel.lower() and not chan.startswith(":"):
+                    # JOIN :#chan form
+                    if " :" in rest:
+                        chan = rest.split(" :", 1)[1]
+                if self._room_channel.lower() not in (chan.lower(), f":{self._room_channel}".lower()):
+                    if chan.lstrip(":").lower() != self._room_channel.lower():
+                        return
+                self.call_from_thread(self._mount_room_system_msg, ts, f"{nick} joined")
+            elif cmd == "PART":
+                self.call_from_thread(self._mount_room_system_msg, ts, f"{nick} left")
+            elif cmd == "QUIT":
+                self.call_from_thread(self._mount_room_system_msg, ts, f"{nick} quit")
+            return
+
+        # Nickname in use → try alternate
+        if cmd == "433":
+            alt = (getattr(self, "_room_irc_nick", "op") + "_tui")[:16]
+            if sock is not None:
+                try:
+                    sock.sendall(f"NICK {alt}\r\n".encode())
+                    self._room_irc_nick = alt
+                except Exception:
+                    pass
+
+    def _room_irc_reader(self) -> None:
+        """Background thread: read IRC socket, feed UI, answer PINGs."""
+        import socket as _socket
+        worker = get_current_worker()
+        while not worker.is_cancelled:
+            sock = self._room_irc_sock
+            if sock is None:
+                time.sleep(0.5)
+                continue
+            try:
+                sock.settimeout(30.0)
+                data = sock.recv(4096)
                 if not data:
-                    break
-                for line in data.decode(errors="replace").split("\r\n"):
-                    if line.startswith("PING"):
-                        pong = line.replace("PING", "PONG", 1)
-                        self._room_irc_sock.sendall(f"{pong}\r\n".encode())
+                    self._room_irc_sock = None
+                    self.call_from_thread(
+                        self._mount_room_system_msg,
+                        time.strftime("%H:%M"),
+                        "IRC disconnected",
+                    )
+                    self.call_from_thread(self._update_room_header, "disconnected")
+                    time.sleep(1)
+                    continue
+                self._handle_room_irc_bytes(data)
             except _socket.timeout:
                 continue
-            except Exception:
-                break
+            except Exception as e:
+                self._room_irc_sock = None
+                self.call_from_thread(
+                    self._mount_room_system_msg,
+                    time.strftime("%H:%M"),
+                    f"IRC error: {e}",
+                )
+                self.call_from_thread(self._update_room_header, "disconnected")
+                time.sleep(1)
 
-    def _send_to_room(self, text: str):
+    def _send_to_room(self, text: str) -> None:
         """Send a message to the IRC room via persistent socket connection."""
         try:
-            if self._room_irc_sock is None:
-                self._connect_room_irc()
-            self._room_irc_sock.sendall(
+            if not self._ensure_room_connected(load_history=False):
+                self.call_from_thread(
+                    self._mount_room_system_msg,
+                    time.strftime("%H:%M"),
+                    "Not connected — message not sent",
+                )
+                return
+            sock = self._room_irc_sock
+            if sock is None:
+                return
+            sock.sendall(
                 f"PRIVMSG {self._room_channel} :{text}\r\n".encode()
             )
         except Exception as e:
             self._room_irc_sock = None
             self.call_from_thread(
-                self._mount_room_system_msg, "", f"Send error: {e}"
+                self._mount_room_system_msg, time.strftime("%H:%M"), f"Send error: {e}"
             )
+            self.call_from_thread(self._update_room_header, "disconnected")
 
-    def _tail_room_log(self) -> None:
-        """Background thread: tail the IRC channel log file."""
+    def _load_room_history(self) -> None:
+        """Load last lines from miniircd channel log into the room pane (once per channel)."""
         import re
-        log_path = Path.home() / ".grok" / "irc_logs" / f"{self._room_channel}.log"
-
+        if getattr(self, "_room_history_loaded_for", None) == self._room_channel:
+            return
+        log_path = self._room_log_path()
+        if not log_path.exists():
+            self._room_history_loaded_for = self._room_channel
+            return
         msg_re = re.compile(r"^\[([^\]]+)\] <([^>]+)> (.*)$")
         action_re = re.compile(r"^\[([^\]]+)\] \* (\S+) (.*)$")
-
-        # Wait for log file to exist
-        while not log_path.exists():
-            time.sleep(2)
-
-        # Seek to tail (last 50 lines for scrollback)
-        with open(log_path, "r") as f:
-            lines = f.readlines()
-            tail_lines = lines[-50:] if len(lines) > 50 else lines
+        try:
+            with open(log_path, "r", errors="replace") as f:
+                lines = f.readlines()
+            tail_lines = lines[-80:] if len(lines) > 80 else lines
+            self.call_from_thread(
+                self._mount_room_system_msg,
+                time.strftime("%H:%M"),
+                f"— history ({len(tail_lines)} lines) —",
+            )
             for line in tail_lines:
                 line = line.rstrip()
                 if not line:
@@ -2902,15 +2472,13 @@ Type anything else to send a message to the agent.
                 if m:
                     ts, nick, msg = m.groups()
                     short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
-                    self.call_from_thread(
-                        self._mount_room_msg, short_ts, nick, msg
-                    )
+                    self.call_from_thread(self._mount_room_msg, short_ts, nick, msg)
                     continue
                 m = action_re.match(line)
                 if m:
                     ts, nick, action = m.groups()
                     short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
-                    if any(w in action for w in ["joined", "quit", "left", "part"]):
+                    if any(w in action for w in ("joined", "quit", "left", "part")):
                         self.call_from_thread(
                             self._mount_room_system_msg, short_ts, f"{nick} {action}"
                         )
@@ -2918,42 +2486,74 @@ Type anything else to send a message to the agent.
                         self.call_from_thread(
                             self._mount_room_msg, short_ts, nick, action, True
                         )
-                    continue
+        except Exception:
+            pass
+        self._room_history_loaded_for = self._room_channel
 
-            # Now tail for new lines
-            f.seek(0, 2)  # seek to end
-            worker = get_current_worker()
-            while not worker.is_cancelled:
-                line = f.readline()
-                if not line:
-                    time.sleep(0.3)
-                    continue
-                line = line.rstrip()
-                if not line:
-                    continue
-                m = msg_re.match(line)
-                if m:
-                    ts, nick, msg = m.groups()
-                    own_nick = (Config.OPERATOR_NAME or "eric").lower()
-                    if nick.lower() == own_nick:
-                        continue
-                    short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
-                    self.call_from_thread(
-                        self._mount_room_msg, short_ts, nick, msg
-                    )
-                    continue
-                m = action_re.match(line)
-                if m:
-                    ts, nick, action = m.groups()
-                    short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
-                    if any(w in action for w in ["joined", "quit", "left", "part"]):
-                        self.call_from_thread(
-                            self._mount_room_system_msg, short_ts, f"{nick} {action}"
-                        )
-                    else:
-                        self.call_from_thread(
-                            self._mount_room_msg, short_ts, nick, action, True
-                        )
+    def _change_room_channel(self, channel: str) -> None:
+        """PART current channel, JOIN new one (must start with #)."""
+        channel = channel.strip()
+        if not channel:
+            return
+        if not channel.startswith("#"):
+            channel = "#" + channel
+        old = self._room_channel
+        if channel == old:
+            self.notify(f"Already in {channel}", severity="information")
+            return
+        sock = self._room_irc_sock
+        if sock is not None:
+            try:
+                sock.sendall(f"PART {old}\r\n".encode())
+                sock.sendall(f"JOIN {channel}\r\n".encode())
+            except Exception:
+                self._room_irc_sock = None
+        self._room_channel = channel
+        self._room_history_loaded_for = None
+        try:
+            input_bar = self.query_one("#input-bar", MessageInput)
+            input_bar._placeholder = f"Message {channel}...  (/room #chan)"
+        except NoMatches:
+            pass
+        self._update_room_header()
+        self._mount_room_system_msg(time.strftime("%H:%M"), f"Switched to {channel}")
+        import threading
+        threading.Thread(target=self._ensure_room_connected, args=(True,), daemon=True).start()
+
+    def _tail_room_log(self) -> None:
+        """Optional: live-tail channel log (backup to socket reader)."""
+        import re
+        worker = get_current_worker()
+        msg_re = re.compile(r"^\[([^\]]+)\] <([^>]+)> (.*)$")
+        while not worker.is_cancelled:
+            log_path = self._room_log_path()
+            while not worker.is_cancelled and not log_path.exists():
+                time.sleep(2)
+                log_path = self._room_log_path()
+            if worker.is_cancelled:
+                return
+            try:
+                with open(log_path, "r", errors="replace") as f:
+                    f.seek(0, 2)
+                    while not worker.is_cancelled:
+                        if log_path != self._room_log_path():
+                            break  # channel changed — reopen
+                        line = f.readline()
+                        if not line:
+                            time.sleep(0.3)
+                            continue
+                        line = line.rstrip()
+                        m = msg_re.match(line)
+                        if not m:
+                            continue
+                        ts, nick, msg = m.groups()
+                        own = (getattr(self, "_room_irc_nick", None) or Config.OPERATOR_NAME or "").lower()
+                        if nick.lower() == own:
+                            continue
+                        short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
+                        self.call_from_thread(self._mount_room_msg, short_ts, nick, msg)
+            except Exception:
+                time.sleep(1)
 
     def _mount_room_msg(self, ts: str, nick: str, msg: str, is_action: bool = False) -> None:
         """Mount a room message widget (called from main thread via call_from_thread)."""
@@ -3231,12 +2831,20 @@ Type anything else to send a message to the agent.
                 except Exception:
                     pass
 
-                # Read turn count from profile
+                # Read turn count from profile — cache by size to avoid re-scan every 2s
                 try:
                     profile_path = asdaaas_dir / "profile" / f"{active}.jsonl"
                     if profile_path.exists():
-                        with open(profile_path, "rb") as f:
-                            count = sum(1 for _ in f)
+                        st = profile_path.stat()
+                        cache = getattr(self, "_profile_turn_cache", {})
+                        key = (active, st.st_mtime_ns, st.st_size)
+                        if key in cache:
+                            count = cache[key]
+                        else:
+                            with open(profile_path, "rb") as f:
+                                count = f.read().count(b"\n")
+                            cache = {key: count}  # keep only latest
+                            self._profile_turn_cache = cache
                         self.call_from_thread(
                             setattr, header, "turn_physical", count
                         )
@@ -3523,6 +3131,9 @@ Type anything else to send a message to the agent.
             self._replay_done = True
 
         while not worker.is_cancelled:
+            # Exit if tab was closed
+            if agent_name not in self._agents or self._agent_state.get(agent_name, {}).get("removed"):
+                return
             try:
                 current_size = updates_path.stat().st_size
                 offset = state["updates_offset"]
@@ -3547,20 +3158,25 @@ Type anything else to send a message to the agent.
                             state["updates_offset"] = offset + len(complete.encode("utf-8"))
                             lines = complete.strip().split("\n")
 
-                    parsed_count = 0
+                    parsed = []
                     skip_count = 0
                     for line in lines:
                         if not line.strip():
                             continue
                         try:
-                            event = json.loads(line)
-                            self.call_from_thread(
-                                self._dispatch_event_for_agent, event, agent_name
-                            )
-                            parsed_count += 1
+                            parsed.append(json.loads(line))
                         except json.JSONDecodeError:
                             skip_count += 1
-                    self._debug(f"TAIL_POLL read={len(new_data)} lines={len(lines)} parsed={parsed_count} skipped={skip_count} offset={state['updates_offset']}")
+                    batch = coalesce_events(parsed)
+                    for event in batch:
+                        self.call_from_thread(
+                            self._dispatch_event_for_agent, event, agent_name
+                        )
+                    self._debug(
+                        f"TAIL_POLL read={len(new_data)} lines={len(lines)} "
+                        f"parsed={len(parsed)} coalesced={len(batch)} "
+                        f"skipped={skip_count} offset={state['updates_offset']}"
+                    )
                 elif current_size < offset:
                     state["updates_offset"] = 0
 
@@ -3626,6 +3242,8 @@ Type anything else to send a message to the agent.
 
         # --- Phase 2: Live tail via WebSocket (raw mode) ---
         while not worker.is_cancelled:
+            if agent_name not in self._agents or self._agent_state.get(agent_name, {}).get("removed"):
+                return
             try:
                 with ws_sync.connect(ws_url) as ws:
                     init = {"raw": True, "after_id": last_tail_id}
@@ -3714,24 +3332,8 @@ Type anything else to send a message to the agent.
 
     @staticmethod
     def _extract_interjections(text: str) -> tuple[str, list[str]]:
-        """Extract <interjection> blocks from text.
-
-        Returns (clean_text, list_of_interjection_messages).
-        """
-        import re
-        if "<interjection>" not in text:
-            return text, []
-        messages = []
-        for m in re.finditer(r"<interjection>\n?(.*?)</interjection>\n?", text, re.DOTALL):
-            body = m.group(1).strip()
-            if body:
-                # Strip the [system: ...] header line if present
-                lines = body.split("\n")
-                if lines and lines[0].startswith("[system:"):
-                    body = "\n".join(lines[1:]).strip()
-                messages.append(body)
-        clean = re.sub(r"<interjection>\n?(.*?)</interjection>\n?", "", text, flags=re.DOTALL)
-        return clean, messages
+        """Extract <interjection> blocks — pure logic in chat_model."""
+        return _cm_extract_interjections(text)
 
     def _dispatch_event(self, event: dict) -> None:
         """Dispatch an updates.jsonl event to the appropriate renderer."""
@@ -3739,6 +3341,22 @@ Type anything else to send a message to the agent.
         event_type = update.get("sessionUpdate", "")
         # Stash event timestamp for turn separators
         self._last_event_ts = event.get("timestamp")
+
+        # Dual-path: pure ChatState always updated (testable; future UI driver)
+        try:
+            agent = self._active_agent
+            st = self._agent_state.get(agent)
+            if st is not None:
+                cs = st.get("chat_state")
+                if cs is None:
+                    cs = ChatState()
+                    st["chat_state"] = cs
+                apply_event(cs, event)
+                # Keep logical_turn in sync for header
+                if cs.logical_turn:
+                    st["logical_turn"] = cs.logical_turn
+        except Exception:
+            pass
 
         if event_type == "agent_message_chunk":
             self._on_agent_message_chunk(update)
@@ -3783,7 +3401,8 @@ Type anything else to send a message to the agent.
         if was_none:
             self._current_agent_msg = AgentMessage()
             content.mount(self._current_agent_msg)
-            content.refresh(layout=True)
+            if self._following_tail():
+                content.refresh(layout=True)
 
         self._current_agent_msg.append_chunk(text)
 
@@ -3821,7 +3440,8 @@ Type anything else to send a message to the agent.
             self._current_thinking = ThinkingBlock()
             self._current_thinking.display = self._show_thinking
             content.mount(self._current_thinking)
-            content.refresh(layout=True)
+            if self._following_tail():
+                content.refresh(layout=True)
 
         self._current_thinking.append_chunk(text)
         if self._show_thinking:
@@ -3837,10 +3457,11 @@ Type anything else to send a message to the agent.
         self._current_thinking = None
 
         content = self._content_scroll()
-        panel = ToolCallPanel(tool_id, title)
+        panel = ToolCallPanel(tool_id, title, ts=self._event_ts_str())
         self._tool_panels[tool_id] = panel
         content.mount(panel)
-        content.refresh(layout=True)
+        if self._following_tail():
+            content.refresh(layout=True)
         self._debug(f"TOOL_CALL id={tool_id[:8]} title={title}")
         self._scroll_to_bottom()
 
@@ -3858,7 +3479,7 @@ Type anything else to send a message to the agent.
             # Tool call announcement might have been missed (e.g., started before TUI)
             # Create a panel for it
             display_title = title or f"tool {tool_id[:8]}"
-            panel = ToolCallPanel(tool_id, display_title, kind)
+            panel = ToolCallPanel(tool_id, display_title, kind, ts=self._event_ts_str())
             self._tool_panels[tool_id] = panel
             content = self._content_scroll()
             content.mount(panel)
@@ -3884,12 +3505,20 @@ Type anything else to send a message to the agent.
                     clean_text, interjections = self._extract_interjections(text)
                     if interjections:
                         content = self._content_scroll()
+                        mounted_any = False
                         for msg in interjections:
-                            if msg not in panel._mounted_interjections:
-                                panel._mounted_interjections.add(msg)
-                                block = InterjectionBlock(msg)
-                                content.mount(block, before=panel)
-                        content.refresh(layout=True)
+                            key = interjection_key(msg)
+                            # App-level + per-panel dedup: same interjection is
+                            # re-emitted on every tool_call_update as stdout grows,
+                            # and BASH_ENV injects into every concurrent tool stream.
+                            if key in self._seen_interjections or msg in panel._mounted_interjections:
+                                continue
+                            self._seen_interjections.add(key)
+                            panel._mounted_interjections.add(msg)
+                            content.mount(InterjectionBlock(msg), before=panel)
+                            mounted_any = True
+                        if mounted_any and self._following_tail():
+                            content.refresh(layout=True)
                     panel.set_output(clean_text)
             elif item.get("type") == "diff":
                 # Show diff info
@@ -3934,9 +3563,19 @@ Type anything else to send a message to the agent.
             return
 
         # Skip messages we just sent from the TUI input bar (avoid double-display)
-        # Check if this text matches our last sent message
         if hasattr(self, "_last_sent_text") and self._last_sent_text and text.strip() == self._last_sent_text.strip():
-            self._last_sent_text = None  # Clear so we only skip once
+            self._last_sent_text = None
+            return
+
+        # Harness <system-reminder> blobs: not operator turns — tool-like panel
+        if is_system_reminder(text):
+            self._current_agent_msg = None
+            self._current_thinking = None
+            content = self._content_scroll()
+            content.mount(SystemReminderPanel(text))
+            if self._following_tail():
+                content.refresh(layout=True)
+            self._scroll_to_bottom()
             return
 
         # Increment logical turn counter and insert separator
@@ -3945,7 +3584,6 @@ Type anything else to send a message to the agent.
         turn_num = state["logical_turn"]
         trigger = classify_turn_trigger(text)
 
-        # Format timestamp from update metadata or current time
         ts_str = ""
         meta = update.get("_meta", {})
         if meta.get("ts"):
@@ -3955,7 +3593,6 @@ Type anything else to send a message to the agent.
                 self._last_event_ts
             ).strftime("%a %b %d %H:%M:%S")
 
-        # End current agent message block
         self._current_agent_msg = None
         self._current_thinking = None
 
@@ -3965,7 +3602,6 @@ Type anything else to send a message to the agent.
         content.refresh(layout=True)
         self._scroll_to_bottom()
 
-        # Update header
         try:
             header = self.query_one("#agent-header", AgentHeader)
             header.turn_logical = turn_num
@@ -4057,7 +3693,7 @@ Type anything else to send a message to the agent.
             return
 
         state["loading_history"] = True
-        batch_size = 1  # Load 1 event per scroll tick
+        batch_size = 25  # Events per scroll-up load (1 was too sparse for large sessions)
 
         try:
             # Read backwards from earliest_offset
@@ -4109,24 +3745,49 @@ Type anything else to send a message to the agent.
                         elif event_type == "user_message_chunk":
                             text = update.get("content", {}).get("text", "")
                             if text:
-                                widgets_to_prepend.append(UserMessage(text))
-                        elif event_type == "tool_call_update":
+                                if is_system_reminder(text):
+                                    widgets_to_prepend.append(SystemReminderPanel(text))
+                                else:
+                                    widgets_to_prepend.append(UserMessage(text))
+                        elif event_type in ("tool_call_update", "tool_call"):
                             title = update.get("title", "tool")
-                            status = update.get("status", "completed")
+                            status = update.get("status", "completed" if event_type == "tool_call_update" else "running")
                             kind = update.get("kind", "")
                             tool_id = update.get("toolCallId", "")
-                            panel = ToolCallPanel(tool_id, title, kind)
+                            ts_raw = event.get("timestamp")
+                            try:
+                                ts_str = datetime.datetime.fromtimestamp(float(ts_raw)).strftime("%H:%M:%S") if ts_raw else ""
+                            except Exception:
+                                ts_str = ""
+                            panel = ToolCallPanel(tool_id, title, kind, ts=ts_str)
                             panel.tool_status = status
                             panel._collapsed = True
-                            content_list = update.get("content", [])
-                            for item in content_list:
-                                if item.get("type") == "content":
-                                    inner = item.get("content", {})
-                                    raw = inner.get("text", "")
-                                    clean, intj_msgs = self._extract_interjections(raw)
-                                    for msg in intj_msgs:
-                                        widgets_to_prepend.append(InterjectionBlock(msg))
-                                    panel.tool_output = clean
+                            # Collect raw text from content[] and rawOutput (interjections live here)
+                            raw_parts = []
+                            content_list = update.get("content") or []
+                            if isinstance(content_list, list):
+                                for item in content_list:
+                                    if not isinstance(item, dict):
+                                        continue
+                                    if item.get("type") == "content":
+                                        inner = item.get("content", {})
+                                        if isinstance(inner, dict):
+                                            raw_parts.append(inner.get("text") or "")
+                                        elif isinstance(inner, str):
+                                            raw_parts.append(inner)
+                            raw_out = update.get("rawOutput")
+                            if isinstance(raw_out, str) and raw_out:
+                                raw_parts.append(raw_out)
+                            raw = "\n".join(raw_parts)
+                            clean, intj_msgs = self._extract_interjections(raw)
+                            for msg in intj_msgs:
+                                key = interjection_key(msg)
+                                if key in self._seen_interjections:
+                                    continue
+                                self._seen_interjections.add(key)
+                                widgets_to_prepend.append(InterjectionBlock(msg))
+                            if clean.strip():
+                                panel.tool_output = clean
                             widgets_to_prepend.append(panel)
                         elif event_type == "hook_annotation":
                             message = update.get("message", "")
@@ -4162,6 +3823,36 @@ Type anything else to send a message to the agent.
     _pending_scroll_timer = None
 
     _dispatching_agent = None
+
+
+    def _event_ts_str(self) -> str:
+        """HH:MM:SS from last event timestamp for panel citations."""
+        ts = getattr(self, "_last_event_ts", None)
+        if not ts:
+            return time.strftime("%H:%M:%S")
+        try:
+            return datetime.datetime.fromtimestamp(float(ts)).strftime("%H:%M:%S")
+        except Exception:
+            return time.strftime("%H:%M:%S")
+
+    def _following_tail(self) -> bool:
+        """True if the visible content scroll is pinned to the live tail."""
+        try:
+            if self._dispatching_agent and self._dispatching_agent != self._active_agent:
+                return False  # background agent — don't thrash visible layout
+            return bool(self._content_scroll()._follow_tail)
+        except Exception:
+            return True
+
+    def _stream_refresh(self, widget) -> None:
+        """Refresh a streaming widget; layout only when following tail."""
+        if widget is None:
+            return
+        if self._following_tail():
+            widget.refresh()
+        else:
+            # User reading history: update data only, minimal layout cost
+            widget.refresh()
 
     def _scroll_to_bottom(self) -> None:
         """Scroll the content area to the bottom (only for the visible agent).
@@ -4237,8 +3928,8 @@ def main():
         description="asdaaas TUI — Full-screen development interface for agent sessions"
     )
     parser.add_argument(
-        "--agent", "-a", default="Trip",
-        help="Agent name (default: Trip)"
+        "--agent", "-a", action="append", dest="agents", default=None,
+        help="Agent to open (repeatable). Default: Trip only. Use tab [+] to add more.",
     )
     parser.add_argument(
         "--agents-home", default=os.path.expanduser("~/agents"),
@@ -4272,16 +3963,31 @@ def main():
         "--api-url", default=None,
         help="asdaaas API base URL (e.g. http://localhost:8420). Uses WebSocket for live tail."
     )
+    parser.add_argument(
+        "--light", action="store_true",
+        help="Use Grok Day light theme (alias for --theme grokday)",
+    )
+    parser.add_argument(
+        "--theme", default=None,
+        help="Theme id or 'auto' (see tui/themes/). Overrides saved preference for this run.",
+    )
     args = parser.parse_args()
 
-    Config.AGENT_NAME = args.agent
+    open_agents = args.agents if args.agents else ["Trip"]
+    Config.AGENT_NAME = open_agents[0]
     Config.AGENTS_HOME = args.agents_home
+    Config.set_env(TuiEnv.from_defaults(args.agents_home))
     Config.UPDATES_FILE = args.updates
     Config.GROK_SESSIONS_DIR = args.sessions_dir
     Config.API_URL = args.api_url
     if args.operator:
         Config.OPERATOR_NAME = args.operator
         # Don't save to disk — --operator is ephemeral for test instances
+
+    if args.light:
+        set_theme("grokday")
+    elif args.theme:
+        set_theme(args.theme)
 
     # Ensure adapter directories exist
     Config.tui_inbox().mkdir(parents=True, exist_ok=True)
@@ -4296,37 +4002,17 @@ def main():
             print(f"Warning: No updates.jsonl found for agent {Config.AGENT_NAME}")
             print("The TUI will wait for the file to appear...")
 
-    # Discover agents from agents.json (authoritative) or fall back to filesystem
-    agents_home = Path(Config.AGENTS_HOME)
-    all_agents = []
-    # Config resolution: ASDAAAS_CONFIG env var, then repo root
-    _env = os.environ.get("ASDAAAS_CONFIG", "")
-    _ep = Path(_env) if _env else None
-    if _ep and _ep.is_dir():
-        agents_json_path = _ep / "agents.json"
-    elif _ep and _ep.is_file():
-        agents_json_path = _ep
-    else:
-        agents_json_path = Path(__file__).resolve().parent.parent / "agents.json"
-    try:
-        with open(agents_json_path) as f:
-            agents_cfg = json.load(f)
-        for name, acfg in agents_cfg.get("agents", {}).items():
-            home = Path(acfg.get("home", str(agents_home / name)))
-            if (home / "asdaaas").exists():
-                all_agents.append(name)
-    except Exception:
-        # Fallback: discover from filesystem
-        if agents_home.exists():
-            for d in sorted(agents_home.iterdir()):
-                if d.is_dir() and (d / "asdaaas").exists():
-                    all_agents.append(d.name)
-    # Ensure primary agent is first
-    if Config.AGENT_NAME in all_agents:
-        all_agents.remove(Config.AGENT_NAME)
-    all_agents.insert(0, Config.AGENT_NAME)
-
-    app = AsdaaasTUI(agents=all_agents)
+    # Open only CLI-selected agents; [+] adds more from agents.json catalog.
+    # Dedupe preserving order.
+    seen = set()
+    open_list = []
+    for name in open_agents:
+        if name not in seen:
+            seen.add(name)
+            open_list.append(name)
+    catalog = set(Config.list_catalog_agents())
+    # Allow CLI names even if catalog miss (still try to open)
+    app = AsdaaasTUI(agents=open_list)
 
     if args.debug_log:
         AsdaaasTUI.enable_debug_log(args.debug_log)

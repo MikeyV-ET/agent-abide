@@ -56,6 +56,7 @@ AGENT_NICKS = {
     "Trip": "trip",
     "Q": "Q",
     "Cinco": "Cinco",
+    "Squiggy": "Squiggy",
 }
 
 # All MikeyV nicks (for loop suppression)
@@ -68,6 +69,7 @@ THOUGHT_CHANNELS = {
     "Trip": "#trip-thoughts",
     "Q": "#q-thoughts",
     "Cinco": "#cinco-thoughts",
+    "Squiggy": "#squiggy-thoughts",
 }
 
 # Track which channels we've joined (to avoid re-joining)

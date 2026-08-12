@@ -1197,10 +1197,14 @@ class AsdaaasTUI(App):
                     lambda a=agent: self._tail_updates_for_agent(a),
                     thread=True, name=f"updates_{agent}"
                 )
-        # Start IRC room log tailer
+        # Room tab (IRC) — connect on first visit; optional log tail for history
         self._room_channel = "#meetingroom1"
         self._room_active = False
         self._room_irc_sock = None
+        self._room_irc_nick = Config.OPERATOR_NAME or "eric"
+        self._room_irc_buf = ""
+        self._room_reader_started = False
+        self._room_history_loaded_for = None
         self.run_worker(self._tail_room_log, thread=True, name="room_tailer")
         # Focus the input bar
         self.query_one("#input-bar", MessageInput).focus()
@@ -1329,6 +1333,15 @@ class AsdaaasTUI(App):
         elif cmd == "/status":
             self._show_status_info(content)
             return
+        elif cmd == "/room":
+            # Room tab: change IRC channel (/room #meetingroom1)
+            if not arg.strip():
+                self.notify(f"Current room: {self._room_channel}", severity="information")
+                return
+            if not self._room_active:
+                self.action_switch_to_room()
+            self._change_room_channel(arg.strip())
+            return
         elif cmd == "/gaze":
             if arg:
                 # Set gaze to the specified room
@@ -1396,6 +1409,7 @@ class AsdaaasTUI(App):
 | `/clear` | Clear the screen |
 | `/status` | Show agent status |
 | `/gaze [room]` | Show/set gaze target |
+| `/room [#chan]` | Room tab: show/switch IRC channel |
 | `/awareness` | Show/edit background channels |
 | `/health` | Show health info |
 | `/todo` | Manage persistent todo list |
@@ -2093,7 +2107,7 @@ Type anything else to send a message to the agent.
         self.notify(f"Closed {agent_name}", severity="information", timeout=2)
 
     def action_switch_to_room(self) -> None:
-        """Switch to the IRC room tab."""
+        """Switch to the IRC room tab and ensure a live connection."""
         # Hide current agent content
         if not self._room_active:
             try:
@@ -2108,7 +2122,7 @@ Type anything else to send a message to the agent.
                 if old_state is not None:
                     old_state["input_draft"] = input_bar.text
                 input_bar.clear()
-                input_bar._placeholder = f"Message {self._room_channel}..."
+                input_bar._placeholder = f"Message {self._room_channel}...  (/room #chan)"
             except NoMatches:
                 pass
 
@@ -2122,94 +2136,334 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
-        # Update header
-        try:
-            header = self.query_one("#agent-header", AgentHeader)
-            header.agent_name = self._room_channel
-        except NoMatches:
-            pass
+        self._update_room_header()
 
-        # Update tab bar
         try:
             tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
             tab_bar.active_agent = AgentTabBar.ROOM_TAB
         except NoMatches:
             pass
 
-    def _connect_room_irc(self):
-        """Establish and maintain the IRC connection for the Room tab."""
-        import socket as _socket
-        nick = Config.OPERATOR_NAME or "eric"
-        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        sock.connect(("127.0.0.1", 6667))
-        sock.sendall(f"NICK {nick}\r\n".encode())
-        sock.sendall(f"USER {nick} 0 * :{nick}\r\n".encode())
-        sock.sendall(f"JOIN {self._room_channel}\r\n".encode())
-        # Drain registration replies
-        sock.settimeout(1.0)
+        # Connect in background so UI doesn't freeze
+        import threading
+        threading.Thread(target=self._ensure_room_connected, args=(True,), daemon=True).start()
+
+    def _update_room_header(self, status: str | None = None) -> None:
+        """Show channel + connection status in the agent header."""
         try:
-            while True:
+            header = self.query_one("#agent-header", AgentHeader)
+            header.agent_name = self._room_channel
+            if status is None:
+                status = "connected" if self._room_irc_sock is not None else "disconnected"
+            header.health_status = status
+            header.gaze_target = f"irc/{self._room_channel}"
+        except NoMatches:
+            pass
+
+    def _room_log_path(self) -> Path:
+        # miniircd channel-log-dir uses channel name as filename including '#'
+        return Path.home() / ".grok" / "irc_logs" / f"{self._room_channel}.log"
+
+    def _ensure_room_connected(self, load_history: bool = False) -> bool:
+        """Connect to local IRC if needed. Optionally load recent log history.
+
+        Returns True if socket is ready for send/recv.
+        """
+        if self._room_irc_sock is not None:
+            if load_history:
+                self._load_room_history()
+            return True
+        ok = self._connect_room_irc()
+        if ok and load_history:
+            self._load_room_history()
+        return ok
+
+    def _try_start_irc_server(self) -> bool:
+        """Best-effort start miniircd via launch script (localhost only)."""
+        candidates = [
+            Path(__file__).resolve().parent.parent / "scripts" / "launch_irc_server.sh",
+            Path.home() / "projects" / "agent-abide" / "scripts" / "launch_irc_server.sh",
+        ]
+        script = next((c for c in candidates if c.exists()), None)
+        if script is None:
+            # Direct miniircd fallback
+            mini = Path.home() / ".local" / "bin" / "miniircd"
+            if not mini.exists():
+                return False
+            try:
+                log_dir = Path.home() / ".grok" / "irc_logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                import subprocess
+                subprocess.Popen(
+                    [
+                        "python3", str(mini),
+                        "--listen", "127.0.0.1", "--ports", "6667",
+                        "--channel-log-dir", str(log_dir),
+                    ],
+                    stdout=open("/tmp/miniircd.log", "a"),
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                time.sleep(0.8)
+                return True
+            except Exception:
+                return False
+        try:
+            import subprocess
+            subprocess.Popen(
+                ["bash", str(script)],
+                stdout=open("/tmp/miniircd_launch.log", "a"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            time.sleep(1.0)
+            return True
+        except Exception:
+            return False
+
+    def _connect_room_irc(self) -> bool:
+        """Establish IRC connection for the Room tab. Returns success."""
+        import socket as _socket
+        nick = (Config.OPERATOR_NAME or "eric").replace(" ", "_")[:16]
+        # Avoid empty / invalid nick
+        if not nick or not nick[0].isalpha():
+            nick = "op_" + (nick or "user")
+
+        def _open() -> "_socket.socket":
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect(("127.0.0.1", 6667))
+            sock.sendall(f"NICK {nick}\r\n".encode())
+            sock.sendall(f"USER {nick} 0 * :{nick}\r\n".encode())
+            sock.sendall(f"JOIN {self._room_channel}\r\n".encode())
+            return sock
+
+        try:
+            sock = _open()
+        except Exception as e1:
+            self.call_from_thread(
+                self._mount_room_system_msg,
+                time.strftime("%H:%M"),
+                f"IRC 127.0.0.1:6667 refused ({e1}). Starting miniircd…",
+            )
+            if not self._try_start_irc_server():
+                self.call_from_thread(
+                    self._mount_room_system_msg,
+                    time.strftime("%H:%M"),
+                    "Could not start IRC. Run: bash ~/projects/agent-abide-dev/scripts/launch_irc_server.sh",
+                )
+                self.call_from_thread(self._update_room_header, "disconnected")
+                return False
+            try:
+                sock = _open()
+            except Exception as e2:
+                self.call_from_thread(
+                    self._mount_room_system_msg,
+                    time.strftime("%H:%M"),
+                    f"Still cannot connect: {e2}",
+                )
+                self.call_from_thread(self._update_room_header, "disconnected")
+                return False
+
+        # Drain registration briefly (non-fatal)
+        sock.settimeout(0.5)
+        try:
+            for _ in range(10):
                 data = sock.recv(4096)
                 if not data:
                     break
-                for line in data.decode(errors="replace").split("\r\n"):
-                    if line.startswith("PING"):
-                        pong = line.replace("PING", "PONG", 1)
-                        sock.sendall(f"{pong}\r\n".encode())
-        except _socket.timeout:
+                self._handle_room_irc_bytes(data)
+        except Exception:
             pass
-        sock.settimeout(5.0)
-        self._room_irc_sock = sock
-        self.run_worker(self._room_irc_keepalive, thread=True, name="room_keepalive")
 
-    def _room_irc_keepalive(self):
-        """Background thread: respond to IRC PINGs to keep connection alive."""
-        import socket as _socket
-        while self._room_irc_sock is not None:
+        sock.settimeout(30.0)
+        self._room_irc_sock = sock
+        self._room_irc_nick = nick
+        if not getattr(self, "_room_reader_started", False):
+            self._room_reader_started = True
+            self.run_worker(self._room_irc_reader, thread=True, name="room_irc_reader")
+
+        self.call_from_thread(
+            self._mount_room_system_msg,
+            time.strftime("%H:%M"),
+            f"Connected as {nick} → {self._room_channel}",
+        )
+        self.call_from_thread(self._update_room_header, "connected")
+        return True
+
+    def _handle_room_irc_bytes(self, data: bytes) -> None:
+        """Parse IRC lines from socket data; update UI for channel traffic."""
+        if not hasattr(self, "_room_irc_buf"):
+            self._room_irc_buf = ""
+        self._room_irc_buf += data.decode(errors="replace")
+        while "\r\n" in self._room_irc_buf or "\n" in self._room_irc_buf:
+            if "\r\n" in self._room_irc_buf:
+                line, self._room_irc_buf = self._room_irc_buf.split("\r\n", 1)
+            else:
+                line, self._room_irc_buf = self._room_irc_buf.split("\n", 1)
+            line = line.strip("\r")
+            if not line:
+                continue
+            self._handle_room_irc_line(line)
+
+    def _handle_room_irc_line(self, line: str) -> None:
+        """Handle one IRC protocol line (PING, PRIVMSG, JOIN/PART, etc.)."""
+        sock = self._room_irc_sock
+        if line.startswith("PING"):
+            if sock is not None:
+                try:
+                    pong = line.replace("PING", "PONG", 1)
+                    if not pong.startswith("PONG"):
+                        # PING :server
+                        token = line.split(" ", 1)[1] if " " in line else ""
+                        pong = f"PONG {token}"
+                    sock.sendall(f"{pong}\r\n".encode())
+                except Exception:
+                    pass
+            return
+
+        # :nick!user@host PRIVMSG #chan :text
+        # :nick!user@host JOIN :#chan
+        prefix = ""
+        rest = line
+        if line.startswith(":"):
             try:
-                self._room_irc_sock.settimeout(30.0)
-                data = self._room_irc_sock.recv(4096)
+                prefix, rest = line[1:].split(" ", 1)
+            except ValueError:
+                return
+        nick = prefix.split("!", 1)[0] if prefix else ""
+        parts = rest.split(" ")
+        if not parts:
+            return
+        cmd = parts[0].upper()
+        ts = time.strftime("%H:%M")
+
+        if cmd == "PRIVMSG" and len(parts) >= 2:
+            target = parts[1]
+            # message after first :
+            msg = rest.split(" :", 1)[1] if " :" in rest else ""
+            # Only show traffic for our room (or CTCP ignore)
+            if target.lower() != self._room_channel.lower():
+                return
+            if msg.startswith("\x01") and msg.endswith("\x01"):
+                # CTCP — skip ACTION handling lightly
+                if msg.startswith("\x01ACTION ") and msg.endswith("\x01"):
+                    action = msg[8:-1]
+                    self.call_from_thread(self._mount_room_msg, ts, nick, action, True)
+                return
+            # Skip echo of our own messages if we already local-echoed
+            own = (getattr(self, "_room_irc_nick", None) or Config.OPERATOR_NAME or "").lower()
+            if nick.lower() == own:
+                return
+            self.call_from_thread(self._mount_room_msg, ts, nick, msg)
+            return
+
+        if cmd in ("JOIN", "PART", "QUIT", "NICK"):
+            detail = rest
+            if cmd == "JOIN":
+                chan = parts[1].lstrip(":") if len(parts) > 1 else self._room_channel
+                if chan.lower() != self._room_channel.lower() and not chan.startswith(":"):
+                    # JOIN :#chan form
+                    if " :" in rest:
+                        chan = rest.split(" :", 1)[1]
+                if self._room_channel.lower() not in (chan.lower(), f":{self._room_channel}".lower()):
+                    if chan.lstrip(":").lower() != self._room_channel.lower():
+                        return
+                self.call_from_thread(self._mount_room_system_msg, ts, f"{nick} joined")
+            elif cmd == "PART":
+                self.call_from_thread(self._mount_room_system_msg, ts, f"{nick} left")
+            elif cmd == "QUIT":
+                self.call_from_thread(self._mount_room_system_msg, ts, f"{nick} quit")
+            return
+
+        # Nickname in use → try alternate
+        if cmd == "433":
+            alt = (getattr(self, "_room_irc_nick", "op") + "_tui")[:16]
+            if sock is not None:
+                try:
+                    sock.sendall(f"NICK {alt}\r\n".encode())
+                    self._room_irc_nick = alt
+                except Exception:
+                    pass
+
+    def _room_irc_reader(self) -> None:
+        """Background thread: read IRC socket, feed UI, answer PINGs."""
+        import socket as _socket
+        worker = get_current_worker()
+        while not worker.is_cancelled:
+            sock = self._room_irc_sock
+            if sock is None:
+                time.sleep(0.5)
+                continue
+            try:
+                sock.settimeout(30.0)
+                data = sock.recv(4096)
                 if not data:
-                    break
-                for line in data.decode(errors="replace").split("\r\n"):
-                    if line.startswith("PING"):
-                        pong = line.replace("PING", "PONG", 1)
-                        self._room_irc_sock.sendall(f"{pong}\r\n".encode())
+                    self._room_irc_sock = None
+                    self.call_from_thread(
+                        self._mount_room_system_msg,
+                        time.strftime("%H:%M"),
+                        "IRC disconnected",
+                    )
+                    self.call_from_thread(self._update_room_header, "disconnected")
+                    time.sleep(1)
+                    continue
+                self._handle_room_irc_bytes(data)
             except _socket.timeout:
                 continue
-            except Exception:
-                break
+            except Exception as e:
+                self._room_irc_sock = None
+                self.call_from_thread(
+                    self._mount_room_system_msg,
+                    time.strftime("%H:%M"),
+                    f"IRC error: {e}",
+                )
+                self.call_from_thread(self._update_room_header, "disconnected")
+                time.sleep(1)
 
-    def _send_to_room(self, text: str):
+    def _send_to_room(self, text: str) -> None:
         """Send a message to the IRC room via persistent socket connection."""
         try:
-            if self._room_irc_sock is None:
-                self._connect_room_irc()
-            self._room_irc_sock.sendall(
+            if not self._ensure_room_connected(load_history=False):
+                self.call_from_thread(
+                    self._mount_room_system_msg,
+                    time.strftime("%H:%M"),
+                    "Not connected — message not sent",
+                )
+                return
+            sock = self._room_irc_sock
+            if sock is None:
+                return
+            sock.sendall(
                 f"PRIVMSG {self._room_channel} :{text}\r\n".encode()
             )
         except Exception as e:
             self._room_irc_sock = None
             self.call_from_thread(
-                self._mount_room_system_msg, "", f"Send error: {e}"
+                self._mount_room_system_msg, time.strftime("%H:%M"), f"Send error: {e}"
             )
+            self.call_from_thread(self._update_room_header, "disconnected")
 
-    def _tail_room_log(self) -> None:
-        """Background thread: tail the IRC channel log file."""
+    def _load_room_history(self) -> None:
+        """Load last lines from miniircd channel log into the room pane (once per channel)."""
         import re
-        log_path = Path.home() / ".grok" / "irc_logs" / f"{self._room_channel}.log"
-
+        if getattr(self, "_room_history_loaded_for", None) == self._room_channel:
+            return
+        log_path = self._room_log_path()
+        if not log_path.exists():
+            self._room_history_loaded_for = self._room_channel
+            return
         msg_re = re.compile(r"^\[([^\]]+)\] <([^>]+)> (.*)$")
         action_re = re.compile(r"^\[([^\]]+)\] \* (\S+) (.*)$")
-
-        # Wait for log file to exist
-        while not log_path.exists():
-            time.sleep(2)
-
-        # Seek to tail (last 50 lines for scrollback)
-        with open(log_path, "r") as f:
-            lines = f.readlines()
-            tail_lines = lines[-50:] if len(lines) > 50 else lines
+        try:
+            with open(log_path, "r", errors="replace") as f:
+                lines = f.readlines()
+            tail_lines = lines[-80:] if len(lines) > 80 else lines
+            self.call_from_thread(
+                self._mount_room_system_msg,
+                time.strftime("%H:%M"),
+                f"— history ({len(tail_lines)} lines) —",
+            )
             for line in tail_lines:
                 line = line.rstrip()
                 if not line:
@@ -2218,15 +2472,13 @@ Type anything else to send a message to the agent.
                 if m:
                     ts, nick, msg = m.groups()
                     short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
-                    self.call_from_thread(
-                        self._mount_room_msg, short_ts, nick, msg
-                    )
+                    self.call_from_thread(self._mount_room_msg, short_ts, nick, msg)
                     continue
                 m = action_re.match(line)
                 if m:
                     ts, nick, action = m.groups()
                     short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
-                    if any(w in action for w in ["joined", "quit", "left", "part"]):
+                    if any(w in action for w in ("joined", "quit", "left", "part")):
                         self.call_from_thread(
                             self._mount_room_system_msg, short_ts, f"{nick} {action}"
                         )
@@ -2234,42 +2486,74 @@ Type anything else to send a message to the agent.
                         self.call_from_thread(
                             self._mount_room_msg, short_ts, nick, action, True
                         )
-                    continue
+        except Exception:
+            pass
+        self._room_history_loaded_for = self._room_channel
 
-            # Now tail for new lines
-            f.seek(0, 2)  # seek to end
-            worker = get_current_worker()
-            while not worker.is_cancelled:
-                line = f.readline()
-                if not line:
-                    time.sleep(0.3)
-                    continue
-                line = line.rstrip()
-                if not line:
-                    continue
-                m = msg_re.match(line)
-                if m:
-                    ts, nick, msg = m.groups()
-                    own_nick = (Config.OPERATOR_NAME or "eric").lower()
-                    if nick.lower() == own_nick:
-                        continue
-                    short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
-                    self.call_from_thread(
-                        self._mount_room_msg, short_ts, nick, msg
-                    )
-                    continue
-                m = action_re.match(line)
-                if m:
-                    ts, nick, action = m.groups()
-                    short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
-                    if any(w in action for w in ["joined", "quit", "left", "part"]):
-                        self.call_from_thread(
-                            self._mount_room_system_msg, short_ts, f"{nick} {action}"
-                        )
-                    else:
-                        self.call_from_thread(
-                            self._mount_room_msg, short_ts, nick, action, True
-                        )
+    def _change_room_channel(self, channel: str) -> None:
+        """PART current channel, JOIN new one (must start with #)."""
+        channel = channel.strip()
+        if not channel:
+            return
+        if not channel.startswith("#"):
+            channel = "#" + channel
+        old = self._room_channel
+        if channel == old:
+            self.notify(f"Already in {channel}", severity="information")
+            return
+        sock = self._room_irc_sock
+        if sock is not None:
+            try:
+                sock.sendall(f"PART {old}\r\n".encode())
+                sock.sendall(f"JOIN {channel}\r\n".encode())
+            except Exception:
+                self._room_irc_sock = None
+        self._room_channel = channel
+        self._room_history_loaded_for = None
+        try:
+            input_bar = self.query_one("#input-bar", MessageInput)
+            input_bar._placeholder = f"Message {channel}...  (/room #chan)"
+        except NoMatches:
+            pass
+        self._update_room_header()
+        self._mount_room_system_msg(time.strftime("%H:%M"), f"Switched to {channel}")
+        import threading
+        threading.Thread(target=self._ensure_room_connected, args=(True,), daemon=True).start()
+
+    def _tail_room_log(self) -> None:
+        """Optional: live-tail channel log (backup to socket reader)."""
+        import re
+        worker = get_current_worker()
+        msg_re = re.compile(r"^\[([^\]]+)\] <([^>]+)> (.*)$")
+        while not worker.is_cancelled:
+            log_path = self._room_log_path()
+            while not worker.is_cancelled and not log_path.exists():
+                time.sleep(2)
+                log_path = self._room_log_path()
+            if worker.is_cancelled:
+                return
+            try:
+                with open(log_path, "r", errors="replace") as f:
+                    f.seek(0, 2)
+                    while not worker.is_cancelled:
+                        if log_path != self._room_log_path():
+                            break  # channel changed — reopen
+                        line = f.readline()
+                        if not line:
+                            time.sleep(0.3)
+                            continue
+                        line = line.rstrip()
+                        m = msg_re.match(line)
+                        if not m:
+                            continue
+                        ts, nick, msg = m.groups()
+                        own = (getattr(self, "_room_irc_nick", None) or Config.OPERATOR_NAME or "").lower()
+                        if nick.lower() == own:
+                            continue
+                        short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
+                        self.call_from_thread(self._mount_room_msg, short_ts, nick, msg)
+            except Exception:
+                time.sleep(1)
 
     def _mount_room_msg(self, ts: str, nick: str, msg: str, is_action: bool = False) -> None:
         """Mount a room message widget (called from main thread via call_from_thread)."""

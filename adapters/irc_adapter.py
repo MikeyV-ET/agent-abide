@@ -28,6 +28,7 @@ import os
 import sys
 import time
 import argparse
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
@@ -50,16 +51,20 @@ ADAPTER_NAME = "irc"
 OUTBOX_POLL_INTERVAL = 0.5
 BATCH_WINDOW = 0.3  # quiet window: flush after 0.3s of no new messages
 
-AGENT_NICKS = {
+# Built-in defaults; load_agent_nicks() merges agents.json so new agents appear without code edits.
+_DEFAULT_AGENT_NICKS = {
     "Sr": "Sr",
     "Jr": "Jr",
     "Trip": "trip",
+    "Trip-G": "Trip-G",
     "Q": "Q",
     "Cinco": "Cinco",
     "Squiggy": "Squiggy",
 }
 
-# All MikeyV nicks (for loop suppression)
+AGENT_NICKS = dict(_DEFAULT_AGENT_NICKS)
+
+# All MikeyV nicks (for loop suppression) — refreshed when AGENT_NICKS changes
 MIKEYV_NICKS = {v.lower() for v in AGENT_NICKS.values()}
 
 # Per-agent thought channels
@@ -67,13 +72,55 @@ THOUGHT_CHANNELS = {
     "Sr": "#sr-thoughts",
     "Jr": "#jr-thoughts",
     "Trip": "#trip-thoughts",
+    "Trip-G": "#trip-g-thoughts",
     "Q": "#q-thoughts",
     "Cinco": "#cinco-thoughts",
     "Squiggy": "#squiggy-thoughts",
 }
 
-# Track which channels we've joined (to avoid re-joining)
+# Legacy module-level set (deprecated). Prefer IRCConnection._joined.
 _joined_channels = set()
+
+
+def load_agent_nicks(agents_json_path=None):
+    """Merge agents.json agent names into AGENT_NICKS (nick = name unless override).
+
+    Returns the updated AGENT_NICKS dict. Safe if agents.json missing.
+    """
+    global AGENT_NICKS, MIKEYV_NICKS, THOUGHT_CHANNELS
+    paths = []
+    if agents_json_path:
+        paths.append(Path(agents_json_path) if not isinstance(agents_json_path, Path) else agents_json_path)
+    env = os.environ.get("ASDAAAS_CONFIG", "")
+    if env:
+        ep = Path(env)
+        paths.append(ep / "agents.json" if ep.is_dir() else ep)
+    paths.append(Path(AGENTS_DIR).parent / "config" / "agents.json")
+    paths.append(Path(AGENTS_DIR) / "config" / "agents.json")
+    paths.append(Path(__file__).resolve().parent.parent / "agents.json")
+
+    cfg = None
+    for pth in paths:
+        try:
+            if pth and Path(pth).exists():
+                with open(pth) as f:
+                    cfg = json.load(f)
+                break
+        except Exception:
+            continue
+    nicks = dict(_DEFAULT_AGENT_NICKS)
+    if cfg and isinstance(cfg.get("agents"), dict):
+        for name in cfg["agents"]:
+            if name not in nicks:
+                # IRC nick: strip spaces; keep readable
+                nick = name.replace(" ", "_")[:16]
+                nicks[name] = nick
+            if name not in THOUGHT_CHANNELS:
+                ch = "#" + name.lower().replace(" ", "-") + "-thoughts"
+                THOUGHT_CHANNELS[name] = ch
+    AGENT_NICKS = nicks
+    MIKEYV_NICKS = {v.lower() for v in AGENT_NICKS.values()}
+    return AGENT_NICKS
 
 # Agents dir (for reading awareness files)
 AGENTS_DIR = os.environ.get("MIKEYV_AGENTS_DIR", os.path.expanduser("~/agents"))
@@ -209,11 +256,14 @@ class IRCConnection:
         return messages
 
     async def join_if_needed(self, channel):
-        """Join a channel if not already joined."""
-        if channel in _joined_channels:
+        """Join a channel if this nick has not joined it yet (per-connection)."""
+        if not hasattr(self, "_joined"):
+            self._joined = set()
+        if channel in self._joined:
             return
         await self.join(channel)
-        _joined_channels.add(channel)
+        self._joined.add(channel)
+        _joined_channels.add(channel)  # keep legacy global for command paths
         tprint(f"[irc-adapter] {self.agent_name} joined {channel}")
 
     async def close(self):
@@ -624,7 +674,8 @@ async def run_adapter(agents, channel, host, port):
                                 await conn.send(remaining, target=pm_target)
                                 tprint(f"[irc-adapter] {agent_name} PM -> {pm_target} ({len(remaining)} chars)")
                             elif gaze_room and gaze_room.startswith("#"):
-                                # Channel room: "#standup" -> channel message
+                                # Channel room: ensure THIS nick has JOIN'd before PRIVMSG
+                                await conn.join_if_needed(gaze_room)
                                 await conn.send(remaining, target=gaze_room)
                                 tprint(f"[irc-adapter] {agent_name} -> {gaze_room} ({len(remaining)} chars)")
                             else:
@@ -680,11 +731,20 @@ def main():
     parser.add_argument("--agents", default=None, help="Comma-separated subset (default: all)")
     args = parser.parse_args()
 
+    load_agent_nicks()
     if args.agents:
         names = [a.strip() for a in args.agents.split(",")]
         agents = {a: AGENT_NICKS[a] for a in names if a in AGENT_NICKS}
+        missing = [a for a in names if a not in AGENT_NICKS]
+        if missing:
+            tprint(f"[irc-adapter] WARNING: unknown agents skipped: {missing}")
     else:
-        agents = dict(AGENT_NICKS)
+        # Prefer agents that have asdaaas homes (skip pure test stubs without dirs)
+        agents = {}
+        for name, nick in AGENT_NICKS.items():
+            home = Path(AGENTS_DIR) / name / "asdaaas"
+            if home.exists() or name in _DEFAULT_AGENT_NICKS:
+                agents[name] = nick
 
     try:
         asyncio.run(run_adapter(agents, args.channel, args.host, args.port))

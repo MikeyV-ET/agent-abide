@@ -2144,7 +2144,9 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
-        # Connect in background so UI doesn't freeze
+        # Connect in background; always refresh recent history so we see
+        # traffic that arrived while we were on agent tabs.
+        self._room_history_loaded_for = None
         import threading
         threading.Thread(target=self._ensure_room_connected, args=(True,), daemon=True).start()
 
@@ -2445,8 +2447,9 @@ Type anything else to send a message to the agent.
             self.call_from_thread(self._update_room_header, "disconnected")
 
     def _load_room_history(self) -> None:
-        """Load last lines from miniircd channel log into the room pane (once per channel)."""
+        """Load last lines from miniircd channel log into the room pane."""
         import re
+        # Caller clears _room_history_loaded_for to force refresh (e.g. re-enter Room).
         if getattr(self, "_room_history_loaded_for", None) == self._room_channel:
             return
         log_path = self._room_log_path()

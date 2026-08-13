@@ -15,7 +15,8 @@ sleep 1
 
 echo ""
 echo "=== Starting localmail adapter ==="
-setsid nohup python3 -u "$COMMS/localmail.py" --agents Sr,Jr,Trip,Q,Cinco,Squiggy,test-agent > /tmp/localmail_adapter.log 2>&1 &
+# No --agents: service discovers from agents.json (nested homes via agent_home)
+setsid nohup python3 -u "$COMMS/localmail.py" > /tmp/localmail_adapter.log 2>&1 &
 echo "Localmail adapter: $!"
 ADAPTER_PID=$!
 

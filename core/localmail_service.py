@@ -37,8 +37,35 @@ except ModuleNotFoundError:
 
 from asdaaas_env import AsdaaasEnv
 
-ALL_AGENTS = ["Sr", "Jr", "Trip", "Q", "Cinco", "Squiggy"]
+# Fallback if agents.json cannot be read
+_DEFAULT_AGENTS = ["Sr", "Jr", "Trip", "Trip-G", "Q", "Cinco", "Squiggy"]
 PAYLOAD_MAX_AGE_SECONDS = 3600
+
+
+def discover_agents(env: Optional[AsdaaasEnv] = None) -> list:
+    """Agents to watch: agents.json keys that have an asdaaas dir (honor nested home)."""
+    env = env or AsdaaasEnv.from_config()
+    names = []
+    try:
+        agents_cfg = getattr(config, "agents", None) or {}
+        for name in agents_cfg:
+            # Include all configured agents; watch_loop creates adapter dirs
+            names.append(name)
+    except Exception:
+        names = []
+    if not names:
+        names = list(_DEFAULT_AGENTS)
+    # stable order: defaults first, then the rest alpha
+    seen = set()
+    ordered = []
+    for n in list(_DEFAULT_AGENTS) + sorted(names):
+        if n in names and n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    for n in names:
+        if n not in seen:
+            ordered.append(n)
+    return ordered
 
 _delivered_msg_ids: set = set()
 
@@ -306,7 +333,7 @@ def main():
     if args.agents:
         agents = [a.strip() for a in args.agents.split(",")]
     else:
-        agents = list(ALL_AGENTS)
+        agents = discover_agents()
 
     try:
         watch_loop(agents, args.poll_interval)

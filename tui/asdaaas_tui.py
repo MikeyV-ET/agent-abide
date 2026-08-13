@@ -2634,7 +2634,11 @@ Type anything else to send a message to the agent.
             self.push_screen(PersistenceScreen(self._active_agent, agent_dir))
 
     def action_load_history(self) -> None:
-        """Load older events (Page Up)."""
+        """Load older events (Page Up). Stay parked — do not re-enable tail follow."""
+        try:
+            self._content_scroll()._follow_tail = False
+        except Exception:
+            pass
         self._load_older_history()
 
     def action_scroll_top(self) -> None:
@@ -3807,8 +3811,12 @@ Type anything else to send a message to the agent.
                     except json.JSONDecodeError:
                         pass
 
-                # Mount at the top
+                # Mount at the top, keeping the previous first widget in view so
+                # the reader does not jump to an earlier timepoint (prepend without
+                # scroll compensation looks like the viewport "rewound").
                 if widgets_to_prepend:
+                    content._follow_tail = False
+                    anchor = first_child
                     try:
                         if first_child is not None:
                             content.mount(*widgets_to_prepend, before=first_child)
@@ -3817,12 +3825,23 @@ Type anything else to send a message to the agent.
                                 content.mount(w)
                     except Exception as e:
                         self.notify(f"Mount error: {e}", severity="error")
-                        # Fallback: append at end
                         for w in widgets_to_prepend:
                             try:
                                 content.mount(w)
                             except Exception:
                                 pass
+
+                    def _restore_anchor(a=anchor) -> None:
+                        try:
+                            if a is not None and a.is_attached:
+                                content.scroll_to_widget(a, animate=False, top=True)
+                        except Exception:
+                            pass
+
+                    # After layout settles on the new children
+                    self.call_after_refresh(_restore_anchor)
+                    self.set_timer(0.05, _restore_anchor)
+                    self.set_timer(0.2, _restore_anchor)
 
                 if state["earliest_offset"] <= 0:
                     self.notify("Reached beginning of session", severity="information")
@@ -3918,14 +3937,26 @@ Type anything else to send a message to the agent.
             pass
 
     def _force_scroll_bottom(self) -> None:
-        """Force scroll to bottom -- used after replay completes."""
+        """Force scroll to bottom -- used after replay completes.
+
+        Delayed follow-ups only run while still following the tail, so a user
+        who scrolls up to read is not yanked back (or through) the timeline.
+        """
         try:
             scroll = self._content_scroll()
             scroll._follow_tail = True
             scroll.scroll_end(animate=False)
-            # Also schedule a delayed one in case widgets are still mounting
-            self.set_timer(0.5, lambda: scroll.scroll_end(animate=False))
-            self.set_timer(2.0, lambda: scroll.scroll_end(animate=False))
+
+            def _later() -> None:
+                try:
+                    s = self._content_scroll()
+                    if s._follow_tail:
+                        s.scroll_end(animate=False)
+                except Exception:
+                    pass
+
+            self.set_timer(0.5, _later)
+            self.set_timer(2.0, _later)
         except NoMatches:
             pass
 

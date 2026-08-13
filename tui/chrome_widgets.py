@@ -70,14 +70,23 @@ class ContentScroll(VerticalScroll):
     """VerticalScroll for agent content. Auto-loads history on mouse scroll at top."""
 
     _follow_tail: bool = True
+    _history_load_cooldown: float = 0.0  # monotonic deadline
 
     def on_mount(self) -> None:
         self.auto_scroll = False
+        self._history_load_cooldown = 0.0
 
     def on_mouse_scroll_up(self, event) -> None:
         """When user scrolls up, disable auto-follow and load history at top."""
+        import time as _time
         self._follow_tail = False
-        if self.scroll_y <= 0:
+        # Only auto-load when pinned at the top; cooldown avoids reload thrash
+        # that prepends more history and jumps the reader to earlier timestamps.
+        if self.scroll_y <= 1:
+            now = _time.monotonic()
+            if now < getattr(self, "_history_load_cooldown", 0.0):
+                return
+            self._history_load_cooldown = now + 0.6
             try:
                 self.app._load_older_history()
             except Exception:

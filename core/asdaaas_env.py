@@ -25,10 +25,16 @@ class AsdaaasEnv:
         self.config = config
 
     def agent_home(self, name: str) -> Path:
+        """Per-agent home. Honors agents.json 'home' when config is available."""
+        if self.config is not None:
+            try:
+                return Path(self.config.agent_home(name))
+            except Exception:
+                pass
         return self.agents_home / name
 
     def agent_asdaaas_dir(self, name: str) -> Path:
-        return self.agents_home / name / "asdaaas"
+        return self.agent_home(name) / "asdaaas"
 
     def adapter_dir(self, name: str, adapter: str) -> Path:
         return self.agent_asdaaas_dir(name) / "adapters" / adapter

@@ -436,17 +436,20 @@ class GrokBackend(AgentBackend):
         resp = await self._wait_for_response(self._rpc_id, timeout=120)
         self._session_id = resp.get("result", {}).get("sessionId", session_id or "unknown")
 
-        # Read model from session summary
+        # Model: CLI/agents.json arg first; summary fills in if omitted
         self._model_id = model or "unknown"
-        if not model:
-            try:
-                encoded_cwd = agent_cwd.replace("/", "%2F")
-                summary_path = self._grok_sessions_dir / encoded_cwd / self._session_id / "summary.json"
-                with open(summary_path) as f:
-                    summary = json.load(f)
-                self._model_id = summary.get("current_model_id", "unknown")
-            except (FileNotFoundError, json.JSONDecodeError, TypeError):
-                pass
+        try:
+            encoded_cwd = agent_cwd.replace("/", "%2F")
+            summary_path = self._grok_sessions_dir / encoded_cwd / self._session_id / "summary.json"
+            with open(summary_path) as f:
+                summary = json.load(f)
+            summary_model = summary.get("current_model_id", "") or ""
+            if self._model_id == "unknown" and summary_model:
+                self._model_id = summary_model
+            elif summary_model and not model:
+                self._model_id = summary_model
+        except (FileNotFoundError, json.JSONDecodeError, TypeError, AttributeError):
+            pass
 
         print(f"[asdaaas] Session ready: {self._session_id[:12]}")
 

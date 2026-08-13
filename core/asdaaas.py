@@ -69,9 +69,13 @@ OUTBOX_DIR = config.outbox_dir
 
 
 def agent_dir(agent_name, env: Optional[AsdaaasEnv] = None):
-    """Return the per-agent runtime directory."""
+    """Return the per-agent runtime directory (…/asdaaas).
+
+    Uses agents.json `home` when present (via AsdaaasEnv/config), not only
+    agents_home/<name>. Mismatch with TUI broke nested homes (e.g. Lenny).
+    """
     env = env or AsdaaasEnv.from_config()
-    return env.agents_home / agent_name / "asdaaas"
+    return env.agent_asdaaas_dir(agent_name)
 
 # ============================================================================
 # TUNABLE CONSTANTS — collected here for discoverability (structural-pattern-recognition)
@@ -2104,6 +2108,16 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     # Expose model/session/backend to module-level for health writes
     global _current_model_id, _current_session_id, _current_backend_type
     _current_model_id = backend.model_id
+    # Prefer explicit CLI --model, then agents.json model, over backend "unknown"
+    if (not _current_model_id or _current_model_id == "unknown") and model:
+        _current_model_id = model
+    if (not _current_model_id or _current_model_id == "unknown"):
+        try:
+            cfg_model = (config.agents or {}).get(agent_name, {}).get("model")
+            if cfg_model:
+                _current_model_id = cfg_model
+        except Exception:
+            pass
     _current_session_id = sid
     _current_backend_type = config.agent_backend(agent_name) if config else "grok"
     print(f"[asdaaas] Model: {_current_model_id}")

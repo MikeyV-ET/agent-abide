@@ -35,6 +35,7 @@ def telemetry_from_files(
     health_path: Path,
     gaze_path: Path,
     abide_head: str = "",
+    model_fallback: str = "",
 ) -> AgentTelemetry:
     """Build header telemetry from health.json + gaze.json paths."""
     t = AgentTelemetry(agent_name=agent_name)
@@ -50,10 +51,15 @@ def telemetry_from_files(
         if isinstance(tokens, int) and isinstance(window, int) and window > 0:
             t.context_pct = int(tokens / window * 100)
         t.code_version = health.get("code_version", "") or ""
-        t.model_name = health.get("model", "") or ""
+        model = health.get("model", "") or ""
+        if not model or model == "unknown":
+            model = model_fallback or ""
+        t.model_name = model
     except Exception:
         t.health_status = "unknown"
         t.is_generating = False
+        if model_fallback:
+            t.model_name = model_fallback
 
     try:
         gaze = read_gaze(gaze_path)

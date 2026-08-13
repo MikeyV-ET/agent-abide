@@ -149,6 +149,13 @@ class Config:
         return agent_cfg.get("backend", "grok")
 
     @classmethod
+    def agent_model(cls, agent_name: str) -> str:
+        """Model id from agents.json, if configured."""
+        cfg = cls.load_agents_cfg()
+        agent_cfg = cfg.get("agents", {}).get(agent_name, {})
+        return agent_cfg.get("model", "") or ""
+
+    @classmethod
     def sessions_root(cls) -> Path:
         """Get the grok sessions root directory."""
         if cls.GROK_SESSIONS_DIR:
@@ -1875,6 +1882,7 @@ Type anything else to send a message to the agent.
             asdaaas_dir / "health.json",
             asdaaas_dir / "gaze.json",
             abide_head=getattr(self, "_abide_head", "") or "",
+            model_fallback=Config.agent_model(agent_name),
         )
         header.agent_name = tel.agent_name
         header.health_status = tel.health_status

@@ -37,7 +37,7 @@ def send_mail(from_agent: str, to_agent, text: str,
 
     msg_id = str(uuid.uuid4())
 
-    outbox = env.agents_home / from_agent / "asdaaas" / "adapters" / "localmail" / "outbox"
+    outbox = env.adapter_dir(from_agent, "localmail") / "outbox"
     outbox.mkdir(parents=True, exist_ok=True)
 
     msg = {
@@ -93,7 +93,7 @@ def read_mail(agent_name: str, delete: bool = True,
     Returns list of message dicts, oldest first.
     """
     env = env or AsdaaasEnv.from_config()
-    inbox = env.agents_home / agent_name / "asdaaas" / "adapters" / "localmail" / "inbox"
+    inbox = env.adapter_inbox(agent_name, "localmail")
     if not inbox.exists():
         return []
 

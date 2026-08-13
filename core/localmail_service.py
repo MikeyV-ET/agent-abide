@@ -49,7 +49,7 @@ _delivered_msg_ids: set = set()
 
 def deliver_to_inbox(msg: dict, recipient: str, env: AsdaaasEnv):
     """Write a message to a recipient's inbox."""
-    inbox = env.agents_home / recipient / "asdaaas" / "adapters" / "localmail" / "inbox"
+    inbox = env.adapter_inbox(recipient, "localmail")
     inbox.mkdir(parents=True, exist_ok=True)
 
     ts_prefix = f"mail_{int(time.time()*1000000):016d}_"
@@ -69,7 +69,7 @@ def deliver_to_inbox(msg: dict, recipient: str, env: AsdaaasEnv):
 
 def ring_doorbell(agent_name: str, msg: dict, env: AsdaaasEnv):
     """Write a doorbell notification for an asdaaas-managed agent."""
-    bell_dir = env.agents_home / agent_name / "asdaaas" / "doorbells"
+    bell_dir = env.doorbells_dir(agent_name)
     bell_dir.mkdir(parents=True, exist_ok=True)
 
     msg_id = msg.get("id", "")
@@ -90,7 +90,7 @@ def ring_doorbell(agent_name: str, msg: dict, env: AsdaaasEnv):
     priority = msg.get("priority", 3)
 
     if len(text) > 500:
-        payload_dir = env.agents_home / agent_name / "asdaaas" / "adapters" / "localmail" / "payloads"
+        payload_dir = env.adapter_dir(agent_name, "localmail") / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
         payload_path = payload_dir / f"{msg_id}.json"
         try:
@@ -155,7 +155,7 @@ def process_outboxes(agents: list, env: AsdaaasEnv):
     asdaaas_agents = get_asdaaas_agents(agents, env)
 
     for agent in agents:
-        outbox = env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "outbox"
+        outbox = env.adapter_dir(agent, "localmail") / "outbox"
         if not outbox.exists():
             continue
 
@@ -202,7 +202,7 @@ def process_inboxes(agents: list, env: AsdaaasEnv):
     asdaaas_agents = get_asdaaas_agents(agents, env)
 
     for agent in agents:
-        inbox = env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "inbox"
+        inbox = env.adapter_inbox(agent, "localmail")
         if not inbox.exists():
             continue
 
@@ -233,7 +233,7 @@ def cleanup_old_payloads(agents: list, env: AsdaaasEnv):
     cutoff = time.time() - PAYLOAD_MAX_AGE_SECONDS
     removed = 0
     for agent in agents:
-        payload_dir = env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "payloads"
+        payload_dir = env.adapter_dir(agent, "localmail") / "payloads"
         if not payload_dir.exists():
             continue
         for entry in payload_dir.iterdir():
@@ -262,9 +262,9 @@ def watch_loop(agents: list, poll_interval: float = 1.0,
 
     # Ensure directories exist
     for agent in agents:
-        (env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "inbox").mkdir(parents=True, exist_ok=True)
-        (env.agents_home / agent / "asdaaas" / "adapters" / "localmail" / "outbox").mkdir(parents=True, exist_ok=True)
-        (env.agents_home / agent / "asdaaas" / "doorbells").mkdir(parents=True, exist_ok=True)
+        (env.adapter_inbox(agent, "localmail")).mkdir(parents=True, exist_ok=True)
+        (env.adapter_dir(agent, "localmail") / "outbox").mkdir(parents=True, exist_ok=True)
+        env.doorbells_dir(agent).mkdir(parents=True, exist_ok=True)
 
     adapter_api.register_adapter(
         name="localmail",

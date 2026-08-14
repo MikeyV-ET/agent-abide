@@ -465,6 +465,13 @@ stage_launch() {
     # Agents see "[asdaaas: N doorbell(s) waiting]" in tool output.
     export PROMPT_COMMAND='_asdaaas_inbox() { local n=$(ls ~/agents/'"$agent"'/asdaaas/doorbells/*.json 2>/dev/null | wc -l); [ "$n" -gt 0 ] && echo "[asdaaas: $n doorbell(s) waiting]"; }; _asdaaas_inbox'
 
+    # Set git author to the agent name so commits are properly attributed.
+    # GIT_AUTHOR_NAME/EMAIL controls "Author:" in commits; the global
+    # git config user.name/email remains as "Committer:" — preserving
+    # both who wrote it (agent) and whose machine ran it (Eric).
+    export GIT_AUTHOR_NAME="$agent (MikeyV)"
+    export GIT_AUTHOR_EMAIL="${agent,,}@mikeyv.agent"
+
     # Start signature-fix proxy if requested
     AGENT_PROXY_PORT=""
     AGENT_PROXY_PID=""

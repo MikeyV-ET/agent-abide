@@ -30,6 +30,7 @@ EXCLUDES=(
     "--exclude=home/eric/.vscode-server"
     "--exclude=home/eric/.config"
     "--exclude=home/eric/actionbench_workspaces"
+    "--exclude=home/eric/acben_runs"
     "--exclude=home/eric/.wdm"
     "--exclude=home/eric/asdaaas.bak"
     "--exclude=home/eric/.grok/bin"

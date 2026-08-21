@@ -359,15 +359,26 @@ class EphactViewer(Vertical):
         # (do not cycle on body click — that fights scroll selection)
 
 
-def archive_ephact(agent: str, entry: EphactEntry, agents_home: str = None) -> Path:
+def archive_ephact(
+    agent: str,
+    entry: EphactEntry,
+    agents_home: str = None,
+    agent_home: str | Path = None,
+) -> Path:
     """Save an ephact to disk for cross-session review.
+
+    Prefer ``agent_home`` (full agent directory, e.g. from Config.agent_home /
+    agents.json ``home``). If only ``agents_home`` is given, writes to
+    ``{agents_home}/{agent}/ephacts`` (flat layout / tests).
 
     Returns the path to the saved file.
     """
-    if agents_home is None:
-        agents_home = str(Path.home() / "agents")
-
-    ephacts_dir = Path(agents_home) / agent / "ephacts"
+    if agent_home is not None:
+        ephacts_dir = Path(agent_home) / "ephacts"
+    else:
+        if agents_home is None:
+            agents_home = str(Path.home() / "agents")
+        ephacts_dir = Path(agents_home) / agent / "ephacts"
     ephacts_dir.mkdir(parents=True, exist_ok=True)
 
     ts = int(entry.timestamp * 1000)

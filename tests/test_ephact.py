@@ -218,3 +218,18 @@ class TestArchive:
             assert p1 != p2
             ephacts_dir = Path(tmpdir) / "Trip" / "ephacts"
             assert len(list(ephacts_dir.glob("ephact_*.json"))) == 2
+
+    def test_archive_uses_agent_home_nested(self):
+        """Nested agents.json homes must not write under agents_home/Name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nested = Path(tmpdir) / "LeviSmith" / "Squiggy"
+            entry = EphactEntry(
+                data=EphactData(type="paragraph", content="hi"),
+                agent="Squiggy",
+                timestamp=3000.0,
+            )
+            path = archive_ephact("Squiggy", entry, agent_home=nested)
+            assert path.parent == nested / "ephacts"
+            assert path.exists()
+            # Must not create flat ~/agents-style sibling under tmpdir
+            assert not (Path(tmpdir) / "Squiggy" / "ephacts").exists()

@@ -2629,7 +2629,7 @@ Type anything else to send a message to the agent.
 
     def action_show_persistence(self) -> None:
         """Show persistence management panel for the active agent."""
-        agent_dir = Path.home() / "agents" / self._active_agent
+        agent_dir = Config.agent_home(self._active_agent)
         if agent_dir.exists():
             self.push_screen(PersistenceScreen(self._active_agent, agent_dir))
 
@@ -3434,7 +3434,11 @@ Type anything else to send a message to the agent.
                 for eph in new_ephacts:
                     viewer.push(self._active_agent, eph)
                     entry = EphactEntry(data=eph, agent=self._active_agent)
-                    archive_ephact(self._active_agent, entry)
+                    archive_ephact(
+                        self._active_agent,
+                        entry,
+                        agent_home=Config.agent_home(self._active_agent),
+                    )
                     self._debug(f"EPHACT type={eph.type} title={eph.title} agent={self._active_agent}")
             except NoMatches:
                 pass

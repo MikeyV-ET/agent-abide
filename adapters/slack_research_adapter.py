@@ -43,7 +43,6 @@ import adapter_api
 
 ADAPTER_NAME = "slack_research"
 CREDS_DIR = os.path.expanduser("~/.mikeyv_creds")
-AGENTS_HOME = Path(os.path.expanduser("~/agents"))
 DEFAULT_AGENTS = ["Sr", "Jr", "Trip", "Q", "Cinco"]
 
 _start_time = time.time()

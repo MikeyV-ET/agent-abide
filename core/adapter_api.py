@@ -170,7 +170,7 @@ def write_attention(
         The msg_id.
     """
     env = env or AsdaaasEnv.from_config()
-    attn_dir = env.agents_home / agent_name / "asdaaas" / "attention"
+    attn_dir = env.agent_asdaaas_dir(agent_name) / "attention"
     attn_dir.mkdir(parents=True, exist_ok=True)
 
     now = time.time()
@@ -765,7 +765,7 @@ SESSION_INBOX = HUB_DIR / "adapters" / "session" / "inbox"  # legacy, kept for m
 def _session_inbox(agent_name, env: Optional[AsdaaasEnv] = None):
     """Get the session adapter inbox for an agent (agent-centric path)."""
     env = env or AsdaaasEnv.from_config()
-    return env.agents_home / agent_name / "asdaaas" / "adapters" / "session" / "inbox"
+    return env.agent_asdaaas_dir(agent_name) / "adapters" / "session" / "inbox"
 
 
 def request_compact(agent_name: str) -> str:
@@ -855,7 +855,7 @@ def set_gaze(agent_name: str, room: str, adapter: str = "irc",
         thoughts_adapter: Adapter for thoughts (default: same as speech adapter)
     """
     env = env or AsdaaasEnv.from_config()
-    agent_d = env.agents_home / agent_name / "asdaaas"
+    agent_d = env.agent_asdaaas_dir(agent_name)
     agent_d.mkdir(parents=True, exist_ok=True)
 
     thoughts_adapter = thoughts_adapter or adapter
@@ -893,7 +893,7 @@ def set_awareness(agent_name: str, background_channels: dict = None,
         background_default:  Default mode for unlisted rooms ("doorbell", "pending", "drop")
     """
     env = env or AsdaaasEnv.from_config()
-    agent_d = env.agents_home / agent_name / "asdaaas"
+    agent_d = env.agent_asdaaas_dir(agent_name)
     agent_d.mkdir(parents=True, exist_ok=True)
 
     awareness = {
@@ -1000,7 +1000,7 @@ def write_to_adapter_inbox(
     Path: ~/agents/<agent>/asdaaas/adapters/<adapter>/inbox/<msg_id>.json
     """
     env = env or AsdaaasEnv.from_config()
-    inbox = env.agents_home / to / "asdaaas" / "adapters" / adapter_name / "inbox"
+    inbox = env.agent_asdaaas_dir(to) / "adapters" / adapter_name / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
     
     if sender is None:
@@ -1043,7 +1043,7 @@ def poll_adapter_inbox(adapter_name: str, agent_name: str, delete: bool = True,
     Path: ~/agents/<agent>/asdaaas/adapters/<adapter>/inbox/
     """
     env = env or AsdaaasEnv.from_config()
-    inbox = env.agents_home / agent_name / "asdaaas" / "adapters" / adapter_name / "inbox"
+    inbox = env.agent_asdaaas_dir(agent_name) / "adapters" / adapter_name / "inbox"
     if not inbox.exists():
         return []
     
@@ -1081,7 +1081,7 @@ def write_to_adapter_outbox(
     Path: ~/agents/<agent>/asdaaas/adapters/<adapter>/outbox/<msg_id>.json
     """
     env = env or AsdaaasEnv.from_config()
-    outbox = env.agents_home / agent_name / "asdaaas" / "adapters" / adapter_name / "outbox"
+    outbox = env.agent_asdaaas_dir(agent_name) / "adapters" / adapter_name / "outbox"
     outbox.mkdir(parents=True, exist_ok=True)
     
     msg_id = msg_id or str(uuid.uuid4())
@@ -1120,7 +1120,7 @@ def poll_adapter_outbox(adapter_name: str, agent_name: str, delete: bool = True,
     Path: ~/agents/<agent>/asdaaas/adapters/<adapter>/outbox/
     """
     env = env or AsdaaasEnv.from_config()
-    outbox = env.agents_home / agent_name / "asdaaas" / "adapters" / adapter_name / "outbox"
+    outbox = env.agent_asdaaas_dir(agent_name) / "adapters" / adapter_name / "outbox"
     if not outbox.exists():
         return []
     

@@ -733,10 +733,8 @@ def poll_all_agent_inboxes():
     if not AGENTS_HOME_DIR.exists():
         return messages
     try:
-        for agent_home in sorted(AGENTS_HOME_DIR.iterdir()):
-            if not agent_home.is_dir():
-                continue
-            inbox = agent_home / "asdaaas" / "adapters" / ADAPTER_NAME / "inbox"
+        for agent_name in sorted(config.agents.keys()):
+            inbox = (config.resolve_asdaaas_dir(agent_name, AGENTS_HOME_DIR) / "adapters" / ADAPTER_NAME / "inbox")
             if not inbox.exists():
                 continue
             for f in sorted(inbox.glob("*.json")):
@@ -744,7 +742,7 @@ def poll_all_agent_inboxes():
                     with open(f) as fh:
                         msg = json.load(fh)
                     if "from" not in msg:
-                        msg["from"] = agent_home.name
+                        msg["from"] = agent_name
                     messages.append(msg)
                     os.unlink(f)
                 except (json.JSONDecodeError, OSError) as e:
@@ -761,7 +759,7 @@ def write_doorbell(agent_name, doorbell_text, action="", priority=1, meta=None):
     ASDAAAS polls this and delivers to agent stdin as:
       [impress:<action>] <result>
     """
-    bell_dir = AGENTS_HOME_DIR / agent_name / "asdaaas" / "doorbells"
+    bell_dir = (config.resolve_asdaaas_dir(agent_name, AGENTS_HOME_DIR) / "doorbells")
     bell_dir.mkdir(parents=True, exist_ok=True)
 
     bell = {

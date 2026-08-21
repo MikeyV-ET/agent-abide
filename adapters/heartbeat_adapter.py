@@ -158,7 +158,7 @@ def format_idle_time(seconds):
 
 def ring_heartbeat_doorbell(agent, idle_seconds):
     """Write a heartbeat nudge doorbell for an agent."""
-    bell_dir = AGENTS_HOME_DIR / agent / "asdaaas" / "doorbells"
+    bell_dir = (config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "doorbells")
     bell_dir.mkdir(parents=True, exist_ok=True)
     
     duration = format_idle_time(idle_seconds)
@@ -194,7 +194,7 @@ def ring_heartbeat_doorbell(agent, idle_seconds):
 
 def read_agent_health(agent):
     """Read an agent's health file. Returns dict or None."""
-    health_file = AGENTS_HOME_DIR / agent / "asdaaas" / "health.json"
+    health_file = config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "health.json"
     if not health_file.exists():
         return None
     try:
@@ -206,7 +206,7 @@ def read_agent_health(agent):
 
 def read_agent_awareness(agent):
     """Read an agent's awareness file. Returns dict or empty dict."""
-    awareness_file = AGENTS_HOME_DIR / agent / "asdaaas" / "awareness.json"
+    awareness_file = config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "awareness.json"
     try:
         with open(awareness_file) as f:
             return json.load(f)

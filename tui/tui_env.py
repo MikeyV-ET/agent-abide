@@ -1,9 +1,9 @@
 """Injectable environment for TUI paths — testable without global Config."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 import os
 
 
@@ -13,8 +13,12 @@ class TuiEnv:
     sessions_root: Optional[Path] = None
     operator: str = ""
     api_url: Optional[str] = None
+    # name -> home path from agents.json (nested homes)
+    agent_homes: Dict[str, Path] = field(default_factory=dict)
 
     def agent_home(self, name: str) -> Path:
+        if name in self.agent_homes:
+            return self.agent_homes[name]
         return self.agents_home / name
 
     def asdaaas_dir(self, name: str) -> Path:
@@ -36,4 +40,12 @@ class TuiEnv:
     def from_defaults(cls, agents_home: Optional[str] = None) -> "TuiEnv":
         home = Path(agents_home or os.environ.get("AGENTS_HOME") or Path.home() / "agents")
         sessions = Path.home() / ".grok" / "sessions"
-        return cls(agents_home=home, sessions_root=sessions)
+        agent_homes: Dict[str, Path] = {}
+        try:
+            from asdaaas_config import config
+            for name, acfg in (config.agents or {}).items():
+                if isinstance(acfg, dict) and acfg.get("home"):
+                    agent_homes[name] = Path(acfg["home"])
+        except Exception:
+            pass
+        return cls(agents_home=home, sessions_root=sessions, agent_homes=agent_homes)

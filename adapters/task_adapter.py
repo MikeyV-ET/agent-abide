@@ -78,7 +78,7 @@ PAYLOAD_DIR = AGENTS_HOME_DIR  # payloads stored under agent dirs
 
 def deliver_doorbell(agent, text, priority=1):
     """Write a doorbell file for an agent (atomic write)."""
-    bell_dir = AGENTS_HOME_DIR / agent / "asdaaas" / "doorbells"
+    bell_dir = (config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "doorbells")
     bell_dir.mkdir(parents=True, exist_ok=True)
 
     bell = {
@@ -120,7 +120,7 @@ def deliver_result(agent, script_name, job_id, status, output, exit_code=None):
 
     # If output is large, write to payload file
     if len(full_text) > MAX_OUTPUT_BYTES:
-        payload_dir = AGENTS_HOME_DIR / agent / "asdaaas" / "adapters" / ADAPTER_NAME / "payloads"
+        payload_dir = config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "adapters" / ADAPTER_NAME / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
         payload_path = payload_dir / f"{job_id}.txt"
         payload_path.write_text(output or "")
@@ -327,12 +327,12 @@ def resolve_script(script_path, agent, allowed_dirs=None):
 
     if not path.is_absolute():
         # Try agent's tools dir first
-        tools_path = AGENTS_HOME_DIR / agent / "tools" / script_path
+        tools_path = config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR).parent / "tools" / script_path
         if tools_path.exists():
             path = tools_path
         else:
             # Try agent's home dir
-            home_path = AGENTS_HOME_DIR / agent / script_path
+            home_path = config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR).parent / script_path
             if home_path.exists():
                 path = home_path
             else:
@@ -390,7 +390,7 @@ def process_command(cmd, agent, job_manager, allowed_dirs=None):
         except (TypeError, ValueError):
             timeout = DEFAULT_TIMEOUT
 
-        cwd = cmd.get("cwd", str(AGENTS_HOME_DIR / agent))
+        cwd = cmd.get("cwd", str(config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR).parent))
         input_data = cmd.get("input", None)
 
         # Build environment
@@ -486,7 +486,7 @@ def run_adapter(agents, max_concurrent=MAX_CONCURRENT_PER_AGENT,
 
     # Ensure per-agent inbox directories exist
     for agent in agents:
-        inbox = AGENTS_HOME_DIR / agent / "asdaaas" / "adapters" / ADAPTER_NAME / "inbox"
+        inbox = config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "adapters" / ADAPTER_NAME / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
 
     last_heartbeat = time.time()

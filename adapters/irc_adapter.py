@@ -122,8 +122,24 @@ def load_agent_nicks(agents_json_path=None):
     MIKEYV_NICKS = {v.lower() for v in AGENT_NICKS.values()}
     return AGENT_NICKS
 
-# Agents dir (for reading awareness files)
+# Agents dir (legacy flat root; prefer config.agent_home for nested homes)
 AGENTS_DIR = os.environ.get("MIKEYV_AGENTS_DIR", os.path.expanduser("~/agents"))
+
+try:
+    from asdaaas_config import config as _aa_config
+except ModuleNotFoundError:
+    import sys as _sys
+    from pathlib import Path as _P
+    _sys.path.insert(0, str(_P(__file__).resolve().parent.parent / "core"))
+    from asdaaas_config import config as _aa_config
+
+
+def _awareness_path(agent_name: str) -> str:
+    """Path to awareness.json under resolved agent home."""
+    try:
+        return str(_aa_config.agent_asdaaas_dir(agent_name) / "awareness.json")
+    except Exception:
+        return os.path.join(AGENTS_DIR, agent_name, "asdaaas", "awareness.json")
 
 
 _awareness_cache = {}  # agent_name -> list of channels
@@ -134,7 +150,7 @@ def refresh_awareness_cache(agents):
     """Re-read all agents' awareness.json files. Called every 30s."""
     global _awareness_cache, _awareness_cache_ts
     for agent_name in agents:
-        path = os.path.join(AGENTS_DIR, agent_name, "asdaaas", "awareness.json")
+        path = _awareness_path(agent_name)
         try:
             with open(path) as f:
                 data = json.load(f)

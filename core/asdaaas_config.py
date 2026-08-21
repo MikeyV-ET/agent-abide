@@ -235,6 +235,22 @@ class AsdaaasConfig:
     def agent_adapter_outbox(self, agent_name: str, adapter_name: str) -> Path:
         return self.agent_asdaaas_dir(agent_name) / "adapters" / adapter_name / "outbox"
 
+    def resolve_asdaaas_dir(self, agent_name: str, agents_home_override=None) -> Path:
+        """asdaaas dir for agent, with optional test override root.
+
+        Production: agents.json home via agent_asdaaas_dir.
+        Tests: when agents_home_override differs from config.agents_home
+        (monkeypatched AGENTS_HOME_DIR), use override/name/asdaaas (flat fixture).
+        """
+        if agents_home_override is not None:
+            try:
+                ov = Path(agents_home_override)
+                if ov.resolve() != Path(self.agents_home).resolve():
+                    return ov / agent_name / "asdaaas"
+            except Exception:
+                return Path(agents_home_override) / agent_name / "asdaaas"
+        return self.agent_asdaaas_dir(agent_name)
+
     # Legacy compat aliases
     @property
     def hub_dir(self) -> Path:

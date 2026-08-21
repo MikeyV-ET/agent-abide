@@ -73,9 +73,20 @@ def agent_dir(agent_name, env: Optional[AsdaaasEnv] = None):
 
     Uses agents.json `home` when present (via AsdaaasEnv/config), not only
     agents_home/<name>. Mismatch with TUI broke nested homes (e.g. Lenny).
+
+    Tests may monkeypatch AGENTS_HOME_DIR to a temp flat root; when that
+    differs from config.agents_home, prefer the override (same rule as
+    config.resolve_asdaaas_dir).
     """
-    env = env or AsdaaasEnv.from_config()
-    return env.agent_asdaaas_dir(agent_name)
+    if env is not None:
+        return env.agent_asdaaas_dir(agent_name)
+    try:
+        from asdaaas_config import config as _cfg
+        if Path(AGENTS_HOME_DIR).resolve() != Path(_cfg.agents_home).resolve():
+            return Path(AGENTS_HOME_DIR) / agent_name / "asdaaas"
+    except Exception:
+        pass
+    return AsdaaasEnv.from_config().agent_asdaaas_dir(agent_name)
 
 # ============================================================================
 # TUNABLE CONSTANTS — collected here for discoverability (structural-pattern-recognition)
@@ -588,8 +599,10 @@ def format_background_doorbell(msg, agent_name=None, env: Optional[AsdaaasEnv] =
     
     payload_hint = ""
     if len(text) > 120 and agent_name:
-        env = env or AsdaaasEnv.from_config()
-        payload_dir = env.agent_asdaaas_dir(agent_name) / "adapters" / adapter / "payloads"
+        if env is not None:
+            payload_dir = env.agent_asdaaas_dir(agent_name) / "adapters" / adapter / "payloads"
+        else:
+            payload_dir = agent_dir(agent_name) / "adapters" / adapter / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
         msg_id = msg.get("id", secrets.token_hex(8))
         payload_path = payload_dir / f"{msg_id}.json"

@@ -312,7 +312,12 @@ do_notify() {
     done
 
     # Send localmail to Sr
-    local mail_dir="${HOME}/agents/Sr/asdaaas/adapters/localmail/inbox"
+    local sr_home="${HOME}/agents/Sr"
+    if [ -f "${HOME}/agents/config/agents.json" ]; then
+        _h=$(python3 -c "import json; d=json.load(open('${HOME}/agents/config/agents.json')); print(d.get('agents',d).get('Sr',{}).get('home','') or '')" 2>/dev/null || true)
+        [ -n "$_h" ] && sr_home="$_h"
+    fi
+    local mail_dir="${sr_home}/asdaaas/adapters/localmail/inbox"
     if [[ -d "$mail_dir" ]]; then
         local ts
         ts=$(date +%s%N | head -c16)

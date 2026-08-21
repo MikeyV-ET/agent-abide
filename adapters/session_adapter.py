@@ -78,7 +78,7 @@ def handle_compact(agent, request_id):
     Writes the command, then polls for the result file.
     Returns result dict or error dict.
     """
-    agent_d = AGENTS_HOME_DIR / agent / "asdaaas"
+    agent_d = config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR)
     agent_d.mkdir(parents=True, exist_ok=True)
     
     # Write command for asdaaas to pick up
@@ -123,7 +123,7 @@ def handle_compact(agent, request_id):
 
 def handle_status(agent):
     """Read agent health file and return current stats."""
-    health_file = AGENTS_HOME_DIR / agent / "asdaaas" / "health.json"
+    health_file = config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "health.json"
     if not health_file.exists():
         return {"error": "no_health_file", "detail": f"No health file for {agent}"}
     
@@ -154,7 +154,7 @@ def handle_status(agent):
 
 def ring_session_doorbell(agent, command, request_id, result):
     """Write a session command result doorbell for an agent."""
-    bell_dir = AGENTS_HOME_DIR / agent / "asdaaas" / "doorbells"
+    bell_dir = (config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "doorbells")
     bell_dir.mkdir(parents=True, exist_ok=True)
     
     # Format human-readable text based on command type
@@ -217,7 +217,7 @@ def ring_session_doorbell(agent, command, request_id, result):
 
 def poll_session_inbox(agent):
     """Poll the session adapter's inbox for commands from an agent."""
-    inbox = AGENTS_HOME_DIR / agent / "asdaaas" / "adapters" / "session" / "inbox"
+    inbox = config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "adapters" / "session" / "inbox"
     if not inbox.exists():
         return []
     

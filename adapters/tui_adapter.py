@@ -394,16 +394,24 @@ class MarkdownRenderer:
 # ADAPTER FILESYSTEM INTERFACE
 # ============================================================================
 
+def agent_home(agent_name):
+    """Resolved agent home (agents.json home field, else agents_home/name)."""
+    try:
+        return _asdaaas_config.agent_home(agent_name)
+    except Exception:
+        return Config.agents_home / agent_name
+
+
 def agent_adapter_dir(agent_name, adapter_name=None):
     """Get the adapter directory for an agent."""
     if adapter_name is None:
         adapter_name = Config.adapter_name
-    return Config.agents_home / agent_name / "asdaaas" / "adapters" / adapter_name
+    return agent_home(agent_name) / "asdaaas" / "adapters" / adapter_name
 
 
 def agent_asdaaas_dir(agent_name):
     """Get the asdaaas directory for an agent."""
-    return Config.agents_home / agent_name / "asdaaas"
+    return agent_home(agent_name) / "asdaaas"
 
 
 def ensure_dirs(agent_name):
@@ -776,21 +784,22 @@ def handle_command(cmd, agent_name, display, status_bar):
         return True
 
     elif command == "/agents":
-        # List all agents with health status
-        agents_dir = Config.agents_home
-        if agents_dir.exists():
-            for entry in sorted(agents_dir.iterdir()):
-                if entry.is_dir() and (entry / "asdaaas" / "health.json").exists():
-                    h = read_health(entry.name)
-                    if h:
-                        total = h.get("totalTokens", 0)
-                        window = h.get("contextWindow", 200000)
-                        pct = (total / window * 100) if window else 0
-                        status = h.get("status", "?")
-                        marker = f"{S.GREEN}*{S.RESET}" if entry.name == agent_name else " "
-                        display.show_system(f" {marker} {entry.name:<10s}  {status:<12s}  {pct:.0f}% ctx")
-                    else:
-                        display.show_system(f"   {entry.name:<10s}  offline")
+        # List all agents with health status (catalog homes, not flat scan)
+        names = sorted(_asdaaas_config.agents.keys()) if getattr(_asdaaas_config, "agents", None) else []
+        if not names and Config.agents_home.exists():
+            names = [e.name for e in sorted(Config.agents_home.iterdir())
+                     if e.is_dir() and (e / "asdaaas" / "health.json").exists()]
+        for name in names:
+            h = read_health(name)
+            if h:
+                total = h.get("totalTokens", 0)
+                window = h.get("contextWindow", 200000)
+                pct = (total / window * 100) if window else 0
+                status = h.get("status", "?")
+                marker = f"{S.GREEN}*{S.RESET}" if name == agent_name else " "
+                display.show_system(f" {marker} {name:<10s}  {status:<12s}  {pct:.0f}% ctx")
+            else:
+                display.show_system(f"   {name:<10s}  offline")
         return True
 
     elif command == "/history":

@@ -68,7 +68,7 @@ ALL_AGENTS = ["Sr", "Jr", "Trip", "Q", "Cinco"]
 
 def deliver_doorbell(agent, text, priority=1):
     """Write a doorbell file for an agent."""
-    bell_dir = AGENTS_HOME_DIR / agent / "asdaaas" / "doorbells"
+    bell_dir = (config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "doorbells")
     bell_dir.mkdir(parents=True, exist_ok=True)
 
     bell = {
@@ -191,7 +191,7 @@ def run_adapter(agents):
 
     # Ensure per-agent inbox directories exist
     for agent in agents:
-        inbox = AGENTS_HOME_DIR / agent / "asdaaas" / "adapters" / ADAPTER_NAME / "inbox"
+        inbox = config.resolve_asdaaas_dir(agent, AGENTS_HOME_DIR) / "adapters" / ADAPTER_NAME / "inbox"
         inbox.mkdir(parents=True, exist_ok=True)
 
     last_heartbeat = time.time()

@@ -466,6 +466,7 @@ class GrokBackend(AgentBackend):
         self._session_dir = session_dir
         self._file_source = FileEventSource(session_dir)
         self._file_source.open()
+        self._seed_tokens_from_session()
 
         # Process stdout in background to prevent pipe buffer from filling.
         # Also intercepts session/request_permission when yolo is off.
@@ -741,6 +742,57 @@ class GrokBackend(AgentBackend):
                     self._total_tokens = meta["totalTokens"]
                     if on_meta:
                         on_meta(self._total_tokens)
+
+    def _seed_tokens_from_session(self) -> None:
+        """Prime _total_tokens from updates.jsonl after session/load.
+
+        FileEventSource seeks to EOF so refresh_tokens() only sees *new*
+        frames. After restart the first prompt would otherwise get
+        total_tokens=0 and context_left_tag() returns empty (no telemetry).
+        Scan the tail of updates.jsonl for the last known count.
+        """
+        if not self._session_dir:
+            return
+        path = self._session_dir / "updates.jsonl"
+        try:
+            if not path.exists() or path.stat().st_size == 0:
+                return
+            # Last ~1MB is enough; sessions can be huge
+            max_bytes = 1_000_000
+            with open(path, "rb") as f:
+                size = path.stat().st_size
+                f.seek(max(0, size - max_bytes))
+                chunk = f.read().decode("utf-8", errors="replace")
+            last = None
+            for line in chunk.splitlines():
+                if "totalTokens" not in line and "tokens_after" not in line:
+                    continue
+                try:
+                    frame = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                params = frame.get("params") or {}
+                update = params.get("update") or {}
+                su = update.get("sessionUpdate", "")
+                if su == "auto_compact_completed":
+                    ta = update.get("tokens_after")
+                    if ta:
+                        last = int(ta)
+                        continue
+                meta = update.get("_meta") or params.get("_meta") or {}
+                if isinstance(meta, dict) and meta.get("totalTokens"):
+                    last = int(meta["totalTokens"])
+                    continue
+                # Some frames nest _meta on result
+                result = frame.get("result") or {}
+                rmeta = result.get("_meta") if isinstance(result, dict) else None
+                if isinstance(rmeta, dict) and rmeta.get("totalTokens"):
+                    last = int(rmeta["totalTokens"])
+            if last and last > 0:
+                self._total_tokens = last
+                print(f"[grok_backend] Seeded token count from session: {last}")
+        except Exception as e:
+            print(f"[grok_backend] WARN: token seed failed: {e}")
 
     def refresh_tokens(self) -> int:
         """Read latest from updates.jsonl to get current token count.

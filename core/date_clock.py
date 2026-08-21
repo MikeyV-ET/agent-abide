@@ -27,7 +27,11 @@ ALL_AGENTS = ["Sr", "Jr", "Trip", "Q", "Cinco"]
 
 def drop_date_doorbell(agent_name, date_str):
     """Write a date-change doorbell into an agent's doorbells directory."""
-    bell_dir = AGENTS_HOME / agent_name / "asdaaas" / "doorbells"
+    try:
+        from asdaaas_config import config
+        bell_dir = config.agent_doorbells_dir(agent_name)
+    except Exception:
+        bell_dir = AGENTS_HOME / agent_name / "asdaaas" / "doorbells"
     bell_dir.mkdir(parents=True, exist_ok=True)
 
     bell_id = f"date_{secrets.token_hex(4)}"

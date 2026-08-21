@@ -3,21 +3,30 @@
 # Checks for queued interjection messages and prepends them to stdout,
 # so they appear at the top of tool call output. Consumed files are deleted.
 #
-# Requires: $AGENT_NAME in environment (set by asdaaas.py)
-# Queue dir: ~/agents/$AGENT_NAME/asdaaas/interjections/*.txt
+# Requires: $AGENT_HOME (preferred) or $AGENT_NAME (legacy flat fallback)
+# Queue dir: $AGENT_HOME/asdaaas/interjections/*.txt
 #
 # Performance: empty path is ~1ms (two builtins: test -d, compgen -G).
 # No forks, no subshells, no external commands on the empty path.
 
-# Guard: need AGENT_NAME to know which queue to check
-[ -n "$AGENT_NAME" ] || return 0 2>/dev/null || true
+# Guard: need a home or name to know which queue to check
+if [ -z "${AGENT_HOME:-}" ] && [ -z "${AGENT_NAME:-}" ]; then
+    return 0 2>/dev/null || true
+fi
 
 # Only fire for bash -c invocations (actual tool call commands).
 # Other bash processes (e.g. hook scripts run as "bash script.sh") also
 # source BASH_ENV but should not consume interjection files.
 case "$-" in *c*) ;; *) return 0 2>/dev/null || true ;; esac
 
-_intj_dir="$HOME/agents/$AGENT_NAME/asdaaas/interjections"
+# Prefer AGENT_HOME (resolved agents.json home). Fallback flat path for
+# older binaries that only set AGENT_NAME.
+if [ -n "${AGENT_HOME:-}" ]; then
+    _intj_base="$AGENT_HOME/asdaaas"
+else
+    _intj_base="$HOME/agents/$AGENT_NAME/asdaaas"
+fi
+_intj_dir="$_intj_base/interjections"
 
 # Fast path: bail if no directory or no .txt files (all builtins, no forks)
 if [ -d "$_intj_dir" ] && compgen -G "$_intj_dir/*.txt" > /dev/null 2>&1; then
@@ -37,7 +46,7 @@ if [ -d "$_intj_dir" ] && compgen -G "$_intj_dir/*.txt" > /dev/null 2>&1; then
             echo "</interjection>"
 
             # Log delivery for diagnostics
-            _intj_log="$HOME/agents/$AGENT_NAME/asdaaas/interjection_log.txt"
+            _intj_log="$_intj_base/interjection_log.txt"
             _intj_count=$(ls -1 "$_intj_tmp"/*.txt 2>/dev/null | wc -l)
             _intj_snippet=$(head -c 200 "$_intj_tmp"/*.txt 2>/dev/null | tr '\n' ' ')
             echo "$(date '+%Y-%m-%d %H:%M:%S %Z') delivered=$_intj_count snippet=\"$_intj_snippet\"" >> "$_intj_log" 2>/dev/null
@@ -48,7 +57,7 @@ if [ -d "$_intj_dir" ] && compgen -G "$_intj_dir/*.txt" > /dev/null 2>&1; then
     fi
 fi
 
-unset _intj_dir _intj_tmp
+unset _intj_dir _intj_tmp _intj_base
 
 # Prevent child processes from sourcing this hook again.
 # Each new tool call gets a fresh BASH_ENV from the binary's env.

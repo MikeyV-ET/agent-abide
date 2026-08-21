@@ -2,6 +2,11 @@
 # Compaction hook — writes compaction phase to per-agent binary_state.json
 # Fired by grok binary on PreCompact and PostCompact events.
 # Receives JSON envelope on stdin with hookEventName, sessionId, source, cwd, etc.
+#
+# Path rule: agent_home/asdaaas/binary_state.json
+#   1. AGENT_HOME env (set by asdaaas when spawning binary)
+#   2. envelope cwd (asdaaas starts binary with cwd = agent home)
+# Never rebuild $HOME/agents/$(basename cwd) — that breaks nested homes.
 
 set -euo pipefail
 
@@ -12,13 +17,18 @@ CWD=$(echo "$ENVELOPE" | python3 -c "import sys,json; print(json.load(sys.stdin)
 SOURCE=$(echo "$ENVELOPE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('source','unknown'))")
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# Derive agent name from CWD (e.g. /home/eric/agents/Sr -> Sr)
-AGENT_NAME=$(basename "$CWD")
-AGENTS_DIR="$HOME/agents"
-STATE_FILE="$AGENTS_DIR/$AGENT_NAME/asdaaas/binary_state.json"
+if [ -n "${AGENT_HOME:-}" ]; then
+    AGENT_ROOT="$AGENT_HOME"
+elif [ -n "${CWD:-}" ]; then
+    AGENT_ROOT="$CWD"
+else
+    exit 0
+fi
 
-# Only act if we recognize the agent
-if [ ! -d "$AGENTS_DIR/$AGENT_NAME/asdaaas" ]; then
+STATE_FILE="$AGENT_ROOT/asdaaas/binary_state.json"
+
+# Only act if we recognize the agent tree
+if [ ! -d "$AGENT_ROOT/asdaaas" ]; then
     exit 0
 fi
 
@@ -37,6 +47,7 @@ state['compaction'] = {
     'session_id': '$SESSION_ID',
     'started_at': '$TIMESTAMP'
 }
+os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, 'w') as f:
     json.dump(state, f, indent=2)
 "
@@ -55,6 +66,7 @@ state['compaction'] = {
     'session_id': '$SESSION_ID',
     'completed_at': '$TIMESTAMP'
 }
+os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, 'w') as f:
     json.dump(state, f, indent=2)
 "

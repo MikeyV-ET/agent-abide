@@ -12,17 +12,20 @@ from typing import Optional
 
 
 def interjection_dir(agent_name: str, env=None) -> Path:
-    """Return the interjection queue directory for an agent."""
+    """Return the interjection queue directory for an agent.
+
+    Uses agents.json home via env.agent_asdaaas_dir (nested homes OK).
+    """
     if env is None:
         from asdaaas_env import AsdaaasEnv
         env = AsdaaasEnv.from_config()
-    return env.agents_home / agent_name / "asdaaas" / "interjections"
+    return env.agent_asdaaas_dir(agent_name) / "interjections"
 
 
 def queue_interjection(agent_name: str, text: str, env=None) -> None:
     """Queue a message for mid-turn delivery via BASH_ENV hook.
 
-    Writes to ~/agents/{agent_name}/asdaaas/interjections/interject_{timestamp_ms}_{pid}.txt
+    Writes to {agent_home}/asdaaas/interjections/interject_{timestamp_ms}_{pid}.txt
     Uses atomic write: .tmp first, then rename to .txt so the hook
     never reads a partially-written file.
     """

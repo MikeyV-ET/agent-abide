@@ -4,7 +4,7 @@ permission_handler.py -- File-based permission request/decision flow.
 Used by asdaaas to route tool permission requests from an intern agent
 to a mentor agent, and by mentor agents to approve/reject requests.
 
-Permission files live under ~/agents/<Intern>/asdaaas/permissions/:
+Permission files live under {agent_home}/asdaaas/permissions/:
   pending/   -- requests waiting for decision
   decisions/ -- mentor decisions (matched by req_id)
   log/       -- completed requests (moved after processing)
@@ -25,7 +25,7 @@ except ImportError:
 
 
 def _permissions_dir(agent_name: str) -> Path:
-    if config:
+    if config is not None:
         return config.agent_permissions_dir(agent_name)
     return Path.home() / "agents" / agent_name / "asdaaas" / "permissions"
 

@@ -37,26 +37,25 @@ def _patch_asdaaas_env(tmp_path, monkeypatch):
 def agent_env(tmp_path):
     """Set up a temp agent home with interjection queue directory.
 
-    Creates the directory structure that mimics ~/agents/testagent/asdaaas/interjections/
-    and returns a dict with paths and env vars for running the hook.
+    Uses AGENT_HOME (resolved home) — same contract as nested agents.json homes.
     """
     agent_name = "testagent"
-    interject_dir = tmp_path / agent_name / "asdaaas" / "interjections"
+    agent_home = tmp_path / "LeviSmith" / agent_name  # nested on purpose
+    interject_dir = agent_home / "asdaaas" / "interjections"
     interject_dir.mkdir(parents=True)
 
     env = {
         **os.environ,
         "HOME": str(tmp_path),
         "AGENT_NAME": agent_name,
+        "AGENT_HOME": str(agent_home),
+        "ASDAAAS_DIR": str(agent_home / "asdaaas"),
     }
-
-    # Hook resolves ~/agents/$AGENT_NAME/... so we need agents/ under HOME
-    agents_dir = tmp_path / "agents" / agent_name / "asdaaas" / "interjections"
-    agents_dir.mkdir(parents=True)
 
     return {
         "agent_name": agent_name,
-        "interject_dir": agents_dir,
+        "agent_home": agent_home,
+        "interject_dir": interject_dir,
         "home": tmp_path,
         "env": env,
     }
@@ -101,8 +100,10 @@ class TestHookEmptyQueue:
     def test_no_agent_name_graceful(self, tmp_path):
         """If AGENT_NAME unset, hook produces no output and doesn't crash."""
         env = {**os.environ, "HOME": str(tmp_path)}
-        # Explicitly remove AGENT_NAME if present
+        # Explicitly remove identity env if present
         env.pop("AGENT_NAME", None)
+        env.pop("AGENT_HOME", None)
+        env.pop("ASDAAAS_DIR", None)
         result = subprocess.run(
             ["/bin/bash", "-c", "echo done"],
             env={**env, "BASH_ENV": str(HOOK_SCRIPT)},
@@ -239,7 +240,7 @@ class TestHookDelivery:
         queue_file(agent_env["interject_dir"], "interject_001.txt", "logged message")
         run_hook(agent_env["env"])
 
-        log_path = agent_env["home"] / "agents" / agent_env["agent_name"] / "asdaaas" / "interjection_log.txt"
+        log_path = agent_env["agent_home"] / "asdaaas" / "interjection_log.txt"
         assert log_path.exists(), "interjection_log.txt not created"
         log_content = log_path.read_text()
         assert "delivered=1" in log_content
@@ -248,7 +249,7 @@ class TestHookDelivery:
     def test_no_log_on_empty_queue(self, agent_env):
         """No log entry when queue is empty (zero overhead)."""
         run_hook(agent_env["env"])
-        log_path = agent_env["home"] / "agents" / agent_env["agent_name"] / "asdaaas" / "interjection_log.txt"
+        log_path = agent_env["agent_home"] / "asdaaas" / "interjection_log.txt"
         assert not log_path.exists(), "Log should not be created when nothing was delivered"
 
 
@@ -352,27 +353,30 @@ class TestIntegration:
         """Use queue_interjection() to queue a message, then run the hook
         via subprocess, verify the message appears in output."""
         from interjection import queue_interjection
+        from asdaaas_env import AsdaaasEnv
 
         agent_name = "testagent"
-
-        # Point HOME at tmp_path so both Python and bash resolve the same dir
-        monkeypatch.setenv("HOME", str(tmp_path))
-
-        # Create the agents dir structure that matches ~/agents/$AGENT_NAME/...
-        agents_interject = tmp_path / "agents" / agent_name / "asdaaas" / "interjections"
+        agent_home = tmp_path / "LeviSmith" / agent_name
+        agents_interject = agent_home / "asdaaas" / "interjections"
         agents_interject.mkdir(parents=True)
 
-        # Queue via Python — need to ensure it writes to the same dir the hook reads
-        # The hook reads ~/agents/$AGENT_NAME/asdaaas/interjections/
-        # Write directly to that path for integration test
+        env_obj = AsdaaasEnv(agents_home=tmp_path / "agents")
+        # Force nested home resolution via config-less override:
+        # monkeypatch agent_home by using a tiny config-like object
+        class _Cfg:
+            def agent_home(self, name):
+                return agent_home
+        env_obj.config = _Cfg()
+
         msg_text = "Integration test: Eric says hello"
-        msg_file = agents_interject / f"interject_{int(time.time() * 1000)}.txt"
-        msg_file.write_text(msg_text)
+        queue_interjection(agent_name, msg_text, env=env_obj)
+        assert list(agents_interject.glob("*.txt")), "queue_interjection wrote nothing"
 
         env = {
             **os.environ,
             "HOME": str(tmp_path),
             "AGENT_NAME": agent_name,
+            "AGENT_HOME": str(agent_home),
             "BASH_ENV": str(HOOK_SCRIPT),
         }
 
@@ -745,3 +749,73 @@ class TestInterjectionWatcher:
         contents = {f.read_text() for f in files}
         assert any("msg1" in c for c in contents)
         assert any("msg2" in c for c in contents)
+
+
+# ── Nested agent home (agents.json home) ─────────────────────────────
+
+class TestNestedAgentHome:
+    """queue + hook must use resolved agent_home, not ~/agents/$NAME."""
+
+    def test_interjection_dir_nested_home(self, tmp_path):
+        from interjection import interjection_dir, queue_interjection
+        from asdaaas_env import AsdaaasEnv
+
+        nested = tmp_path / "LeviSmith" / "Squiggy"
+        class _Cfg:
+            def agent_home(self, name):
+                assert name == "Squiggy"
+                return nested
+        env = AsdaaasEnv(agents_home=tmp_path / "agents", config=_Cfg())
+        d = interjection_dir("Squiggy", env=env)
+        assert d == nested / "asdaaas" / "interjections"
+        queue_interjection("Squiggy", "nested hello", env=env)
+        files = list(d.glob("*.txt"))
+        assert len(files) == 1
+        assert files[0].read_text() == "nested hello"
+        # Must not create flat ghost
+        assert not (tmp_path / "agents" / "Squiggy" / "asdaaas" / "interjections").exists()
+
+    def test_hook_reads_agent_home_not_flat(self, tmp_path):
+        nested = tmp_path / "LeviSmith" / "Squiggy"
+        q = nested / "asdaaas" / "interjections"
+        q.mkdir(parents=True)
+        (q / "interject_1.txt").write_text("from nested")
+        # Ghost flat path with different content — must NOT be used
+        ghost = tmp_path / "agents" / "Squiggy" / "asdaaas" / "interjections"
+        ghost.mkdir(parents=True)
+        (ghost / "interject_ghost.txt").write_text("from ghost")
+
+        env = {
+            **os.environ,
+            "HOME": str(tmp_path),
+            "AGENT_NAME": "Squiggy",
+            "AGENT_HOME": str(nested),
+            "BASH_ENV": str(HOOK_SCRIPT),
+        }
+        result = subprocess.run(
+            ["/bin/bash", "-c", "echo done"],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+        assert "from nested" in result.stdout
+        assert "from ghost" not in result.stdout
+        assert list(q.glob("*.txt")) == []
+        assert list(ghost.glob("*.txt")), "ghost must remain untouched"
+
+    def test_hook_legacy_flat_fallback_without_agent_home(self, tmp_path):
+        """Without AGENT_HOME, old ~/agents/$NAME path still works."""
+        flat = tmp_path / "agents" / "OldAgent" / "asdaaas" / "interjections"
+        flat.mkdir(parents=True)
+        (flat / "interject_1.txt").write_text("legacy msg")
+        env = {
+            **os.environ,
+            "HOME": str(tmp_path),
+            "AGENT_NAME": "OldAgent",
+            "BASH_ENV": str(HOOK_SCRIPT),
+        }
+        env.pop("AGENT_HOME", None)
+        result = subprocess.run(
+            ["/bin/bash", "-c", "echo done"],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+        assert "legacy msg" in result.stdout
+

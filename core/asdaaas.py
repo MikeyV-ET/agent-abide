@@ -589,7 +589,7 @@ def format_background_doorbell(msg, agent_name=None, env: Optional[AsdaaasEnv] =
     payload_hint = ""
     if len(text) > 120 and agent_name:
         env = env or AsdaaasEnv.from_config()
-        payload_dir = env.agents_home / agent_name / "asdaaas" / "adapters" / adapter / "payloads"
+        payload_dir = env.agent_asdaaas_dir(agent_name) / "adapters" / adapter / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
         msg_id = msg.get("id", secrets.token_hex(8))
         payload_path = payload_dir / f"{msg_id}.json"

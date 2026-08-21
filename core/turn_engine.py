@@ -118,8 +118,8 @@ class TurnEngine:
         self.reasoning_effort_info: Optional[tuple] = None  # (level, turns_remaining) or None
 
     def agent_dir(self) -> Path:
-        """Per-agent asdaaas directory."""
-        return self.env.agents_home / self.agent_name / "asdaaas"
+        """Per-agent asdaaas directory (honors agents.json home)."""
+        return self.env.agent_asdaaas_dir(self.agent_name)
 
     async def gather_pending(self) -> GatherResult:
         """Gather all pending doorbells, messages, and commands.

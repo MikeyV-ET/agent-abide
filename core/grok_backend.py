@@ -391,12 +391,19 @@ class GrokBackend(AgentBackend):
             cmd.extend(["--reasoning-effort", reasoning_effort])
         cmd.append("stdio")
 
-        # Set up environment — interjection via BASH_ENV if enabled
-        proc_env = None
+        # Process env: always export AGENT_HOME (resolved agent home = cwd).
+        # Hooks (compaction, interjection) must not rebuild ~/agents/$NAME.
+        proc_env = {
+            **os.environ,
+            "AGENT_HOME": agent_cwd,
+            "ASDAAAS_DIR": str(Path(agent_cwd) / "asdaaas"),
+        }
+        if agent_name:
+            proc_env["AGENT_NAME"] = agent_name
         if interjection_enabled and agent_name:
             hook_path = Path(__file__).parent / "interjection_hook.sh"
             if hook_path.exists():
-                proc_env = {**os.environ, "BASH_ENV": str(hook_path), "AGENT_NAME": agent_name}
+                proc_env["BASH_ENV"] = str(hook_path)
 
         print(f"[asdaaas] Spawning grok binary...")
         self._proc = await asyncio.create_subprocess_exec(

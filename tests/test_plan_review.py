@@ -253,7 +253,7 @@ async def test_unhandled_request_includes_params(capsys):
 
 @pytest.mark.asyncio
 async def test_stdout_log_captures_all_frames(tmp_path):
-    """All stdout frames are logged to stdout_log.jsonl with timestamps."""
+    """Timeline refs every frame; catalog holds atomic exemplars."""
     lines = [
         _jsonrpc_request("_x.ai/exit_plan_mode", 1),
         _jsonrpc_request("_x.ai/ask_user_question", 2),
@@ -265,19 +265,24 @@ async def test_stdout_log_captures_all_frames(tmp_path):
     await backend._process_stdout()
 
     log_path = tmp_path / "stdout_log.jsonl"
+    cat_path = tmp_path / "stdout_catalog.jsonl"
     assert log_path.exists()
+    assert cat_path.exists()
     log_lines = [json.loads(l) for l in log_path.read_text().strip().split("\n")]
-    # All 3 lines logged (including malformed one)
+    cat_lines = [json.loads(l) for l in cat_path.read_text().strip().split("\n")]
+    # All 3 events on timeline
     assert len(log_lines) == 3
-    # Each has ts and raw fields
     for entry in log_lines:
         assert "ts" in entry
-        assert "raw" in entry
+        assert "ref" in entry
         assert isinstance(entry["ts"], float)
-    # Content matches
-    assert "_x.ai/exit_plan_mode" in log_lines[0]["raw"]
-    assert "_x.ai/ask_user_question" in log_lines[1]["raw"]
-    assert "not json" in log_lines[2]["raw"]
+        assert isinstance(entry["ref"], int)
+    # Three distinct kinds → three catalog exemplars with full examples
+    assert len(cat_lines) == 3
+    examples = {c["id"]: c["example"] for c in cat_lines}
+    assert "_x.ai/exit_plan_mode" in examples[log_lines[0]["ref"]]
+    assert "_x.ai/ask_user_question" in examples[log_lines[1]["ref"]]
+    assert "not json" in examples[log_lines[2]["ref"]]
 
 
 @pytest.mark.asyncio
@@ -310,7 +315,10 @@ async def test_stdout_log_gates_still_handled(tmp_path):
 
     # All 3 gates handled
     assert len(fake_proc.responses_sent) == 3
-    # Log captured all 3
+    # Timeline captured all 3
     log_path = tmp_path / "stdout_log.jsonl"
     log_lines = log_path.read_text().strip().split("\n")
     assert len(log_lines) == 3
+    for line in log_lines:
+        e = json.loads(line)
+        assert "ref" in e and "ts" in e

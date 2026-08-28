@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, IO, Optional
 
 from agent_backend import AgentBackend, ResponseResult, TurnCancelled
+from stdout_catalog import StdoutWireRecorder
 
 # Delay after turn_ended to let final updates.jsonl writes flush
 POST_TURN_DRAIN_DELAY_S = 0.15
@@ -203,12 +204,15 @@ class GrokBackend(AgentBackend):
         self._permission_handler = handler
 
     async def _process_stdout(self):
-        """Read stdout, log all frames, and handle interactive gates.
+        """Read stdout, log frames (catalog+timeline), and handle interactive gates.
 
         This is the Y-channel tap: every line from the binary's stdout is
-        logged to stdout_log.jsonl before any parsing, giving the observer
-        full visibility into the control channel (gates, permissions, session
-        updates) — not just what lands in updates.jsonl.
+        recorded before any parsing, giving the observer visibility into the
+        control channel (gates, permissions, session updates).
+
+        Recording (2026-08-28): not a full raw dump. Atomic exemplars live in
+        stdout_catalog.jsonl; stdout_log.jsonl is a timeline of
+        {ts, ref} pointers. See core/stdout_catalog.py.
 
         Design constraints (from LSP proxy experience — see
         docs/Y_CHANNEL_LSP_LESSONS.md for full analysis):
@@ -219,16 +223,15 @@ class GrokBackend(AgentBackend):
         2. Y is a PROXY, not a tee. Gate auto-responses inject data on stdin;
            this method is an active participant in the protocol, not passive.
         3. Validate complete messages (newline-delimited) before forwarding.
-        4. Logging volume: flush() per write is correct for debugging but
-           may need filtering/sampling in production.
         """
-        stdout_log_fp = None
+        recorder = None
         if hasattr(self, '_session_dir') and self._session_dir:
-            stdout_log_path = self._session_dir / "stdout_log.jsonl"
             try:
-                stdout_log_fp = open(stdout_log_path, "a")
-            except OSError:
-                pass
+                recorder = StdoutWireRecorder(self._session_dir)
+                if not recorder.active:
+                    recorder = None
+            except Exception:
+                recorder = None
         try:
             buf = b""
             while self._proc and self._proc.stdout:
@@ -241,13 +244,13 @@ class GrokBackend(AgentBackend):
                     line = line.strip()
                     if not line:
                         continue
-                    # Log raw line before any parsing
-                    if stdout_log_fp:
-                        ts = time.time()
+                    # Catalog+timeline before any parsing
+                    if recorder is not None:
                         try:
-                            log_entry = json.dumps({"ts": ts, "raw": line.decode("utf-8", errors="replace")})
-                            stdout_log_fp.write(log_entry + "\n")
-                            stdout_log_fp.flush()
+                            recorder.record(
+                                time.time(),
+                                line.decode("utf-8", errors="replace"),
+                            )
                         except Exception:
                             pass
                     try:
@@ -272,9 +275,9 @@ class GrokBackend(AgentBackend):
         except (asyncio.CancelledError, OSError):
             pass
         finally:
-            if stdout_log_fp:
+            if recorder is not None:
                 try:
-                    stdout_log_fp.close()
+                    recorder.close()
                 except Exception:
                     pass
 

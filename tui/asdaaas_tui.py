@@ -1683,6 +1683,24 @@ Type anything else to send a message to the agent.
         except Exception:
             info.append("*Could not read health*")
 
+        # Long-run scrollback telemetry (diagnose 7d hangs without a debugger)
+        try:
+            scroll = self._content_scroll()
+            n_widgets = len(list(scroll.children))
+            st = self._agent_state.get(self._active_agent) or {}
+            cs = st.get("chat_state")
+            n_items = len(cs.items) if cs is not None else 0
+            n_panels = len(st.get("tool_panels") or {})
+            follow = getattr(scroll, "_follow_tail", "?")
+            info.append(
+                f"**Scrollback:** {n_widgets} widgets "
+                f"(cap {MAX_SCROLLBACK_WIDGETS}) · "
+                f"ChatState {n_items} items · "
+                f"{n_panels} tool panels · follow_tail={follow}"
+            )
+        except Exception:
+            info.append("*Scrollback stats unavailable*")
+
         msg = AgentMessage()
         content.mount(msg)
         msg.append_chunk("## Agent Status\n\n" + "\n".join(info))

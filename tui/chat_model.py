@@ -239,6 +239,39 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
     return changes
 
 
+
+# Soft cap for dual-path model memory. TUI scrollback has its own widget cap;
+# keep ChatState in the same ballpark so long sessions do not retain multi-day text.
+DEFAULT_MAX_ITEMS = 500
+
+
+def prune_items(state: ChatState, max_items: int = DEFAULT_MAX_ITEMS) -> int:
+    """Drop oldest scrollback items. Returns number removed.
+
+    Rebuilds tool index map and open-stream indices so later tool_call_update
+    events still resolve. Safe to call after every apply_event.
+    """
+    if max_items <= 0 or len(state.items) <= max_items:
+        return 0
+    drop = len(state.items) - max_items
+    # Track which open streams survive
+    open_speech = state.items[state.open_speech_idx] if state.open_speech_idx is not None else None
+    open_think = state.items[state.open_thinking_idx] if state.open_thinking_idx is not None else None
+    state.items = state.items[drop:]
+    # Rebuild tool id -> index
+    state.tools = {}
+    state.open_speech_idx = None
+    state.open_thinking_idx = None
+    for i, item in enumerate(state.items):
+        if isinstance(item, ToolItem) and item.tool_id:
+            state.tools[item.tool_id] = i
+        if open_speech is not None and item is open_speech:
+            state.open_speech_idx = i
+        if open_think is not None and item is open_think:
+            state.open_thinking_idx = i
+    return drop
+
+
 def apply_events(state: ChatState, events: list[dict]) -> list[str]:
     all_c: list[str] = []
     for e in events:

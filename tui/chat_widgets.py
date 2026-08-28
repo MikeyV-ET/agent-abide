@@ -343,8 +343,12 @@ class AgentMessage(Static):
         self._text = ""
 
     def append_chunk(self, text: str):
+        # Keep a single growing string; chunk lists explode on multi-day streams
+        # and force O(n) join on every token.
         self._chunks.append(text)
-        self._text = "".join(self._chunks)
+        self._text += text
+        if len(self._chunks) > 32:
+            self._chunks = [self._text]
         # Streaming: repaint only — full layout on every chunk starves input/scroll
         self.refresh()
 
@@ -405,7 +409,9 @@ class ThinkingBlock(Static):
 
     def append_chunk(self, text: str):
         self._chunks.append(text)
-        self._text = "".join(self._chunks)
+        self._text += text
+        if len(self._chunks) > 32:
+            self._chunks = [self._text]
         self._token_estimate = len(self._text) // 4
         # Keep thinking visible; avoid layout thrash on every thought chunk
         self.refresh()

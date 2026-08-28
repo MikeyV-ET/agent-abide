@@ -62,7 +62,7 @@ from rich.console import Console as RichConsole, Group
 from ephact_parser import extract_ephacts, has_partial_ephact
 from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
 from event_coalesce import coalesce_events
-from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event, interjection_key
+from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event, interjection_key, prune_items
 from tui_env import TuiEnv
 from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme, apply_auto_if_needed, apply_theme_to_app
 from chat_widgets import (
@@ -911,6 +911,14 @@ class PersistenceScreen(ModalScreen[None]):
 # Main Application
 # =============================================================================
 
+
+# Long-run caps: Textual VerticalScroll is not virtualized. Every mounted child
+# participates in layout. Without a window, multi-day sessions grow to 1000+
+# widgets and hundreds of MB RSS, and the TUI stops responding to input.
+MAX_SCROLLBACK_WIDGETS = 400
+# Prune check cadence (every N mounts/dispatches) to avoid remove thrash.
+_PRUNE_EVERY_N = 8
+
 class AsdaaasTUI(App):
     """Full-screen TUI for asdaaas agent sessions."""
 
@@ -1336,6 +1344,12 @@ class AsdaaasTUI(App):
             return
         elif cmd == "/clear":
             content.remove_children()
+            st = self._agent_state.get(self._active_agent) or {}
+            st["tool_panels"] = {}
+            st["current_agent_msg"] = None
+            st["current_thinking"] = None
+            st["chat_state"] = ChatState()
+            st["logical_turn"] = 0
             return
         elif cmd == "/status":
             self._show_status_info(content)
@@ -3367,6 +3381,7 @@ Type anything else to send a message to the agent.
                     cs = ChatState()
                     st["chat_state"] = cs
                 apply_event(cs, event)
+                prune_items(cs)
                 # Keep logical_turn in sync for header
                 if cs.logical_turn:
                     st["logical_turn"] = cs.logical_turn
@@ -3402,6 +3417,9 @@ Type anything else to send a message to the agent.
         elif event_type == "available_commands_update":
             self._on_available_commands(update)
         # Silently ignore: git_branch_update, compaction_checkpoint
+
+        # Bound DOM growth for long-lived sessions (7d+ must stay responsive).
+        self._maybe_prune_after_mount()
 
     def _on_agent_message_chunk(self, update: dict) -> None:
         """Handle streaming agent message text."""
@@ -3887,6 +3905,68 @@ Type anything else to send a message to the agent.
         else:
             # User reading history: update data only, minimal layout cost
             widget.refresh()
+
+
+    def _prune_scrollback(self, agent: str | None = None) -> None:
+        """Drop oldest chat widgets so long-lived sessions stay responsive.
+
+        Textual's VerticalScroll lays out every child. After days of tool calls
+        and speech, the DOM hits 1000+ widgets and input freezes. Keep a fixed
+        window of recent widgets. Only runs while following the live tail so
+        a reader parked in history is not yanked.
+        """
+        agent = agent or self._active_agent
+        st = self._agent_state.get(agent)
+        if st is None or st.get("removed"):
+            return
+        # cadence
+        n = int(st.get("_prune_counter", 0)) + 1
+        st["_prune_counter"] = n
+        if n % _PRUNE_EVERY_N != 0:
+            return
+        try:
+            content = self._content_scroll(agent)
+        except NoMatches:
+            return
+        if not getattr(content, "_follow_tail", True):
+            return
+        children = list(content.children)
+        excess = len(children) - MAX_SCROLLBACK_WIDGETS
+        if excess <= 0:
+            return
+        protect = {
+            id(st.get("current_agent_msg")),
+            id(st.get("current_thinking")),
+        }
+        panels = st.get("tool_panels") or {}
+        removed = 0
+        for w in children:
+            if removed >= excess:
+                break
+            if id(w) in protect:
+                continue
+            # Never drop the very last few (visible tail)
+            if w is children[-1] or (len(children) > 1 and w is children[-2]):
+                continue
+            try:
+                tid = getattr(w, "tool_id", None)
+                if tid and tid in panels and panels.get(tid) is w:
+                    panels.pop(tid, None)
+                w.remove()
+                removed += 1
+            except Exception:
+                pass
+        if removed:
+            self._debug(
+                f"PRUNE agent={agent} removed={removed} left={len(children)-removed}"
+            )
+
+    def _maybe_prune_after_mount(self, agent: str | None = None) -> None:
+        """Call after mounting chat widgets on the live path."""
+        try:
+            self._prune_scrollback(agent)
+        except Exception:
+            pass
 
     def _scroll_to_bottom(self) -> None:
         """Scroll the content area to the bottom (only for the visible agent).

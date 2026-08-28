@@ -1,11 +1,12 @@
 """Message input bar for asdaaas TUI."""
 from __future__ import annotations
 
+from collections import deque
+
 from textual.widgets import TextArea
 from textual.events import Paste
 
 from theme import Theme
-
 
 class MessageInput(TextArea):
     """Multiline chat input. Enter sends; Ctrl+Enter / Shift+Enter / ^J insert newline.
@@ -34,7 +35,7 @@ class MessageInput(TextArea):
     def __init__(self, placeholder: str = "", **kwargs):
         super().__init__("", language=None, show_line_numbers=False, **kwargs)
         self._placeholder = placeholder
-        self._history: list[str] = []
+        self._history: deque[str] = deque(maxlen=200)
         self._history_index: int = -1
         self._draft: str = ""  # Saves current input when browsing history
         # Register underscore cursor theme

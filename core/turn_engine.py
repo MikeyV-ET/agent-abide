@@ -330,7 +330,7 @@ class TurnEngine:
 
         # Streaming thoughts
         self.gaze = read_gaze(agent_name, env=self.env)
-        st = StreamingThoughts(agent_name, self.gaze)
+        st = StreamingThoughts(agent_name, self.gaze, env=self.env)
 
         # Interjection watcher
         _ij_watcher = None
@@ -346,6 +346,12 @@ class TurnEngine:
             on_speech_chunk=st.on_chunk,
             on_tool_call=st.on_tool_call,
             cancel_event=cancel_event)
+
+        # Final speech bubble after last tool (or sole speech with no tools)
+        try:
+            st.flush()
+        except Exception as e:
+            print(f"[asdaaas] StreamingThoughts final flush failed: {e}")
 
         if _ij_watcher:
             _ij_watcher.cancel()
@@ -368,6 +374,7 @@ class TurnEngine:
         dr.speech = result.speech if result.speech else ""
         dr.thoughts = result.thoughts if hasattr(result, 'thoughts') and result.thoughts else ""
         dr.total_tokens = self.total_tokens
+        dr._speech_segments = list(getattr(st, "segments", []) or [])
         # Store extras on result for post_turn to use
         dr._timer = timer
         dr._has_bells = has_bells
@@ -509,7 +516,13 @@ class TurnEngine:
         if deliver_result.speech.strip():
             self.last_response_ts = time.time()
             self.consecutive_empty_doorbell = 0
-            write_conversation(agent_name, "assistant", deliver_result.speech, env=self.env)
+            # Segments already written during the turn (StreamingThoughts.flush).
+            # Only write the full joined speech if nothing was segmented — avoids
+            # losing the final bubble when a turn ends without a trailing tool_call
+            # flush, while avoiding a giant duplicate of all intermediate bubbles.
+            segs = getattr(deliver_result, "_speech_segments", None) or []
+            if not segs:
+                write_conversation(agent_name, "assistant", deliver_result.speech, env=self.env)
             if deliver_result.thoughts.strip():
                 write_conversation(agent_name, "thinking", deliver_result.thoughts, env=self.env)
             write_to_outbox(agent_name, deliver_result.speech.strip(),

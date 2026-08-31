@@ -117,8 +117,27 @@ for agent in "${AGENTS[@]}"; do
     if [ -n "$GROK_BINARY" ]; then
         GROK_BIN_FLAG="--grok-binary $GROK_BINARY"
     fi
-    setsid nohup python3 -u "$ASDAAAS" --agent "$agent" --session "$session" --cwd "$home" $MODEL_FLAG $GROK_BIN_FLAG > "$log_file" 2>&1 &
-    echo "$agent: PID $! (session=$session, model=${model:-default}, log=$log_file)"
+    # Prefer agents.json "user" so grok gets the citizen HOME (auth.json under ~/.grok).
+    # Glass often launches via sudo root; without this HOME=/root and turns hang (no auth).
+    agent_user=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent'].get('user',''))" 2>/dev/null || true)
+    run_cmd=(python3 -u "$ASDAAAS" --agent "$agent" --session "$session" --cwd "$home")
+    if [ -n "$MODEL_FLAG" ]; then
+        # shellcheck disable=SC2206
+        run_cmd+=($MODEL_FLAG)
+    fi
+    if [ -n "$GROK_BIN_FLAG" ]; then
+        # shellcheck disable=SC2206
+        run_cmd+=($GROK_BIN_FLAG)
+    fi
+    if [ "$(id -u)" -eq 0 ] && [ -n "$agent_user" ] && id "$agent_user" >/dev/null 2>&1; then
+        setsid nohup sudo -u "$agent_user" --preserve-env=ASDAAAS_CONFIG,ASDAAAS_DEBUG \
+            env HOME="$home" USER="$agent_user" LOGNAME="$agent_user" \
+            "${run_cmd[@]}" > "$log_file" 2>&1 &
+        echo "$agent: PID $! (user=$agent_user home=$home session=$session model=${model:-default} log=$log_file)"
+    else
+        setsid nohup env HOME="$home" "${run_cmd[@]}" > "$log_file" 2>&1 &
+        echo "$agent: PID $! (session=$session, model=${model:-default}, log=$log_file)"
+    fi
 
     if [ -n "$AGENT_NAMES_CSV" ]; then
         AGENT_NAMES_CSV="$AGENT_NAMES_CSV,$agent"
@@ -127,16 +146,26 @@ for agent in "${AGENTS[@]}"; do
     fi
 done
 
-# --wait: tail each agent's log until "Ready." appears (90s timeout)
+# --wait: until "[asdaaas] Ready." (90s timeout).
+# IMPORTANT: do not use `tail -f | while read; exit 0` — exit only kills the
+# while subshell; tail -f keeps running until timeout (~90s) even after Ready.
+# grep -m1 closes the pipe so tail gets SIGPIPE and the wait ends promptly.
 if [ "$WAIT_FOR_READY" = true ]; then
     echo ""
     for agent in "${AGENTS[@]}"; do
         log_file="$LOG_DIR/asdaaas_$(echo "$agent" | tr '[:upper:]' '[:lower:]').log"
         echo "Waiting for $agent..."
-        if timeout 90 bash -c "tail -n +1 -f '$log_file' 2>/dev/null | while IFS= read -r line; do echo \"  \$line\"; echo \"\$line\" | grep -q '\\[asdaaas\\] Ready\\.' && exit 0; done"; then
+        # Ensure log exists so tail doesn't race-exit
+        : >> "$log_file" 2>/dev/null || true
+        if timeout 90 bash -c 'tail -n +1 -f "$1" 2>/dev/null | grep -m1 --line-buffered "\[asdaaas\] Ready\."' bash "$log_file" >/dev/null; then
             echo "$agent: Ready"
         else
-            echo "$agent: Timed out after 90s (check $log_file)"
+            # Ready may already be in the file if we raced past it
+            if grep -q '\[asdaaas\] Ready\.' "$log_file" 2>/dev/null; then
+                echo "$agent: Ready"
+            else
+                echo "$agent: Timed out after 90s (check $log_file)"
+            fi
         fi
     done
 fi

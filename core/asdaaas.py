@@ -1084,11 +1084,13 @@ class StreamingThoughts:
         st.flush()  # flush any remaining chunks after response completes
     """
     
-    def __init__(self, agent_name, gaze):
+    def __init__(self, agent_name, gaze, env=None):
         self.agent_name = agent_name
-        self.thoughts_target = gaze.get("thoughts")
+        self.thoughts_target = gaze.get("thoughts") if gaze else None
+        self.env = env
         self._buffer = []
         self._chunk_count = 0
+        self.segments = []  # speech bubbles written this turn (conversation.jsonl)
     
     def on_chunk(self, text):
         """Called on each agent_message_chunk."""
@@ -1097,17 +1099,46 @@ class StreamingThoughts:
     
     def on_tool_call(self, title):
         """Called when a tool_call frame arrives -- flush accumulated speech."""
-        self.flush(f" [{title}]")
+        # Do not append tool title into conversation speech — keep bubbles clean.
+        self.flush(thoughts_suffix=f" [{title}]" if title else "")
     
-    def flush(self, suffix=""):
-        """Write accumulated chunks to thoughts outbox and clear buffer."""
-        if not self._buffer or not self.thoughts_target:
-            self._buffer.clear()
+    def flush(self, thoughts_suffix=""):
+        """Persist one speech bubble to conversation.jsonl + optional thoughts outbox.
+
+        Intermediate speech between tools used to only hit the session stream /
+        thoughts channel. Glass chat (and anything reading conversation.jsonl)
+        therefore missed bubbles that TUI showed. Write each bubble here.
+        """
+        if not self._buffer:
             return
         text = "".join(self._buffer).strip()
-        if text:
-            write_to_outbox(self.agent_name, text + suffix, self.thoughts_target, "thoughts")
         self._buffer.clear()
+        if not text:
+            return
+        self.segments.append(text)
+        try:
+            write_conversation(self.agent_name, "assistant", text, env=self.env)
+        except Exception as e:
+            print(f"[asdaaas] write_conversation(segment) failed: {e}")
+        if self.thoughts_target:
+            try:
+                write_to_outbox(
+                    self.agent_name,
+                    text + (thoughts_suffix or ""),
+                    self.thoughts_target,
+                    "thoughts",
+                    env=self.env,
+                )
+            except TypeError:
+                # older signature without env
+                write_to_outbox(
+                    self.agent_name,
+                    text + (thoughts_suffix or ""),
+                    self.thoughts_target,
+                    "thoughts",
+                )
+            except Exception as e:
+                print(f"[asdaaas] thoughts outbox segment failed: {e}")
     
     @property
     def chunk_count(self):

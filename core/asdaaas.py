@@ -550,9 +550,10 @@ def matches_gaze(msg, gaze):
     
     msg_adapter, msg_room = get_msg_room(msg)
     
-    # Operator TUI is always foreground when any gaze is active.
-    # The TUI is the operator's direct interface — never background it.
-    if msg_adapter == "tui":
+    # Operator channels are always foreground when any gaze is active.
+    # TUI and Socratic Arena are both Eric's direct interfaces — never background them
+    # into pending (that stranded SA DMs when gaze stayed on tui, e.g. Squiggy).
+    if msg_adapter in ("tui", "arena"):
         return True
     
     # Adapter must match

@@ -324,29 +324,51 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
 # ---------------------------------------------------------------------------
 # Universal conversation log
 # ---------------------------------------------------------------------------
-# Single JSONL file per agent. Backend-agnostic. Frontends read only this.
-# Schema: {"ts": ISO8601, "role": "user"|"assistant"|"thinking"|"system",
-#          "content": str, "seq": int}
+# Lean SPEECH journal / V1 (not full session flight recorder — that is updates.jsonl /
+# session_timeline / V2). Schema:
+#   {"ts", "role": user|assistant|thinking|system, "content", "seq",
+#    "session_id"?, "kind"?, "msg_id"?}
+# kind KEEP: message | interjection | speech | thinking
+# kind DROP (do not write): doorbell (ops) | prompt | speech_repair
+# Spec: docs/specs/aa_stream/
 
 _conv_seq = 0
 
-def write_conversation(agent_name, role, content, env=None):
-    """Append one line to ~/agents/<Name>/asdaaas/conversation.jsonl."""
+def write_conversation(agent_name, role, content, env=None, session_id=None,
+                       kind=None, msg_id=None):
+    """Append one V1 speech line.
+
+    Canonical: asdaaas/history/speech.jsonl
+    Dual-write (short window): asdaaas/conversation.jsonl (legacy root; not rewritten).
+    Root conversation.jsonl is never truncated or migrated by this path.
+    """
     global _conv_seq
     if not content or not content.strip():
         return
     conv_dir = agent_dir(agent_name, env=env)
     conv_dir.mkdir(parents=True, exist_ok=True)
-    path = conv_dir / "conversation.jsonl"
+    hist_dir = conv_dir / "history"
+    hist_dir.mkdir(parents=True, exist_ok=True)
     entry = {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "role": role,
         "content": content.strip(),
         "seq": _conv_seq,
     }
+    if session_id:
+        entry["session_id"] = session_id
+    if kind:
+        entry["kind"] = kind
+    if msg_id:
+        entry["msg_id"] = msg_id
     _conv_seq += 1
-    with open(path, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+    line = json.dumps(entry) + "\n"
+    # Canonical speech journal
+    with open(hist_dir / "speech.jsonl", "a") as f:
+        f.write(line)
+    # Dual-write legacy root (leave existing history intact; append only)
+    with open(conv_dir / "conversation.jsonl", "a") as f:
+        f.write(line)
 
 
 def get_compaction_instructions(agent_name, env=None):
@@ -1085,10 +1107,11 @@ class StreamingThoughts:
         st.flush()  # flush any remaining chunks after response completes
     """
     
-    def __init__(self, agent_name, gaze, env=None):
+    def __init__(self, agent_name, gaze, env=None, session_id=None):
         self.agent_name = agent_name
         self.thoughts_target = gaze.get("thoughts") if gaze else None
         self.env = env
+        self.session_id = session_id
         self._buffer = []
         self._chunk_count = 0
         self.segments = []  # speech bubbles written this turn (conversation.jsonl)
@@ -1118,7 +1141,10 @@ class StreamingThoughts:
             return
         self.segments.append(text)
         try:
-            write_conversation(self.agent_name, "assistant", text, env=self.env)
+            write_conversation(
+                self.agent_name, "assistant", text, env=self.env,
+                session_id=self.session_id, kind="speech",
+            )
         except Exception as e:
             print(f"[asdaaas] write_conversation(segment) failed: {e}")
         if self.thoughts_target:
@@ -2139,16 +2165,24 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     last_response_ts = None  # epoch timestamp of agent's last response completion
     last_was_foreground = True  # was the most recent agent activity a foreground (in-room) message?
 
-    # Initialize conversation.jsonl seq counter from existing file
+    # Initialize V1 speech seq from max(legacy conversation.jsonl, history/speech.jsonl)
     global _conv_seq
-    conv_path = agent_dir(agent_name) / "conversation.jsonl"
+    ad = agent_dir(agent_name)
+    conv_path = ad / "conversation.jsonl"
+    speech_path = ad / "history" / "speech.jsonl"
+    n_legacy = 0
+    n_speech = 0
     if conv_path.exists():
         with open(conv_path) as f:
-            _conv_seq = sum(1 for _ in f)
-        print(f"[asdaaas] Conversation log: {_conv_seq} existing entries")
-    else:
-        _conv_seq = 0
-        print(f"[asdaaas] Conversation log: new file")
+            n_legacy = sum(1 for _ in f)
+    if speech_path.exists():
+        with open(speech_path) as f:
+            n_speech = sum(1 for _ in f)
+    _conv_seq = max(n_legacy, n_speech)
+    print(
+        f"[asdaaas] V1 speech seq={_conv_seq} "
+        f"(legacy_conversation={n_legacy} history_speech={n_speech})"
+    )
 
     # Expose model/session/backend to module-level for health writes
     global _current_model_id, _current_session_id, _current_backend_type
@@ -2274,6 +2308,14 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     last_delivered_bell_ids = set()  # bells delivered on previous iteration — skip on next poll (issue_0039)
 
     # ---- Main loop ----
+    # aa.stream continuous hot tail (opt-in per agent history/config.json)
+    try:
+        from full_stream_hook import start_background_tailer
+        if start_background_tailer(agent_name, env=env, session_id=session_id):
+            print(f"[asdaaas] history background tailer enabled for {agent_name}")
+    except Exception as e:
+        print(f"[asdaaas] history background tailer failed to start: {e}")
+
     while True:
         try:
             # ---- Graceful shutdown check ----

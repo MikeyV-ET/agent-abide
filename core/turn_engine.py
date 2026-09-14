@@ -121,6 +121,12 @@ class TurnEngine:
         """Per-agent asdaaas directory (honors agents.json home)."""
         return self.env.agent_asdaaas_dir(self.agent_name)
 
+
+    def _conv_session_id(self):
+        """Backend session uuid for conversation.jsonl join to session_timeline."""
+        b = self.backend
+        return getattr(b, "session_id", None) or getattr(b, "_session_id", None)
+
     async def gather_pending(self) -> GatherResult:
         """Gather all pending doorbells, messages, and commands.
 
@@ -273,6 +279,10 @@ class TurnEngine:
             prompt_parts.extend(bell_lines)
             print(f"[asdaaas] Doorbells ({len(bells)}): {[b.get('id', '?') for b in bells]}")
 
+        # Rows for V1 history/speech.jsonl (dual-write conversation.jsonl), built alongside prompt.
+        # Keep: message (incl. midturn flag), interjection. Drop: ops doorbells, prompt.
+        conv_user_rows = []  # list of dicts: content, kind, msg_id
+
         if in_room_msgs:
             obs_midturn = self.read_observer_state()
             for msg in in_room_msgs:
@@ -294,7 +304,15 @@ class TurnEngine:
                         msg, self.last_response_ts, self.last_was_foreground,
                         self.backend.last_activity_ts)
                 flag = _midturn_flag(msg) if midturn else ""
-                prompt_parts.append(f"<{sender} (via {adapter}){flag}> {text}")
+                line = f"<{sender} (via {adapter}){flag}> {text}"
+                prompt_parts.append(line)
+                # V1: full attributed line so midturn flag is preserved (not raw text only)
+                if text:
+                    conv_user_rows.append({
+                        "content": line,
+                        "kind": "message",
+                        "msg_id": msg.get("id"),
+                    })
 
         if not prompt_parts:
             return None
@@ -326,11 +344,27 @@ class TurnEngine:
                      f"processing {'coalesced' if has_bells and has_msgs else 'doorbells' if has_bells else 'prompt'}"
                      f" ({len(prompt_parts)} items)", self.total_tokens, self.context_window, env=self.env)
         msg_handle = await self.backend.send_prompt(prompt_text)
-        write_conversation(agent_name, "user", prompt_text, env=self.env)
+        # V1 speech journal (history/speech.jsonl + dual-write conversation.jsonl):
+        #   KEEP  message (with midturn flag in content), interjection, speech, thinking
+        #   DROP  ops doorbell (continue/clock/…), assembled prompt, speech_repair
+        # Interjections queued mid-turn are written at queue time (interjection_watcher).
+        # Leftover interjection doorbells are written here if not already logged.
+        sid = self._conv_session_id()
+        for row in conv_user_rows:
+            write_conversation(
+                agent_name, "user", row["content"], env=self.env,
+                session_id=sid, kind=row["kind"], msg_id=row.get("msg_id"),
+            )
+        # Ops doorbells (continue/clock/remind/…): never V1.
+        # Interjection leftovers re-queued as doorbells: already written to V1
+        # at queue time in interjection_watcher — do not duplicate here.
 
         # Streaming thoughts
         self.gaze = read_gaze(agent_name, env=self.env)
-        st = StreamingThoughts(agent_name, self.gaze, env=self.env)
+        st = StreamingThoughts(
+            agent_name, self.gaze, env=self.env,
+            session_id=self._conv_session_id(),
+        )
 
         # Interjection watcher
         _ij_watcher = None
@@ -382,6 +416,16 @@ class TurnEngine:
         dr._bells = bells
         dr._in_room_msgs = in_room_msgs
         dr._prompt_text = prompt_text
+
+        # Per-agent aa.stream hot tail (opt-in via history/config.json)
+        try:
+            from full_stream_hook import maybe_tail_grok_after_turn
+            maybe_tail_grok_after_turn(
+                agent_name, env=self.env,
+                session_id=self._conv_session_id() if hasattr(self, "_conv_session_id") else None,
+            )
+        except Exception as e:
+            print(f"[asdaaas] history_hook failed: {e}")
 
         return dr
 
@@ -521,10 +565,30 @@ class TurnEngine:
             # losing the final bubble when a turn ends without a trailing tool_call
             # flush, while avoiding a giant duplicate of all intermediate bubbles.
             segs = getattr(deliver_result, "_speech_segments", None) or []
+            sid = self._conv_session_id()
+            full = (deliver_result.speech or "").strip()
+            joined = "".join(segs).strip() if segs else ""
             if not segs:
-                write_conversation(agent_name, "assistant", deliver_result.speech, env=self.env)
+                # No tool-boundary bubbles — write the full turn speech once.
+                if full:
+                    write_conversation(
+                        agent_name, "assistant", full, env=self.env,
+                        session_id=sid, kind="speech",
+                    )
+            elif full and full != joined:
+                # Segments flushed during turn, but full speech differs (lost
+                # bubble / ordering). Do NOT write speech_repair into V1 — that
+                # duplicated plumbing. Segments already cover speech; full stream
+                # (V2/updates) remains authoritative for exact join.
+                print(
+                    f"[asdaaas] speech/segments mismatch "
+                    f"(full={len(full)} joined={len(joined)}); not writing speech_repair to V1"
+                )
             if deliver_result.thoughts.strip():
-                write_conversation(agent_name, "thinking", deliver_result.thoughts, env=self.env)
+                write_conversation(
+                    agent_name, "thinking", deliver_result.thoughts, env=self.env,
+                    session_id=sid, kind="thinking",
+                )
             write_to_outbox(agent_name, deliver_result.speech.strip(),
                            self.gaze.get("speech"), "speech", env=self.env)
             timer.mark("outbox_done")

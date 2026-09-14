@@ -111,6 +111,18 @@ async def interjection_watcher(agent_name: str, poll_fn, poll_interval: float = 
                 for msg in msgs:
                     text = format_message_for_interjection(msg)
                     queue_interjection(agent_name, text, env=env)
+                    # V1: log interjection when human text arrives mid-turn
+                    try:
+                        from asdaaas import write_conversation
+                        import asdaaas as _asdaaas_mod
+                        sid = getattr(_asdaaas_mod, "_current_session_id", None)
+                        write_conversation(
+                            agent_name, "user", text, env=env,
+                            session_id=sid, kind="interjection",
+                            msg_id=msg.get("id"),
+                        )
+                    except Exception as e:
+                        print(f"[asdaaas] write_conversation(interjection) failed: {e}")
                     print(f"[asdaaas] interjection queued for {agent_name}: {msg.get('from', '?')} via {msg.get('adapter', '?')}")
             except Exception as e:
                 print(f"[asdaaas] interjection_watcher error (continuing): {e}")

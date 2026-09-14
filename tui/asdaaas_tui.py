@@ -1058,6 +1058,8 @@ class AsdaaasTUI(App):
                 "earliest_offset": 0,  # File offset of earliest loaded event
                 "updates_path": None,  # Cached path to updates.jsonl
                 "loading_history": False,  # Prevents concurrent loads
+                "scroll_y": 0.0,  # Per-tab scroll position
+                "follow_tail": True,  # Per-tab live-tail pin
                 "input_draft": "",  # Saved input text when switching tabs
                 "backend": Config.agent_backend(agent),  # "grok" or "claude"
                 "logical_turn": 0,  # Logical turn counter (user_message_chunk events)
@@ -2005,12 +2007,31 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
-        # Scroll to bottom on tab switch and re-enable following
+        # Preserve each tab's scroll position (do not yank reader to tail/home).
         try:
+            old_st = self._agent_state.get(old_agent)
+            if old_st is not None:
+                try:
+                    old_scroll = self.query_one(f"#content-{old_agent}", ContentScroll)
+                    old_st["scroll_y"] = float(getattr(old_scroll, "scroll_y", 0) or 0)
+                    old_st["follow_tail"] = bool(getattr(old_scroll, "_follow_tail", True))
+                except Exception:
+                    pass
             new_scroll = self._content_scroll()
-            new_scroll._follow_tail = True
-            new_scroll.scroll_end(animate=False)
-            self.set_timer(0.3, lambda: new_scroll.scroll_end(animate=False))
+            new_st = self._agent_state.get(agent_name) or {}
+            follow = new_st.get("follow_tail")
+            if follow is None:
+                follow = True
+            new_scroll._follow_tail = bool(follow)
+            if new_scroll._follow_tail:
+                new_scroll.scroll_end(animate=False)
+                self.set_timer(0.3, lambda s=new_scroll: s.scroll_end(animate=False))
+            else:
+                y = float(new_st.get("scroll_y") or 0)
+                new_scroll.scroll_to(y=y, animate=False)
+                self.set_timer(
+                    0.3, lambda s=new_scroll, yy=y: s.scroll_to(y=yy, animate=False)
+                )
         except NoMatches:
             pass
 
@@ -2037,6 +2058,8 @@ Type anything else to send a message to the agent.
             "earliest_offset": 0,
             "updates_path": None,
             "loading_history": False,
+            "scroll_y": 0.0,
+            "follow_tail": True,
             "input_draft": "",
             "backend": Config.agent_backend(agent),
             "logical_turn": 0,
@@ -2152,6 +2175,10 @@ Type anything else to send a message to the agent.
         if not self._room_active:
             try:
                 current_scroll = self._content_scroll()
+                st = self._agent_state.get(self._active_agent)
+                if st is not None:
+                    st["scroll_y"] = float(getattr(current_scroll, "scroll_y", 0) or 0)
+                    st["follow_tail"] = bool(getattr(current_scroll, "_follow_tail", True))
                 current_scroll.display = False
             except NoMatches:
                 pass
@@ -3748,34 +3775,83 @@ Type anything else to send a message to the agent.
             return
 
         state["loading_history"] = True
-        batch_size = 25  # Events per scroll-up load (1 was too sparse for large sessions)
+        # updates.jsonl is ground truth. Huge single-line tool_call events mean
+        # "last 25 lines of 500KB" can jump days (Sep 3 -> Aug 28). Walk further
+        # back until we have enough speech events (user/assistant/thought).
+        speech_target = 40
+        max_bytes = 8 * 1024 * 1024  # 8 MiB ceiling per PageUp
+        max_tool_panels = 8
 
         try:
-            # Read backwards from earliest_offset
-            read_size = min(state["earliest_offset"], 500000)
-            seek_pos = state["earliest_offset"] - read_size
+            content = self._content_scroll(agent_name)
+            first_child = content.children[0] if content.children else None
+            widgets_to_prepend = []
+            speech_n = 0
+            tool_n = 0
+            new_earliest = state["earliest_offset"]
+            bytes_read = 0
+            cursor = state["earliest_offset"]
+            collected = []  # (line_start_offset, line_str)
 
-            with open(updates_path, "r", errors="replace") as f:
-                f.seek(seek_pos)
-                if seek_pos > 0:
-                    f.readline()  # skip partial line
-                data_start = f.tell()
-                chunk = f.read(state["earliest_offset"] - data_start)
+            while cursor > 0 and speech_n < speech_target and bytes_read < max_bytes:
+                read_size = min(cursor, 1024 * 1024)  # 1 MiB steps
+                seek_pos = cursor - read_size
+                with open(updates_path, "r", errors="replace") as f:
+                    f.seek(seek_pos)
+                    if seek_pos > 0:
+                        f.readline()  # skip partial line
+                    data_start = f.tell()
+                    chunk = f.read(cursor - data_start)
+                bytes_read += len(chunk)
+                # Pair each complete line with its absolute file offset
+                batch = []
+                pos = data_start
+                parts = chunk.split("\n")
+                for i, l in enumerate(parts):
+                    line_start = pos
+                    pos += len(l) + (1 if i < len(parts) - 1 else 0)
+                    if not l.strip():
+                        continue
+                    if line_start >= state["earliest_offset"]:
+                        continue
+                    batch.append((line_start, l))
+                # Newest -> oldest within chunk
+                for line_start, line in reversed(batch):
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    update = (event.get("params") or {}).get("update") or {}
+                    et = update.get("sessionUpdate", "")
+                    if et in (
+                        "user_message_chunk",
+                        "agent_message_chunk",
+                        "agent_thought_chunk",
+                    ):
+                        c = update.get("content") or {}
+                        text = c.get("text", "") if isinstance(c, dict) else ""
+                        if not str(text).strip():
+                            continue
+                        collected.append((line_start, line))
+                        speech_n += 1
+                        new_earliest = line_start
+                        if speech_n >= speech_target:
+                            break
+                    elif et in ("tool_call", "tool_call_update") and tool_n < max_tool_panels:
+                        collected.append((line_start, line))
+                        tool_n += 1
+                        new_earliest = min(new_earliest, line_start)
+                cursor = data_start
+                if data_start <= 0:
+                    new_earliest = 0
+                    break
 
-            all_lines = [l for l in chunk.strip().split("\n") if l.strip()]
-            lines = all_lines[-batch_size:]
+            collected.sort(key=lambda t: t[0])  # oldest first for prepend
+            state["earliest_offset"] = max(0, int(new_earliest))
+            lines = [t[1] for t in collected]
 
             if lines:
-                # Calculate new earliest offset
-                skipped = all_lines[:-batch_size] if len(all_lines) > batch_size else []
-                skipped_chars = sum(len(l) + 1 for l in skipped)
-                state["earliest_offset"] = data_start + skipped_chars
-
-                content = self._content_scroll(agent_name)
-                first_child = content.children[0] if content.children else None
-
                 # Build widgets directly instead of using _dispatch_event
-                widgets_to_prepend = []
                 for line in lines:
                     try:
                         event = json.loads(line)

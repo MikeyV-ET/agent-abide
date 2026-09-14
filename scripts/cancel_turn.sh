@@ -21,10 +21,17 @@ fi
 AGENT="$1"
 
 # Resolve agent home from agents.json (nested homes OK)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Config resolution (both prod and dev trees):
+#   1. ASDAAAS_CONFIG env (dir containing agents.json, or path to the file)
+#   2. repo-local agents.json (gitignored override next to this checkout)
+#   3. ~/agents/config/agents.json  ← machine-canonical roster
 if [ -n "${ASDAAAS_CONFIG:-}" ] && [ -d "$ASDAAAS_CONFIG" ]; then
     CONFIG="$ASDAAAS_CONFIG/agents.json"
 elif [ -n "${ASDAAAS_CONFIG:-}" ] && [ -f "$ASDAAAS_CONFIG" ]; then
     CONFIG="$ASDAAAS_CONFIG"
+elif [ -f "$SCRIPT_DIR/../agents.json" ]; then
+    CONFIG="$SCRIPT_DIR/../agents.json"
 else
     CONFIG="${HOME}/agents/config/agents.json"
 fi

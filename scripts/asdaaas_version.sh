@@ -9,10 +9,13 @@
 
 set -euo pipefail
 
+# Config: ASDAAAS_CONFIG → repo-local → ~/agents/config/agents.json
 if [ -n "${ASDAAAS_CONFIG:-}" ] && [ -d "$ASDAAAS_CONFIG" ]; then
     CONFIG="$ASDAAAS_CONFIG/agents.json"
 elif [ -n "${ASDAAAS_CONFIG:-}" ] && [ -f "$ASDAAAS_CONFIG" ]; then
     CONFIG="$ASDAAAS_CONFIG"
+elif [ -f "${SCRIPT_DIR:-.}/../agents.json" ]; then
+    CONFIG="${SCRIPT_DIR:-.}/../agents.json"
 else
     CONFIG="${HOME}/agents/config/agents.json"
 fi

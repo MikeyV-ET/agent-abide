@@ -5,7 +5,7 @@ Same pattern as stream history: **native → normalize → common machine**.
 ```text
 Grok updates.jsonl  ── map_grok_updates_frame ──┐
                                                  ├→ ActivityEvent → BinaryActivityMachine → state file
-Claude session.jsonl ─ map_claude_session_line ─┘
+Claude session.jsonl ─ map_claude_session_lines ─┘  (list; end_turn co-emitted)
 ```
 
 ## Layout (`core/binary_state/`)
@@ -56,3 +56,12 @@ Facade: `core/binary_state_observer.py` re-exports; `BinaryStateObserver` ≡ gr
 | chrome (attachment, …) | `None` (skip) |
 
 Wire into `ClaudeBackend` later (not required for mapper PR).
+
+
+## Claude mapper landed (Astro, b9817f5)
+
+- Real API: ``map_claude_session_lines(obj) -> list[ActivityEvent]``
+- Singular ``map_claude_session_line`` returns first or None (convenience)
+- Why list: no turn_completed; ``stop_reason=="end_turn"`` co-emits TURN_END with last SPEECH
+- Chrome types → skip (not UNKNOWN)
+- ``message.model`` → MODEL_INFO on change

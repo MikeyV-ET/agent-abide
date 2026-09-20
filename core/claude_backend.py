@@ -27,6 +27,26 @@ from agent_backend import AgentBackend, ResponseResult
 # Max NDJSON frame size we will accept on stdout (asyncio default is 64 KiB).
 STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 
+# How far back in the transcript to look for the last usage-bearing line.
+SEED_SCAN_BYTES = 2 * 1024 * 1024
+
+
+def _occupancy_from_usage(usage) -> int:
+    """Tokens sitting in context for ONE request, from its usage block.
+
+    Anthropic partitions the prompt into uncached + cache_read + cache_create;
+    the sum plus this request's output is what occupies the window. This is a
+    per-request figure — never add two of them together.
+    """
+    if not isinstance(usage, dict):
+        return 0
+    return (
+        usage.get("input_tokens", 0)
+        + usage.get("cache_read_input_tokens", 0)
+        + usage.get("cache_creation_input_tokens", 0)
+        + usage.get("output_tokens", 0)
+    )
+
 
 class ClaudeBackend(AgentBackend):
     """AgentBackend implementation for Claude Code CLI.
@@ -290,8 +310,14 @@ class ClaudeBackend(AgentBackend):
                 # After the turn, occupancy ≈ prompt + this output.
                 # Never clobber a known occupancy with 0 (result frames sometimes
                 # omit usage → totalTokens=0 → empty context_left + crap TUI %).
+                #
+                # The result frame's usage is an AGGREGATE over every request the
+                # turn made, so it overstates occupancy by roughly the number of
+                # tool calls. Per-message occupancy from _process_frame is the
+                # truthful figure; only fall back to this when no message in the
+                # turn carried usage.
                 occupancy = prompt_tokens + turn_output
-                if occupancy > 0:
+                if self._total_tokens <= 0 and occupancy > 0:
                     self._total_tokens = occupancy
 
                 # Extract context window from modelUsage if available
@@ -365,15 +391,15 @@ class ClaudeBackend(AgentBackend):
                     if on_tool_call and tool_name:
                         on_tool_call(tool_name)
 
-            usage = message.get("usage", {})
-            if usage and on_meta:
-                turn_input = usage.get("input_tokens", 0)
-                turn_output = usage.get("output_tokens", 0)
-                cache_read = usage.get("cache_read_input_tokens", 0)
-                cache_create = usage.get("cache_creation_input_tokens", 0)
-                turn_total = turn_input + turn_output + cache_read + cache_create
-                if turn_total > 0:
-                    on_meta(self._total_tokens + turn_total)
+            # Each assistant message is one API request, and its usage already
+            # describes the WHOLE context that request carried. Adding requests
+            # together counts the same tokens once per tool call — measured on a
+            # live transcript, a 29-request turn summed to 22x its occupancy.
+            occupancy = _occupancy_from_usage(message.get("usage"))
+            if occupancy > 0:
+                self._total_tokens = occupancy
+                if on_meta:
+                    on_meta(occupancy)
 
         elif frame_type == "stream_event":
             event = frame.get("event", {})
@@ -396,6 +422,49 @@ class ClaudeBackend(AgentBackend):
 
         # rate_limit_event, user echo, etc. -- skip silently
 
+    def _seed_tokens_from_session(self, session_file: str = None) -> int:
+        """Recover occupancy from the transcript when the count is cold.
+
+        _total_tokens is per-process, so after a restart it is 0 — and
+        context_left_tag() returns an empty string on 0, so the agent gets no
+        telemetry line at all until the first turn completes. The last assistant
+        line in the session jsonl already knows the answer. Mirrors
+        GrokBackend._seed_tokens_from_session, whose source is updates.jsonl.
+
+        Never lowers a live count; returns the occupancy in effect afterwards.
+        """
+        if self._total_tokens > 0:
+            return self._total_tokens
+
+        path = session_file or self.session_file
+        if not path or not os.path.exists(path):
+            return self._total_tokens
+
+        try:
+            with open(path, "rb") as f:
+                size = f.seek(0, os.SEEK_END)
+                f.seek(max(0, size - SEED_SCAN_BYTES))
+                chunk = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return self._total_tokens
+
+        for line in reversed(chunk.split("\n")):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # truncated head of the scan window, or a partial write
+            if obj.get("type") != "assistant":
+                continue
+            occupancy = _occupancy_from_usage((obj.get("message") or {}).get("usage"))
+            if occupancy > 0:
+                self._total_tokens = occupancy
+                return occupancy
+
+        return self._total_tokens
+
     def refresh_tokens(self) -> int:
         """Return current token occupancy; also catch up hot.jsonl.
 
@@ -407,6 +476,13 @@ class ClaudeBackend(AgentBackend):
             self.sync_hot_stream()
         except Exception:
             pass
+        if self._total_tokens <= 0:
+            # Cold after a restart — recover from the transcript rather than
+            # reporting 0, which suppresses the context_left tag entirely.
+            try:
+                self._seed_tokens_from_session()
+            except Exception:
+                pass
         return self._total_tokens
 
     async def drain_stale(self) -> tuple[int, str]:

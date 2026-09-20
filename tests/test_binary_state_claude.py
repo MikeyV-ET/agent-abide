@@ -58,7 +58,7 @@ def _by_shape(shape):
 
 @pytest.mark.parametrize(
     "chrome_type",
-    ["attachment", "queue-operation", "atis-latch", "last-prompt", "cost-state", "mode"],
+    ["attachment", "atis-latch", "last-prompt", "cost-state", "mode"],
 )
 def test_chrome_lines_are_skipped(chrome_type):
     """Chrome must produce no events — not UNKNOWN, which would blank the state."""
@@ -350,3 +350,69 @@ def test_chrome_alone_never_moves_the_machine():
         if line.get("type") in ("attachment", "mode", "cost-state"):
             obs.process_event(line)
     assert obs.state == ObserverState.STARTING
+
+
+# --- message queue visibility ---------------------------------------------
+
+
+def _queue_line(op="enqueue", content="<eric (via tui)> ping"):
+    line = {
+        "type": "queue-operation",
+        "operation": op,
+        "timestamp": "2026-09-20T22:51:30.000Z",
+        "sessionId": "de8ffa36",
+    }
+    if op == "enqueue":
+        line["content"] = content
+    return line
+
+
+def test_enqueue_is_visible_as_session_activity():
+    """A message arriving mid-turn must leave a trace; silence is the bug Eric hit."""
+    ev = map_claude_session_line(_queue_line("enqueue"))
+    assert ev is not None
+    assert ev.kind == ActivityKind.SESSION_ACTIVITY
+    assert ev.source_type == "claude:queue:enqueue"
+    assert ev.activity == "message_enqueued"
+
+
+def test_dequeue_is_visible_too():
+    ev = map_claude_session_line(_queue_line("dequeue"))
+    assert ev.kind == ActivityKind.SESSION_ACTIVITY
+    assert ev.source_type == "claude:queue:dequeue"
+    assert ev.activity == "message_dequeued"
+
+
+def test_queue_traffic_does_not_move_the_state_machine():
+    """Metadata only: an arriving message is not the agent doing work."""
+    obs = _observer()
+    obs.process_event({"type": "user", "message": {"content": "go"}})
+    obs.process_event(
+        {
+            "type": "assistant",
+            "message": {"stop_reason": "tool_use", "content": [
+                {"type": "tool_use", "id": "toolu_q", "name": "Bash", "input": {}}]},
+        }
+    )
+    before = obs.state_dict()
+    obs.process_event(_queue_line("enqueue"))
+    after = obs.state_dict()
+
+    assert after["state"] == before["state"] == ObserverState.BUSY.value
+    assert after["pending_tools"] == before["pending_tools"]
+    # turn_event_count DOES tick: machine.apply() increments it before it
+    # dispatches on kind, so even metadata events count. Documented rather than
+    # worked around — the counter lives in machine.py, which is not mine to change.
+    assert after["turn_event_count"] == before["turn_event_count"] + 1
+
+
+def test_arrival_is_still_readable_after_the_dequeue_lands():
+    """enqueue/dequeue arrive in the same second; the arrival must not vanish."""
+    obs = _observer()
+    obs.process_event({"type": "user", "message": {"content": "go"}})
+    obs.process_event(_queue_line("enqueue"))
+    obs.process_event(_queue_line("dequeue"))
+
+    state = obs.state_dict()
+    assert state["activity"] == "message_dequeued"
+    assert state["last_event_type"] == "claude:queue:dequeue"

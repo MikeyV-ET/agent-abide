@@ -44,7 +44,6 @@ from binary_state.types import (
 CHROME_TYPES = frozenset(
     {
         "attachment",
-        "queue-operation",
         "atis-latch",
         "last-prompt",
         "cost-state",
@@ -146,6 +145,8 @@ def map_claude_session_lines(
     silence_windows = silence_windows or {}
     ts = _ts(obj)
 
+    if line_type == "queue-operation":
+        return _map_queue_operation(obj, ts)
     if line_type == "user":
         return _map_user(obj, ts)
     if line_type == "assistant":
@@ -183,6 +184,29 @@ def map_claude_session_line(
         default_silence=default_silence,
     )
     return events[0] if events else None
+
+
+def _map_queue_operation(obj: dict, ts: float) -> list[ActivityEvent]:
+    """A message landing in (or leaving) Claude Code's own message queue.
+
+    This is the only record that something arrived while a turn was running —
+    without it a mid-turn message is invisible to asdaaas and to the TUI, which
+    is exactly the silence that made interjections look broken.
+
+    SESSION_ACTIVITY deliberately: an arriving message is news about the
+    session, not the agent doing work, so the machine records it without
+    touching BUSY/IDLE, pending tools, or the silence window.
+    """
+    op = obj.get("operation") or "unknown"
+    return [
+        ActivityEvent(
+            kind=ActivityKind.SESSION_ACTIVITY,
+            source_type=f"claude:queue:{op}",
+            ts=ts,
+            activity=f"message_{op}d" if op in ("enqueue", "dequeue") else f"queue_{op}",
+            native=obj,
+        )
+    ]
 
 
 def _map_user(obj: dict, ts: float) -> list[ActivityEvent]:

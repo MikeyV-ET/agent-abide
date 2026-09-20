@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # tui_adapter.py — Textual-based TUI for asdaaas agent sessions
 # Phase 1: Full-screen development interface matching grok TUI experience
-# Routes through asdaaas adapter pattern (inbox/outbox + updates.jsonl tailing)
+# Routes through asdaaas adapter pattern (inbox/outbox).
+# Display SoR (cutover): prefer asdaaas/history/hot.jsonl (aa.stream);
+# legacy: updates.jsonl. See docs/howto/tui_history_cutover.md
 #
 # Architecture:
 #   Input:  User types → write to asdaaas TUI adapter inbox
-#   Output: Tail updates.jsonl → render events in real-time
+#   Output: Tail history/hot.jsonl (or legacy updates.jsonl) → render
 #   Status: Poll health.json/gaze.json for status bar
 #
 # Event types rendered:

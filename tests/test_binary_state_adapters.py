@@ -58,13 +58,14 @@ def test_map_grok_tool_roundtrip_machine():
     assert m.state == ObserverState.IDLE
 
 
-def test_claude_stub_exists():
+def test_claude_mapper_implemented():
+    """Implemented 2026-09-20; full coverage in test_binary_state_claude.py."""
     ev = map_claude_session_line({"type": "user", "message": {"content": "hi"}})
     assert ev is not None
-    assert ev.kind == ActivityKind.UNKNOWN  # stub until Opus implements
+    assert ev.kind == ActivityKind.TURN_START
     obs = ClaudeBinaryStateObserver(pid=1, process_alive_fn=lambda p: True)
     obs.process_event({"type": "user", "message": {"content": "hi"}})
-    assert obs.state == ObserverState.UNKNOWN
+    assert obs.state == ObserverState.BUSY
 
 
 def test_legacy_alias():

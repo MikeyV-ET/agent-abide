@@ -273,7 +273,7 @@ class GrokBackend(AgentBackend):
                     elif "id" in frame and method:
                         print(f"[grok_backend] unhandled request: method={method} id={frame['id']} params={json.dumps(frame.get('params', {}))[:300]}")
                     # Forward all stdout frames to observer for state tracking
-                    if self._observer and method:
+                    if getattr(self, "_observer", None) and method:
                         try:
                             self._observer.process_stdout_event(frame)
                         except Exception:

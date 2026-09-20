@@ -835,7 +835,9 @@ class GrokBackend(AgentBackend):
         Safe to call often (checkpointed). Shares sources/grok.json with any
         legacy full_stream_hook so the two cannot double-append.
         """
-        if not self._hot_ingest or not self._agent_home or not self._agent_name:
+        if not getattr(self, "_hot_ingest", False):
+            return {"status": "skipped", "reason": "hot ingest not configured"}
+        if not getattr(self, "_agent_home", None) or not getattr(self, "_agent_name", None):
             return {"status": "skipped", "reason": "hot ingest not configured"}
         try:
             from stream_adapters.grok import tail_grok_once
@@ -861,10 +863,12 @@ class GrokBackend(AgentBackend):
 
     def _maybe_sync_hot_after_frames(self, n_frames: int) -> None:
         """During live collect, keep hot.jsonl caught up for TUI/SA readers."""
-        if not self._hot_ingest or n_frames <= 0:
+        # Tests often construct via __new__ without __init__ — be defensive.
+        if not getattr(self, "_hot_ingest", False) or n_frames <= 0:
             return
-        self._hot_frames_since_sync += n_frames
-        if self._hot_frames_since_sync >= max(1, self._hot_sync_every_n_frames):
+        self._hot_frames_since_sync = getattr(self, "_hot_frames_since_sync", 0) + n_frames
+        every = max(1, getattr(self, "_hot_sync_every_n_frames", 1))
+        if self._hot_frames_since_sync >= every:
             self._hot_frames_since_sync = 0
             self.sync_hot_stream()
 

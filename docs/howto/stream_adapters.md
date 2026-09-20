@@ -1,5 +1,16 @@
 # Stream adapters (backend → aa.stream)
 
+## Backend ownership (locked)
+
+Acquisition + normalization are **owned by AA backends**:
+
+- `GrokBackend.configure_aa_history` + `sync_hot_stream` → `stream_adapters.grok.tail_grok_once`
+- `ClaudeBackend` (same pattern when wired) → `stream_adapters.claude.tail_claude_once`
+- `aa_stream.append_hot_events` — common writer only
+- `full_stream_hook` — optional sidecar if `history/config.json` `owner=hook`
+
+# Stream adapters (backend → aa.stream)
+
 ## Partition
 ```text
 grok binary updates.jsonl

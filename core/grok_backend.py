@@ -118,6 +118,12 @@ class GrokBackend(AgentBackend):
         self._context_window: int = 200000
         self._last_activity_ts: float = 0.0  # epoch ts of most recent updates.jsonl frame
         self._pending_tool_calls: set[str] = set()  # toolCallIds with no completed update yet
+        # AA history: this backend owns native→aa.stream→hot acquisition
+        self._agent_home: Optional[Path] = None
+        self._agent_name: Optional[str] = None
+        self._hot_ingest: bool = False
+        self._hot_sync_every_n_frames: int = 1  # sync after each non-empty batch
+        self._hot_frames_since_sync: int = 0
         self._delivery_confirmed: bool = False  # set True when user_message_chunk received
         self._rpc_id: int = 0
         self._grok_sessions_dir = grok_sessions_dir or Path.home() / ".grok" / "sessions"
@@ -746,6 +752,9 @@ class GrokBackend(AgentBackend):
                     if on_meta:
                         on_meta(self._total_tokens)
 
+        # Backend-owned aa.stream ingest (native updates → hot.jsonl)
+        self._maybe_sync_hot_after_frames(len(frames))
+
     def _seed_tokens_from_session(self) -> None:
         """Prime _total_tokens from updates.jsonl after session/load.
 
@@ -797,6 +806,68 @@ class GrokBackend(AgentBackend):
         except Exception as e:
             print(f"[grok_backend] WARN: token seed failed: {e}")
 
+
+    def configure_aa_history(
+        self,
+        agent_home: Path | str,
+        agent_name: str,
+        *,
+        enabled: bool = True,
+    ) -> None:
+        """Enable AA hot.jsonl ingest owned by this backend.
+
+        Acquisition: grok updates.jsonl (session dir or live finder).
+        Normalization: stream_adapters.grok (map/wrap → aa.stream).
+        Write: aa_stream.append_hot_events.
+        """
+        self._agent_home = Path(agent_home)
+        self._agent_name = agent_name
+        self._hot_ingest = bool(enabled)
+
+    def sync_hot_stream(
+        self,
+        *,
+        max_lines: Optional[int] = None,
+        max_bytes: Optional[int] = None,
+    ) -> dict:
+        """Pull new native updates since checkpoint → normalize → history/hot.jsonl.
+
+        Safe to call often (checkpointed). Shares sources/grok.json with any
+        legacy full_stream_hook so the two cannot double-append.
+        """
+        if not self._hot_ingest or not self._agent_home or not self._agent_name:
+            return {"status": "skipped", "reason": "hot ingest not configured"}
+        try:
+            from stream_adapters.grok import tail_grok_once
+        except Exception as e:
+            return {"status": "error", "error": f"import stream_adapters.grok: {e}"}
+
+        source = None
+        if self._session_dir:
+            cand = Path(self._session_dir) / "updates.jsonl"
+            if cand.exists():
+                source = cand
+        try:
+            return tail_grok_once(
+                self._agent_home,
+                self._agent_name,
+                session_id=self._session_id,
+                source=source,
+                max_lines=max_lines,
+                max_bytes=max_bytes,
+            )
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def _maybe_sync_hot_after_frames(self, n_frames: int) -> None:
+        """During live collect, keep hot.jsonl caught up for TUI/SA readers."""
+        if not self._hot_ingest or n_frames <= 0:
+            return
+        self._hot_frames_since_sync += n_frames
+        if self._hot_frames_since_sync >= max(1, self._hot_sync_every_n_frames):
+            self._hot_frames_since_sync = 0
+            self.sync_hot_stream()
+
     def refresh_tokens(self) -> int:
         """Read latest from updates.jsonl to get current token count.
 
@@ -829,6 +900,10 @@ class GrokBackend(AgentBackend):
                 meta = frame.get("params", {}).get("_meta", {})
                 if meta.get("totalTokens"):
                     self._total_tokens = meta["totalTokens"]
+
+        # Between turns: catch up hot even when FileEventSource saw nothing new
+        # (e.g. hook disabled; TUI reading hot only).
+        self.sync_hot_stream()
 
         return self._total_tokens
 

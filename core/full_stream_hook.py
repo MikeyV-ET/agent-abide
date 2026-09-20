@@ -1,7 +1,12 @@
-"""Background stream tailer (orchestration).
+"""Optional sidecar stream tailer (orchestration).
 
-Normalize: ``stream_adapters.grok`` / ``claude`` → ``aa_stream.append_hot_events``.
-This file: config + path resolve + inotify/poll loop.
+**Preferred owner:** AA backends (``GrokBackend.sync_hot_stream`` /
+``ClaudeBackend.sync_hot_stream``) — acquire native session file, normalize
+via ``stream_adapters.*``, write ``aa_stream.append_hot_events``.
+
+This module is the **fallback sidecar** when ``history/config.json`` sets
+``owner: hook|sidecar``. Same adapters + checkpoints; do not run both as
+primary writers (shared checkpoint makes double-append a no-op, but wasteful).
 """
 from __future__ import annotations
 

@@ -417,15 +417,21 @@ class TurnEngine:
         dr._in_room_msgs = in_room_msgs
         dr._prompt_text = prompt_text
 
-        # Per-agent aa.stream hot tail (opt-in via history/config.json)
+        # Backend-owned aa.stream ingest (native session → hot.jsonl)
         try:
-            from full_stream_hook import maybe_tail_grok_after_turn
-            maybe_tail_grok_after_turn(
-                agent_name, env=self.env,
-                session_id=self._conv_session_id() if hasattr(self, "_conv_session_id") else None,
-            )
+            if hasattr(self.backend, "sync_hot_stream"):
+                r = self.backend.sync_hot_stream()
+                n = (r or {}).get("lines_ingested") or 0
+                if n:
+                    print(f"[asdaaas] history backend synced {n} lines → hot")
+            else:
+                from full_stream_hook import maybe_tail_grok_after_turn
+                maybe_tail_grok_after_turn(
+                    agent_name, env=self.env,
+                    session_id=self._conv_session_id() if hasattr(self, "_conv_session_id") else None,
+                )
         except Exception as e:
-            print(f"[asdaaas] history_hook failed: {e}")
+            print(f"[asdaaas] history sync failed: {e}")
 
         return dr
 

@@ -151,6 +151,15 @@ class AgentBackend(ABC):
         session API for Claude). Returns the updated total_tokens value.
         """
 
+    def sync_hot_stream(self) -> dict:
+        """Acquire native session bytes since checkpoint → aa.stream → hot.jsonl.
+
+        Backends that own history ingest override this (GrokBackend, ClaudeBackend).
+        Default is a no-op so turn control works without history config.
+        Returns a stats dict (status, lines_ingested, ...).
+        """
+        return {"status": "skipped", "reason": "backend does not ingest hot"}
+
     def pop_compaction_event(self) -> tuple[bool, 'Optional[int]', int]:
         """Return (True, tokens_after, tokens_before) if compaction was detected.
 

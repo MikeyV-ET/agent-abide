@@ -2048,6 +2048,30 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 backend = GrokBackend()
             print(f"[asdaaas] Backend: grok")
 
+    # ---- AA history: backend owns native→aa.stream→hot ----
+    use_hook = False
+    try:
+        from full_stream_hook import load_full_stream_config, _stream_tail_enabled
+        hist_cfg = load_full_stream_config(agent_name, env=None) or {}
+        hot_on = _stream_tail_enabled(hist_cfg)
+        owner = (hist_cfg.get("owner") or "backend").lower()
+        if hot_on and hasattr(backend, "configure_aa_history"):
+            home = Path(agent_cwd) if agent_cwd else Path.home() / "agents" / agent_name
+            backend.configure_aa_history(home, agent_name, enabled=True)
+            print(
+                f"[asdaaas] history ingest: backend-owned "
+                f"({type(backend).__name__}.sync_hot_stream) owner={owner}"
+            )
+            # Sidecar only if explicitly requested
+            use_hook = owner in ("hook", "sidecar", "full_stream_hook")
+        elif hot_on:
+            # Backend cannot ingest yet (e.g. Claude before wire-up) → sidecar
+            use_hook = True
+            print(f"[asdaaas] history ingest: sidecar hook (backend has no configure_aa_history)")
+    except Exception as e:
+        print(f"[asdaaas] history backend configure failed: {e}")
+        use_hook = False
+
     # ---- Permission config ----
     agent_yolo = config.agent_yolo(agent_name)
     agent_mentor = config.agent_mentor(agent_name)
@@ -2308,13 +2332,17 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     last_delivered_bell_ids = set()  # bells delivered on previous iteration — skip on next poll (issue_0039)
 
     # ---- Main loop ----
-    # aa.stream continuous hot tail (opt-in per agent history/config.json)
+    # aa.stream hot: default owner=backend (GrokBackend/ClaudeBackend.sync_hot_stream).
+    # Sidecar full_stream_hook only if history/config.json owner=hook|sidecar.
     try:
-        from full_stream_hook import start_background_tailer
-        if start_background_tailer(agent_name, env=env, session_id=session_id):
-            print(f"[asdaaas] history background tailer enabled for {agent_name}")
+        if locals().get("use_hook"):
+            from full_stream_hook import start_background_tailer
+            if start_background_tailer(agent_name, env=env, session_id=session_id):
+                print(f"[asdaaas] history sidecar hook enabled for {agent_name}")
+        else:
+            print(f"[asdaaas] history sidecar hook off (backend-owned ingest)")
     except Exception as e:
-        print(f"[asdaaas] history background tailer failed to start: {e}")
+        print(f"[asdaaas] history tailer setup: {e}")
 
     while True:
         try:

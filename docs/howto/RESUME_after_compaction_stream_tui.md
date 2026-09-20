@@ -73,3 +73,23 @@ PYTHONPATH=core python3 -m pytest tests/test_aa_stream_hot.py tests/test_aa_stre
 - `stream_adapters.claude`: real adapter; smoke on Astro session path
 - TUI P1: `_resolve_display_history` + aa.stream→grok update bridge; Claude waits for hot
 - Tests: 22 passed (stream + parser + claude + tui bridge + hook)
+
+
+## Architecture correction (Eric 2026-09-19 ~23:20)
+
+**Intent (locked):** acquisition + normalization live **inside** AA backends
+(`GrokBackend` / `ClaudeBackend`), each emitting aa.stream into hot.
+
+What we built (`stream_adapters.*` + hook dispatch) is the right *logic* but the
+wrong *owner*. Hook/adapters stay as helpers; backends must own the call.
+
+Claude path must **not** go through a grok-like intermediate. Both backends → aa.stream.
+
+
+## Backend ownership landed (2026-09-19 ~23:30)
+
+- `GrokBackend.configure_aa_history` + `sync_hot_stream` → `stream_adapters.grok.tail_grok_once`
+- Called from `_process_update_frames`, `refresh_tokens`, and `TurnEngine` post-deliver
+- `history/config.json` `owner=backend` (default); `owner=hook` keeps sidecar
+- Trip-G config set to `owner=backend`
+- ClaudeBackend still needs the same wire-up (adapter exists; configure not yet)

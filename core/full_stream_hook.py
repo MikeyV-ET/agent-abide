@@ -1,23 +1,7 @@
-"""
-Per-agent history / aa.stream hot tail hook.
+"""Background stream tailer (orchestration).
 
-Opt-in via:
-  {agent_home}/asdaaas/history/config.json
-  (fallback: asdaaas/full_stream/config.json one cycle)
-    {
-      "tail_grok": true,
-      "interval_ms": 1000,         # safety-net poll if inotify quiet (default 1000)
-      "use_inotify": true,         # default true; fall back to poll if unavailable
-      "max_bytes_per_tick": null,
-      "max_lines_per_tick": null
-    }
-
-When enabled:
-  - Background thread: inotify on updates.jsonl → drain into hot.jsonl
-  - Safety timeout still drains if events are missed/coalesced
-  - End-of-turn hook also drains (belt and suspenders)
-
-Failures are logged, never raised into the turn loop.
+Normalize: ``stream_adapters.grok`` / ``claude`` → ``aa_stream.append_hot_events``.
+This file: config + path resolve + inotify/poll loop.
 """
 from __future__ import annotations
 

@@ -114,8 +114,12 @@ async def interjection_watcher(agent_name: str, poll_fn, poll_interval: float = 
                     # V1: log interjection when human text arrives mid-turn
                     try:
                         from asdaaas import write_conversation
-                        import asdaaas as _asdaaas_mod
-                        sid = getattr(_asdaaas_mod, "_current_session_id", None)
+                        try:
+                            import asdaaas_runtime as _rt
+                            sid = _rt.current_session_id
+                        except Exception:
+                            import asdaaas as _asdaaas_mod
+                            sid = getattr(_asdaaas_mod, "_current_session_id", None)
                         write_conversation(
                             agent_name, "user", text, env=env,
                             session_id=sid, kind="interjection",

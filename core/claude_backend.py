@@ -39,9 +39,17 @@ class ClaudeBackend(AgentBackend):
         self._session_id: Optional[str] = None
         self._model_id: str = "unknown"
         self._total_tokens: int = 0
-        self._context_window: int = 200000
+        self._context_window: int = 1000000  # Opus-class default; modelUsage overrides
         self._claude_path: Optional[str] = None
         self._api_key: Optional[str] = api_key
+        # --- grok-parity surface (asdaaas touches these on some paths) ---
+        self._start_kwargs: dict = {}
+        self._allowed_always: set[str] = set()
+        self._permission_handler: Optional[Callable] = None
+        # --- AA history: this backend owns native -> aa.stream -> hot ---
+        self._agent_home = None
+        self._agent_name: Optional[str] = None
+        self._hot_ingest: bool = False
 
     async def start(self, agent_cwd: str, model: Optional[str] = None,
                     session_id: Optional[str] = None, yolo: bool = True,
@@ -61,7 +69,13 @@ class ClaudeBackend(AgentBackend):
         if model:
             cmd.extend(["--model", model])
         if session_id:
-            cmd.extend(["--session-id", session_id])
+            # --session-id on an id that already has a session file does NOT
+            # resume -- it silently starts a fresh conversation. Use --resume
+            # for sessions Claude already knows about.
+            if self._session_file_exists(session_id):
+                cmd.extend(["--resume", session_id])
+            else:
+                cmd.extend(["--session-id", session_id])
 
         # API key auth: set env var and use --bare mode
         env = os.environ.copy()
@@ -99,8 +113,67 @@ class ClaudeBackend(AgentBackend):
         # collect_response when we see the system init frame.
         self._session_id = session_id or "pending"
         self._stashed_frame = None
+        self._start_kwargs = dict(model=model, yolo=yolo, session_id=session_id,
+                                  agent_cwd=agent_cwd, **kwargs)
 
         return self._session_id
+
+    @staticmethod
+    def _session_file_exists(session_id: str) -> bool:
+        """True if Claude Code already has a session log for this id.
+
+        Session ids are UUIDs and globally unique, so glob across all project
+        dirs rather than recomputing Claude's cwd-escaping scheme.
+        """
+        from pathlib import Path as _Path
+        base = _Path.home() / ".claude" / "projects"
+        if not base.is_dir():
+            return False
+        try:
+            return any(base.glob(f"{session_id}.jsonl")) or any(
+                base.glob(f"*/{session_id}.jsonl")
+            )
+        except OSError:
+            return False
+
+    # ---- AA history ingest (mirrors GrokBackend) ----
+
+    def configure_aa_history(self, agent_home, agent_name: str, *,
+                             enabled: bool = True) -> None:
+        """Enable AA hot.jsonl ingest owned by this backend.
+
+        Acquisition: Claude session jsonl under ~/.claude/projects/.
+        Normalization: stream_adapters.claude (map/wrap -> aa.stream).
+        Write: aa_stream.append_hot_events.
+        """
+        from pathlib import Path as _Path
+        self._agent_home = _Path(agent_home)
+        self._agent_name = agent_name
+        self._hot_ingest = bool(enabled)
+
+    def sync_hot_stream(self, *, max_lines: Optional[int] = None,
+                        max_bytes: Optional[int] = None) -> dict:
+        """Pull new native session bytes since checkpoint -> history/hot.jsonl.
+
+        Safe to call often (checkpointed via sources/claude.json).
+        """
+        if not self._hot_ingest or not self._agent_home or not self._agent_name:
+            return {"status": "skipped", "reason": "hot ingest not configured"}
+        try:
+            from stream_adapters.claude import tail_claude_once
+        except Exception as e:
+            return {"status": "error", "error": f"import stream_adapters.claude: {e}"}
+        sid = self._session_id if self._session_id != "pending" else None
+        try:
+            return tail_claude_once(
+                self._agent_home,
+                self._agent_name,
+                session_id=sid,
+                max_lines=max_lines,
+                max_bytes=max_bytes,
+            )
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
 
     async def send_prompt(self, text: str) -> Any:
         if not self._proc or not self._proc.stdin:
@@ -170,15 +243,28 @@ class ClaudeBackend(AgentBackend):
                 cost_usd = frame.get("total_cost_usd", 0.0)
                 stop_reason = frame.get("stop_reason", "")
 
-                turn_total = turn_input + turn_output + cache_read + cache_create
-                self._total_tokens += turn_total
+                # Context *occupancy* (not lifetime cumulative).
+                # Anthropic partitions the prompt: uncached + cache_read + cache_create.
+                # Sum ≈ tokens sitting in context for this request. Do NOT += across turns
+                # and do NOT treat cache_read as "extra" on top of a running total.
+                prompt_tokens = turn_input + cache_read + cache_create
+                # After the turn, occupancy ≈ prompt + this output
+                self._total_tokens = prompt_tokens + turn_output
 
                 # Extract context window from modelUsage if available
-                model_usage = frame.get("modelUsage", {})
+                model_usage = frame.get("modelUsage", {}) or {}
                 for model_info in model_usage.values():
-                    cw = model_info.get("contextWindow", 0)
+                    if not isinstance(model_info, dict):
+                        continue
+                    cw = model_info.get("contextWindow", 0) or model_info.get("context_window", 0)
                     if cw > 0:
-                        self._context_window = cw
+                        self._context_window = int(cw)
+                # Fallback: env or known large windows
+                if self._context_window <= 200000:
+                    import os
+                    env_cw = os.environ.get("CLAUDE_CONTEXT_WINDOW") or os.environ.get("CONTEXT_WINDOW")
+                    if env_cw and env_cw.isdigit():
+                        self._context_window = int(env_cw)
 
                 if on_meta:
                     on_meta(self._total_tokens)
@@ -284,6 +370,18 @@ class ClaudeBackend(AgentBackend):
     async def request_compaction(self) -> bool:
         return False  # Claude Code manages its own context
 
+    def set_permission_handler(self, handler: Callable) -> None:
+        """Accept a mentor-approval handler for interface parity.
+
+        Claude decides permissions in-process via --permission-mode, so there
+        is no per-tool callback to route. Stored, not consulted.
+        """
+        self._permission_handler = handler
+
+    async def set_reasoning_effort(self, level: str) -> None:
+        """Record requested effort. Claude takes --effort at launch only."""
+        self._start_kwargs["reasoning_effort"] = level
+
     async def shutdown(self):
         if self._proc:
             if self._proc.stdin:
@@ -319,6 +417,10 @@ class ClaudeBackend(AgentBackend):
     @property
     def context_window(self) -> int:
         return self._context_window
+
+    @context_window.setter
+    def context_window(self, value: int):
+        self._context_window = int(value)
 
     async def _read_frame(self, timeout: float = 30.0) -> Optional[dict]:
         if not self._proc or not self._proc.stdout:

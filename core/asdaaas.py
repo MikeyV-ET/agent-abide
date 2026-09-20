@@ -281,15 +281,25 @@ def _capture_code_version():
         return "unknown"
 
 _code_version = _capture_code_version()
+try:
+    import asdaaas_runtime as _rt0
+    _rt0.code_version = _code_version
+except Exception:
+    pass
 
 def get_code_version():
     """Get the git commit hash captured when asdaaas was loaded."""
-    return _code_version
+    return _code_version or _rt.code_version
 
 
+# Identity for health.json — live in asdaaas_runtime (shared across __main__ vs import asdaaas)
+import asdaaas_runtime as _rt
+
+# Back-compat aliases only — do NOT write _rt here (second import asdaaas
+# would wipe identity set by __main__). write_health reads _rt.
 _current_model_id = "unknown"
 _current_session_id = None
-_current_backend_type = "grok"
+_current_backend_type = "unknown"
 
 def write_health(agent_name, status, detail="", total_tokens=0, context_window=CONTEXT_WINDOW, env=None,
                   observer_state=None):
@@ -303,10 +313,10 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
         "totalTokens": total_tokens,
         "contextWindow": context_window,
         "last_activity": time.time(),
-        "code_version": get_code_version(),
-        "model": _current_model_id,
-        "session_id": _current_session_id,
-        "backend": _current_backend_type,
+        "code_version": get_code_version() or _rt.code_version,
+        "model": _rt.current_model_id,
+        "session_id": _rt.current_session_id,
+        "backend": _rt.current_backend_type,
     }
     if observer_state is not None:
         health["observer"] = {
@@ -2211,18 +2221,23 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     # Expose model/session/backend to module-level for health writes
     global _current_model_id, _current_session_id, _current_backend_type
     _current_model_id = backend.model_id
+    _rt.current_model_id = backend.model_id
     # Prefer explicit CLI --model, then agents.json model, over backend "unknown"
     if (not _current_model_id or _current_model_id == "unknown") and model:
         _current_model_id = model
+        _rt.current_model_id = model
     if (not _current_model_id or _current_model_id == "unknown"):
         try:
             cfg_model = (config.agents or {}).get(agent_name, {}).get("model")
             if cfg_model:
                 _current_model_id = cfg_model
+                _rt.current_model_id = cfg_model
         except Exception:
             pass
     _current_session_id = sid
+    _rt.current_session_id = sid
     _current_backend_type = config.agent_backend(agent_name) if config else "grok"
+    _rt.current_backend_type = config.agent_backend(agent_name) if config else "grok"
     print(f"[asdaaas] Model: {_current_model_id}")
 
     # Throttled callback for real-time health updates during long responses.

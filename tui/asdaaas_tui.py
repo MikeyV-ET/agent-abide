@@ -3201,11 +3201,17 @@ Type anything else to send a message to the agent.
         if should_replay:
             try:
                 current_size = updates_path.stat().st_size
+                hist_kind = state.get("history_kind") or kind
                 if current_size > 0:
-                    # For large files, only read the tail portion
+                    # Large files: read a tail window. hot.jsonl lines embed full
+                    # native grok events → much fatter than updates.jsonl, so use
+                    # a bigger window and count paint-worthy events after bridge.
                     if tail_count and current_size > 100000:
-                        # Read last ~500KB to find enough lines
-                        read_size = min(current_size, 500000)
+                        if hist_kind == "hot":
+                            # ~8 MiB; expand once if still short on paint events
+                            read_size = min(current_size, 8 * 1024 * 1024)
+                        else:
+                            read_size = min(current_size, 500000)
                         seek_pos = current_size - read_size
                         with open(updates_path, "r", errors="replace") as f:
                             f.seek(seek_pos)
@@ -3215,25 +3221,17 @@ Type anything else to send a message to the agent.
                             tail_data = f.read()
                             state["updates_offset"] = f.tell()
                         all_lines = [l for l in tail_data.strip().split("\n") if l.strip()]
-                        lines = all_lines[-tail_count:]
-                        # Calculate earliest offset: skip the lines we didn't use
-                        skipped_chars = sum(len(l) + 1 for l in all_lines[:-tail_count]) if len(all_lines) > tail_count else 0
-                        state["earliest_offset"] = data_start + skipped_chars
+                        lines = all_lines
+                        state["earliest_offset"] = data_start
                     else:
                         with open(updates_path, "r", errors="replace") as f:
                             all_data = f.read()
                             state["updates_offset"] = f.tell()
                         lines = [l for l in all_data.strip().split("\n") if l.strip()]
-                        if tail_count and len(lines) > tail_count:
-                            skipped = lines[:-tail_count]
-                            skipped_chars = sum(len(l) + 1 for l in skipped)
-                            state["earliest_offset"] = skipped_chars
-                            lines = lines[-tail_count:]
-                        else:
-                            state["earliest_offset"] = 0
-                    replay_count = 0
+                        state["earliest_offset"] = 0
+
                     aa_bridge = None
-                    if (state.get("history_kind") or kind) == "hot":
+                    if hist_kind == "hot":
                         try:
                             core = str(Path(__file__).resolve().parent.parent / "core")
                             if core not in sys.path:
@@ -3241,22 +3239,34 @@ Type anything else to send a message to the agent.
                             from tui_history import aa_event_to_tui_update as aa_bridge
                         except Exception:
                             aa_bridge = None
+
+                    # Build event list; for hot, keep last tail_count *paint* events
+                    events = []
                     for line in lines:
                         try:
                             obj = json.loads(line)
-                            if aa_bridge is not None:
-                                event = aa_bridge(obj)
-                                if event is None:
-                                    continue
-                            else:
-                                event = obj
-                            self.call_from_thread(
-                                self._dispatch_event_for_agent, event, agent_name
-                            )
-                            replay_count += 1
                         except json.JSONDecodeError:
-                            pass
-                    self._debug(f"REPLAY dispatched={replay_count} lines={len(lines)}")
+                            continue
+                        if aa_bridge is not None:
+                            event = aa_bridge(obj)
+                            if event is None:
+                                continue
+                        else:
+                            event = obj
+                        events.append(event)
+                    if tail_count and len(events) > tail_count:
+                        events = events[-tail_count:]
+
+                    replay_count = 0
+                    for event in events:
+                        self.call_from_thread(
+                            self._dispatch_event_for_agent, event, agent_name
+                        )
+                        replay_count += 1
+                    self._debug(
+                        f"REPLAY kind={hist_kind} dispatched={replay_count} "
+                        f"raw_lines={len(lines)}"
+                    )
                     time.sleep(1)
                     self.call_from_thread(self._force_scroll_bottom)
             except Exception:

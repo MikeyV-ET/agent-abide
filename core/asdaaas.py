@@ -2277,24 +2277,54 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
         print(f"[asdaaas] WARN: failed to update session registry: {_e}")
 
     # ---- Observer (in-process async task, Phase 1 refactor) ----
-    from binary_state_observer import InProcessObserver
+    from binary_state_observer import ClaudeInProcessObserver, InProcessObserver
     observer_state_file = str(config.agent_observer_state_file(agent_name)) if config else None
     in_process_observer = None
 
-    if backend.proc and backend.session_dir:
+    def _claude_session_file():
+        """Transcript path for the Claude observer to tail."""
+        path = getattr(backend, "session_file", None)
+        if path:
+            return path
+        # Hot ingest off → backend has no agent_home; resolve from cwd.
+        try:
+            from stream_adapters.claude import find_live_session
+            home = Path(agent_cwd) if agent_cwd else Path.home() / "agents" / agent_name
+            sid = backend.session_id if backend.session_id != "pending" else None
+            found = find_live_session(home, sid)
+            return str(found) if found else None
+        except Exception:
+            return None
+
+    _is_claude = _current_backend_type == "claude"
+    _claude_file = _claude_session_file() if _is_claude else None
+
+    if backend.proc and (_claude_file if _is_claude else backend.session_dir):
         try:
             observer_state_file = str(config.agent_observer_state_file(agent_name))
-            in_process_observer = InProcessObserver(
-                pid=backend.proc.pid,
-                session_dir=str(backend.session_dir),
-                state_file=observer_state_file,
-            )
+            if _is_claude:
+                in_process_observer = ClaudeInProcessObserver(
+                    pid=backend.proc.pid,
+                    session_file=_claude_file,
+                    state_file=observer_state_file,
+                    on_model_id=lambda model_id, effort: _rt.set_identity(
+                        model_id=model_id
+                    ),
+                )
+            else:
+                in_process_observer = InProcessObserver(
+                    pid=backend.proc.pid,
+                    session_dir=str(backend.session_dir),
+                    state_file=observer_state_file,
+                )
             in_process_observer.start()
             backend.set_observer(in_process_observer)
             print(f"[asdaaas] Observer started (in-process, watching PID {backend.proc.pid})")
         except Exception as e:
             print(f"[asdaaas] WARN: Failed to start observer: {e}")
             in_process_observer = None
+    elif _is_claude:
+        print(f"[asdaaas] WARN: Backend not ready for observer (no proc or session jsonl)")
     else:
         print(f"[asdaaas] WARN: Backend not ready for observer (no proc or session_dir)")
 
@@ -2700,7 +2730,13 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 print(f"[asdaaas] CANCEL: Restarted. Session {new_sid}, {total_tokens} tokens")
                 # Reset observer for new PID and session dir
                 if in_process_observer and backend.proc:
-                    in_process_observer.reset(backend.proc.pid, str(backend.session_dir))
+                    if _current_backend_type == "claude":
+                        # New session id → new transcript file to tail.
+                        in_process_observer.reset(
+                            backend.proc.pid, session_file=_claude_session_file()
+                        )
+                    else:
+                        in_process_observer.reset(backend.proc.pid, str(backend.session_dir))
                     print(f"[asdaaas] CANCEL: Observer reset for PID {backend.proc.pid}")
                 write_health(agent_name, "active", f"cancelled and restarted", total_tokens, context_window)
                 

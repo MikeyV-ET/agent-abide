@@ -303,10 +303,15 @@ class ClaudeBinaryStateObserver:
         process_alive_fn: Callable[[int], bool] = None,
         silence_windows: dict[str, float] = None,
         event_silence_windows: dict[str, float] = None,
+        on_model_id: Callable[[str, Optional[str]], None] = None,
     ):
         self._known_types = known_types or set()
         self._silence_windows = silence_windows or {}
         self._seen_model_id: Optional[str] = None
+        # Called with (model_id, reasoning_effort) when the model first appears
+        # or changes. Lets asdaaas put a real model in health.json without this
+        # package knowing anything about asdaaas.
+        self._on_model_id = on_model_id
         self._machine = BinaryActivityMachine(
             pid=pid,
             process_alive_fn=process_alive_fn,
@@ -342,6 +347,12 @@ class ClaudeBinaryStateObserver:
         if not ev.model_id or ev.model_id == self._seen_model_id:
             return
         self._seen_model_id = ev.model_id
+        if self._on_model_id is not None:
+            # A failing consumer must not cost us the observation.
+            try:
+                self._on_model_id(ev.model_id, ev.reasoning_effort)
+            except Exception:
+                pass
         self._machine.apply(
             ActivityEvent(
                 kind=ActivityKind.MODEL_INFO,

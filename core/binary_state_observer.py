@@ -4,7 +4,7 @@ Implementation lives in ``core/binary_state/``:
 
   types.py / machine.py     common ActivityEvent + state machine
   grok.py                   GrokBinaryStateObserver (native updates.jsonl)
-  claude.py                 ClaudeBinaryStateObserver (stub — Opus fills mapper)
+  claude.py                 ClaudeBinaryStateObserver (session jsonl)
   service.py                InProcessObserver / ObserverService
 
 Historical name ``BinaryStateObserver`` == ``GrokBinaryStateObserver``.
@@ -18,6 +18,7 @@ import sys
 from binary_state import (  # noqa: F401
     BinaryStateObserver,
     ClaudeBinaryStateObserver,
+    ClaudeInProcessObserver,
     GrokBinaryStateObserver,
     InProcessObserver,
     ObserverService,

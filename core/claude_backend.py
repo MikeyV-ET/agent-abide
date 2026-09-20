@@ -24,6 +24,9 @@ from typing import Any, Callable, Optional
 
 from agent_backend import AgentBackend, ResponseResult
 
+# Max NDJSON frame size we will accept on stdout (asyncio default is 64 KiB).
+STREAM_LIMIT_BYTES = 64 * 1024 * 1024
+
 
 class ClaudeBackend(AgentBackend):
     """AgentBackend implementation for Claude Code CLI.
@@ -50,6 +53,8 @@ class ClaudeBackend(AgentBackend):
         self._agent_home = None
         self._agent_name: Optional[str] = None
         self._hot_ingest: bool = False
+        # --- binary state observation (ClaudeInProcessObserver) ---
+        self._observer = None
 
     async def start(self, agent_cwd: str, model: Optional[str] = None,
                     session_id: Optional[str] = None, yolo: bool = True,
@@ -91,6 +96,10 @@ class ClaudeBackend(AgentBackend):
             stderr=asyncio.subprocess.PIPE,
             cwd=agent_cwd,
             env=env,
+            # asyncio's StreamReader defaults to a 64 KiB line limit; Claude
+            # NDJSON frames (large tool results, full result text) exceed it
+            # and readline() then raises ValueError, killing the turn.
+            limit=STREAM_LIMIT_BYTES,
         )
 
         # Wait for process to be ready (not crash immediately)
@@ -135,6 +144,36 @@ class ClaudeBackend(AgentBackend):
             )
         except OSError:
             return False
+
+    # ---- binary state observation ----
+
+    def set_observer(self, observer):
+        """Set the in-process observer (mirrors GrokBackend.set_observer).
+
+        Claude has no stdout notification plane to forward, so the observer
+        tails the session transcript itself; this handle exists so asdaaas can
+        reach it on restart/shutdown the same way it does for grok.
+        """
+        self._observer = observer
+
+    @property
+    def session_file(self) -> Optional[str]:
+        """Path to this session's Claude Code transcript jsonl, if findable.
+
+        Same resolution the hot-stream ingest uses, so both read one file.
+        """
+        if not self._agent_home:
+            return None
+        try:
+            from stream_adapters.claude import find_live_session
+        except Exception:
+            return None
+        sid = self._session_id if self._session_id != "pending" else None
+        try:
+            path = find_live_session(self._agent_home, sid)
+        except Exception:
+            return None
+        return str(path) if path else None
 
     # ---- AA history ingest (mirrors GrokBackend) ----
 
@@ -447,6 +486,11 @@ class ClaudeBackend(AgentBackend):
             )
         except asyncio.TimeoutError:
             return None
+        except (ValueError, asyncio.LimitOverrunError) as e:
+            # Frame exceeded the stream buffer. Degrade to skipping this frame
+            # rather than propagating and killing the whole turn.
+            print(f"[claude_backend] oversized frame skipped: {e}")
+            return {"type": "_oversized"}
 
         if not line:
             return None

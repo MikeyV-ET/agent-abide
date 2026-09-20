@@ -298,20 +298,23 @@ class InProcessObserver:
         self._tailer.seek_to_end()
         self.observer.write_state_file(self._state_file)
 
+    def poll_once(self):
+        """Feed any new tailed lines to the observer. Sync; safe to call often."""
+        for line in self._tailer.read_new_lines():
+            try:
+                frame = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            self.observer.process_event(frame)
+
     async def _run(self):
         """Async event loop: tail updates.jsonl, heartbeat, write state."""
         last_write = 0.0
 
         try:
             while self._running:
-                # Process new updates.jsonl events
-                lines = self._tailer.read_new_lines()
-                for line in lines:
-                    try:
-                        frame = json.loads(line)
-                        self.observer.process_event(frame)
-                    except json.JSONDecodeError:
-                        continue
+                # Process new native events
+                self.poll_once()
 
                 # Heartbeat: check process liveness + silence
                 self.observer.check_heartbeat()
@@ -339,6 +342,102 @@ class InProcessObserver:
                 self.observer.write_state_file(self._state_file)
             except Exception:
                 pass
+
+
+class ClaudeInProcessObserver(InProcessObserver):
+    """Claude edge: tail the Claude Code session jsonl instead of updates.jsonl.
+
+    Claude has no ``updates.jsonl`` and no stdout JSON-RPC plane. Its native
+    record is the session transcript under
+    ``~/.claude/projects/<escaped-cwd>/<session-id>.jsonl``, which is also what
+    the AA hot-stream ingest reads (separate offsets — this tailer is live, hot
+    ingest is checkpointed).
+
+    Everything after "line → dict" is shared with the grok path: same tailer,
+    same poll/heartbeat/state-file loop, same machine.
+    """
+
+    def __init__(
+        self,
+        pid: int,
+        session_file: str,
+        state_file: str,
+        data_dir: str = None,
+        on_model_id=None,
+    ):
+        # Deliberately not calling super().__init__: it builds the grok observer
+        # and points a tailer at updates.jsonl.
+        if data_dir is None:
+            data_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "observer_data",
+            )
+
+        tool_windows, event_windows, default_window, self._p95_events = \
+            load_silence_windows(data_dir)
+
+        import binary_state.types as _types
+        _types.DEFAULT_SILENCE_WINDOW = default_window
+
+        from binary_state.claude import ClaudeBinaryStateObserver
+
+        self.observer = ClaudeBinaryStateObserver(
+            pid=pid,
+            silence_windows=tool_windows,
+            event_silence_windows=event_windows,
+            on_model_id=on_model_id,
+        )
+        self._tailer = UpdatesJSONLTailer(session_file)
+        self._session_file = session_file
+        self._session_dir = os.path.dirname(session_file)
+        self._state_file = state_file
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+
+    def orient(self):
+        """Read the transcript tail to establish state. Sync; no event loop."""
+        self._orient()
+
+    def process_stdout_event(self, frame: dict):
+        """No-op: Claude has no stdout notification plane."""
+        return None
+
+    def reset(self, new_pid: int, session_dir: str = None, session_file: str = None):
+        """Re-point at a new process, and a new transcript if the session moved."""
+        self.observer.reset(new_pid)
+        target = session_file or (
+            os.path.join(session_dir, os.path.basename(self._session_file))
+            if session_dir
+            else None
+        )
+        if target:
+            self._session_file = target
+            self._session_dir = os.path.dirname(target)
+            self._tailer.close()
+            self._tailer = UpdatesJSONLTailer(target)
+        self._orient()
+
+    def _orient(self):
+        """Replay the tail of the transcript, then follow from the end.
+
+        The grok version retries with a widening scan and resets observer
+        internals between attempts; those attributes live on the grok observer,
+        not this one. A single pass is enough here because Claude's transcript
+        carries explicit turn boundaries (stop_reason=end_turn), so a short tail
+        already says whether a turn is open.
+        """
+        frames = []
+        for line in self._tailer.read_tail_lines(self._p95_events):
+            try:
+                frames.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+        if frames:
+            self.observer.orient_from_history(frames)
+
+        self._tailer.seek_to_end()
+        self.observer.write_state_file(self._state_file)
 
 
 # ============================================================================

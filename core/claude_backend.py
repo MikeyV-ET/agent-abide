@@ -287,8 +287,12 @@ class ClaudeBackend(AgentBackend):
                 # Sum ≈ tokens sitting in context for this request. Do NOT += across turns
                 # and do NOT treat cache_read as "extra" on top of a running total.
                 prompt_tokens = turn_input + cache_read + cache_create
-                # After the turn, occupancy ≈ prompt + this output
-                self._total_tokens = prompt_tokens + turn_output
+                # After the turn, occupancy ≈ prompt + this output.
+                # Never clobber a known occupancy with 0 (result frames sometimes
+                # omit usage → totalTokens=0 → empty context_left + crap TUI %).
+                occupancy = prompt_tokens + turn_output
+                if occupancy > 0:
+                    self._total_tokens = occupancy
 
                 # Extract context window from modelUsage if available
                 model_usage = frame.get("modelUsage", {}) or {}

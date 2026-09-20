@@ -239,8 +239,9 @@ class BinaryActivityMachine:
                 self._set_state(ObserverState.BUSY)
 
         elif ev.kind == ActivityKind.MODEL_INFO:
-            if ev.model_id:
-                self._model_id = ev.model_id
+            if ev.model_id and ev.model_id not in ("unknown", "<synthetic>", "synthetic"):
+                if not (ev.model_id.startswith("<") and ev.model_id.endswith(">")):
+                    self._model_id = ev.model_id
             if ev.reasoning_effort:
                 self._reasoning_effort = ev.reasoning_effort
             return  # no silence bump

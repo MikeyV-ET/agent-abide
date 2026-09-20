@@ -20,7 +20,13 @@ def set_identity(*, model_id=None, session_id=..., backend_type=None,
     global current_model_id, current_session_id, current_backend_type, code_version
     global current_reasoning_effort
     if model_id is not None:
-        current_model_id = model_id
+        # Refuse Claude sidechain placeholders
+        if model_id in ("<synthetic>", "synthetic") or (
+            isinstance(model_id, str) and model_id.startswith("<") and model_id.endswith(">")
+        ):
+            pass  # keep previous
+        else:
+            current_model_id = model_id
     if session_id is not ...:
         current_session_id = session_id
     if backend_type is not None:

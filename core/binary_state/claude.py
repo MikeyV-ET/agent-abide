@@ -62,6 +62,19 @@ GATE_TOOLS = {
 }
 
 
+def _real_model_id(value) -> Optional[str]:
+    """Skip Claude sidechain/synthetic placeholders (pollute health.model)."""
+    if not value or not isinstance(value, str):
+        return None
+    v = value.strip()
+    if not v or v in ("unknown", "<synthetic>", "synthetic"):
+        return None
+    if v.startswith("<") and v.endswith(">"):
+        return None
+    return v
+
+
+
 def _iso_to_epoch(value: str) -> Optional[float]:
     """'2026-09-20T04:30:53.515Z' → epoch seconds, or None if unparseable."""
     try:
@@ -224,7 +237,7 @@ def _map_assistant(
     default_silence: float,
 ) -> list[ActivityEvent]:
     message = obj.get("message") or {}
-    model_id = message.get("model")
+    model_id = _real_model_id(message.get("model"))
     effort = obj.get("effort") or obj.get("perTurnEffort")
     content = message.get("content")
     events: list[ActivityEvent] = []
@@ -344,13 +357,14 @@ class ClaudeBinaryStateObserver:
         model_id off MODEL_INFO, so synthesize one rather than emitting a
         metadata event per line (which would inflate turn_event_count).
         """
-        if not ev.model_id or ev.model_id == self._seen_model_id:
+        mid = _real_model_id(ev.model_id) if ev.model_id else None
+        if not mid or mid == self._seen_model_id:
             return
-        self._seen_model_id = ev.model_id
+        self._seen_model_id = mid
         if self._on_model_id is not None:
             # A failing consumer must not cost us the observation.
             try:
-                self._on_model_id(ev.model_id, ev.reasoning_effort)
+                self._on_model_id(mid, ev.reasoning_effort)
             except Exception:
                 pass
         self._machine.apply(
@@ -358,7 +372,7 @@ class ClaudeBinaryStateObserver:
                 kind=ActivityKind.MODEL_INFO,
                 source_type="claude:model",
                 ts=ev.ts,
-                model_id=ev.model_id,
+                model_id=mid,
                 reasoning_effort=ev.reasoning_effort,
             )
         )

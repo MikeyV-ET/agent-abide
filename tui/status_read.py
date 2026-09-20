@@ -52,8 +52,21 @@ def telemetry_from_files(
             t.context_pct = int(tokens / window * 100)
         t.code_version = health.get("code_version", "") or ""
         model = health.get("model", "") or ""
-        if not model or model == "unknown":
-            model = model_fallback or ""
+        if (
+            not model
+            or model == "unknown"
+            or model in ("<synthetic>", "synthetic")
+            or (model.startswith("<") and model.endswith(">"))
+        ):
+            # Prefer observer model_id, then agents.json fallback
+            obs = health.get("observer") or {}
+            om = (obs.get("model_id") or "") if isinstance(obs, dict) else ""
+            if om and om not in ("unknown", "<synthetic>", "synthetic") and not (
+                om.startswith("<") and om.endswith(">")
+            ):
+                model = om
+            else:
+                model = model_fallback or ""
         t.model_name = model
     except Exception:
         t.health_status = "unknown"

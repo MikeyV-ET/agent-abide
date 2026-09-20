@@ -301,50 +301,89 @@ _current_model_id = "unknown"
 _current_session_id = None
 _current_backend_type = "unknown"
 
+def _good_model_name(name) -> str:
+    """Reject unknown/synthetic placeholders that poison TUI telemetry."""
+    if not name or not isinstance(name, str):
+        return ""
+    n = name.strip()
+    if not n or n in ("unknown", "<synthetic>", "synthetic"):
+        return ""
+    if n.startswith("<") and n.endswith(">"):
+        return ""
+    return n
+
+
 def write_health(agent_name, status, detail="", total_tokens=0, context_window=CONTEXT_WINDOW, env=None,
                   observer_state=None):
-    agent_dir(agent_name, env=env).mkdir(parents=True, exist_ok=True)
+    adir = agent_dir(agent_name, env=env)
+    adir.mkdir(parents=True, exist_ok=True)
     # Hot-path writes often omit observer_state; binary_state.json TTL is 1s so
     # turn_engine's read_state_file() usually returns None. Always embed last
     # snapshot for TUI (ignore_ttl).
     if observer_state is None:
         try:
             from binary_state.machine import BinaryActivityMachine
-            obs_path = agent_dir(agent_name, env=env) / "binary_state.json"
+            obs_path = adir / "binary_state.json"
             if obs_path.is_file():
                 observer_state = BinaryActivityMachine.read_state_file(
                     str(obs_path), ignore_ttl=True
                 )
         except Exception:
             observer_state = None
+
+    # Sticky tokens: never publish 0 over a previous good occupancy.
+    prev_tokens = 0
+    try:
+        prev = json.loads((adir / "health.json").read_text(encoding="utf-8"))
+        prev_tokens = int(prev.get("totalTokens") or 0)
+    except Exception:
+        prev_tokens = 0
+    try:
+        tok = int(total_tokens or 0)
+    except (TypeError, ValueError):
+        tok = 0
+    if tok <= 0:
+        tok = prev_tokens
+
+    model = _good_model_name(getattr(_rt, "current_model_id", None))
+    if not model and observer_state:
+        model = _good_model_name(observer_state.get("model_id"))
+    if not model:
+        model = "unknown"
+
+    effort = getattr(_rt, "current_reasoning_effort", None)
+    if not effort and observer_state:
+        effort = observer_state.get("reasoning_effort")
+
     health = {
         "agent": agent_name,
         "status": status,
         "detail": detail,
         "ts": time.time(),
         "pid": os.getpid(),
-        "totalTokens": total_tokens,
+        "totalTokens": tok,
         "contextWindow": context_window,
         "last_activity": time.time(),
         "code_version": get_code_version() or _rt.code_version,
-        "model": _rt.current_model_id,
+        "model": model,
         "session_id": _rt.current_session_id,
         "backend": _rt.current_backend_type,
-        "reasoning_effort": getattr(_rt, "current_reasoning_effort", None),
+        "reasoning_effort": effort,
     }
     if observer_state is not None:
+        obs_model = _good_model_name(observer_state.get("model_id")) or observer_state.get("model_id")
         health["observer"] = {
             "state": observer_state.get("state"),
             "since": observer_state.get("since"),
             "written_at": observer_state.get("written_at"),
             "last_event_type": observer_state.get("last_event_type"),
-            "model_id": observer_state.get("model_id"),
+            "model_id": obs_model,
             "reasoning_effort": observer_state.get("reasoning_effort"),
             "doom_loop": observer_state.get("doom_loop"),
             "turn_event_count": observer_state.get("turn_event_count"),
             "pid": observer_state.get("pid"),
         }
-    path = agent_dir(agent_name, env=env) / "health.json"
+    path = adir / "health.json"
     tmp = str(path) + ".tmp"
     with open(tmp, "w") as f:
         json.dump(health, f)

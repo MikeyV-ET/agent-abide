@@ -53,3 +53,24 @@ def test_read_state_file_ttl():
         json.dump({"state": "IDLE", "expires_at": time.time() - 1}, f)
     assert BinaryActivityMachine.read_state_file(path) is None
     assert BinaryActivityMachine.read_state_file(path, ignore_ttl=True)["state"] == "IDLE"
+
+
+def test_write_health_sticky_tokens_and_rejects_synthetic(tmp_path, monkeypatch):
+    import asdaaas
+    import asdaaas_runtime as rt
+    rt.set_identity(model_id="unknown", session_id="s", backend_type="claude", reasoning_effort=None)
+    # force synthetic into runtime bypassing set_identity guard for test of write path
+    rt.current_model_id = "<synthetic>"
+    rt.current_reasoning_effort = None
+    base = tmp_path / "agents" / "A" / "asdaaas"
+    base.mkdir(parents=True)
+    (base / "health.json").write_text('{"totalTokens": 150000, "contextWindow": 1000000}')
+    (base / "binary_state.json").write_text(
+        '{"state":"BUSY","model_id":"claude-opus-5","reasoning_effort":"high","expires_at":0,"written_at":1}'
+    )
+    monkeypatch.setattr(asdaaas, "agent_dir", lambda n, env=None: base)
+    asdaaas.write_health("A", "active", "x", total_tokens=0, context_window=1000000)
+    h = json.loads((base / "health.json").read_text())
+    assert h["totalTokens"] == 150000  # sticky
+    assert h["model"] == "claude-opus-5"  # from observer, not synthetic
+    assert h["reasoning_effort"] == "high"

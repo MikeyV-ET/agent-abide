@@ -128,6 +128,45 @@ def _decode_tool_output(content) -> str:
     return str(content)
 
 
+
+def tui_content_text(update: dict[str, Any] | None) -> str:
+    """Safe text extract from a grok-shaped update["content"] field."""
+    if not isinstance(update, dict):
+        return ""
+    c = update.get("content")
+    if isinstance(c, dict):
+        t = c.get("text")
+        return t if isinstance(t, str) else ("" if t is None else str(t))
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        parts = []
+        for item in c:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                else:
+                    inner = item.get("content")
+                    if isinstance(inner, dict) and isinstance(inner.get("text"), str):
+                        parts.append(inner["text"])
+                    elif isinstance(inner, str):
+                        parts.append(inner)
+        return "".join(parts)
+    return ""
+
+
+def tui_update_dict(event: dict[str, Any] | None) -> dict[str, Any]:
+    """event["params"]["update"] as a dict, or {}."""
+    if not isinstance(event, dict):
+        return {}
+    params = event.get("params")
+    if not isinstance(params, dict):
+        return {}
+    upd = params.get("update")
+    return upd if isinstance(upd, dict) else {}
+
 def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Map one aa.stream v1 event → grok session/update shape for TUI dispatch.
 

@@ -232,10 +232,12 @@ class PlanPanel(Static):
         }
 
         for entry in self.entries:
+            if not isinstance(entry, dict):
+                entry = {"content": str(entry), "status": "pending"}
             icon = status_icons.get(entry.get("status", "pending"), "?")
             content = entry.get("content", "")
             style = "dim" if entry.get("status") == "completed" else ""
-            table.add_row(icon, Text(content, style=style))
+            table.add_row(icon, Text(str(content), style=style))
 
         return Panel(table, title="📋 Plan", title_align="left",
                      border_style=Theme.BR_PURPLE, padding=(0, 1))

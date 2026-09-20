@@ -150,3 +150,12 @@ def test_tool_result_decodes_bash_bytes():
     blob = out["params"]["update"]["content"][0]["content"]["text"]
     assert "<interjection>" in blob
     assert "bell" in blob
+
+
+def test_tui_content_text_shapes():
+    from tui_history import tui_content_text
+    assert tui_content_text({"content": {"text": "a"}}) == "a"
+    assert tui_content_text({"content": "plain"}) == "plain"
+    assert tui_content_text({"content": None}) == ""
+    assert tui_content_text({"content": [{"type": "text", "text": "x"}, {"content": {"text": "y"}}]}) == "xy"
+    assert tui_content_text("nope") == ""

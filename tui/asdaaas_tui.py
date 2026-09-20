@@ -3276,13 +3276,20 @@ Type anything else to send a message to the agent.
 
                     replay_count = 0
                     speech_dispatched = 0
+                    dispatch_errs = 0
                     for _off, event in events:
-                        self.call_from_thread(
-                            self._dispatch_event_for_agent, event, agent_name
-                        )
-                        replay_count += 1
-                        if is_speech_tui_event(event):
-                            speech_dispatched += 1
+                        try:
+                            self.call_from_thread(
+                                self._dispatch_event_for_agent, event, agent_name
+                            )
+                            replay_count += 1
+                            if is_speech_tui_event(event):
+                                speech_dispatched += 1
+                        except Exception as de:
+                            dispatch_errs += 1
+                            self._debug(f"REPLAY_DISPATCH_ERR {de!r}")
+                    if dispatch_errs:
+                        self._debug(f"REPLAY dispatch_errs={dispatch_errs}")
                     self._debug(
                         f"REPLAY kind={hist_kind} dispatched={replay_count} "
                         f"speech={speech_dispatched} raw_lines={raw_line_n}"
@@ -3298,8 +3305,9 @@ Type anything else to send a message to the agent.
             except Exception as e:
                 self._debug(f"REPLAY error: {e!r}")
                 try:
+                    err = f"Replay error: {e}"
                     self.call_from_thread(
-                        self.notify, f"Replay error: {e}", severity="error"
+                        lambda m=err: self.notify(m, severity="error", timeout=6)
                     )
                 except Exception:
                     pass
@@ -3531,10 +3539,34 @@ Type anything else to send a message to the agent.
         """Extract <interjection> blocks — pure logic in chat_model."""
         return _cm_extract_interjections(text)
 
+    @staticmethod
+    def _update_text(update: dict) -> str:
+        """Safe content.text from a session update (content may be dict/str/list)."""
+        try:
+            core = str(Path(__file__).resolve().parent.parent / "core")
+            if core not in sys.path:
+                sys.path.insert(0, core)
+            from tui_history import tui_content_text
+            return tui_content_text(update if isinstance(update, dict) else {})
+        except Exception:
+            c = (update or {}).get("content") if isinstance(update, dict) else None
+            if isinstance(c, dict):
+                return str(c.get("text") or "")
+            if isinstance(c, str):
+                return c
+            return ""
+
     def _dispatch_event(self, event: dict) -> None:
         """Dispatch an updates.jsonl event to the appropriate renderer."""
-        update = event.get("params", {}).get("update", {})
-        event_type = update.get("sessionUpdate", "")
+        if not isinstance(event, dict):
+            return
+        params = event.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        update = params.get("update")
+        if not isinstance(update, dict):
+            update = {}
+        event_type = update.get("sessionUpdate", "") or ""
         # Stash event timestamp for turn separators
         self._last_event_ts = event.get("timestamp")
 
@@ -3555,43 +3587,54 @@ Type anything else to send a message to the agent.
         except Exception:
             pass
 
-        if event_type == "agent_message_chunk":
-            self._on_agent_message_chunk(update)
-        elif event_type == "tool_call":
-            self._on_tool_call(update)
-        elif event_type == "tool_call_update":
-            self._on_tool_call_update(update)
-        elif event_type == "plan":
-            self._on_plan(update)
-        elif event_type == "hook_annotation":
-            self._on_hook_annotation(update)
-        elif event_type == "user_message_chunk":
-            self._on_user_message_chunk(update)
-        elif event_type == "agent_thought_chunk":
-            self._on_agent_thought_chunk(update)
-        elif event_type == "task_backgrounded":
-            self._on_task_backgrounded(update)
-        elif event_type == "task_completed":
-            self._on_task_completed(update)
-        elif event_type == "auto_compact_started":
-            self._on_compact_started(update)
-        elif event_type == "auto_compact_completed":
-            self._on_compact_completed(update)
-        elif event_type == "retry_state":
-            self._on_retry_state(update)
-        elif event_type == "doom_loop_detected":
-            self._on_doom_loop(update)
-        elif event_type == "available_commands_update":
-            self._on_available_commands(update)
-        # Silently ignore: git_branch_update, compaction_checkpoint
+        try:
+            if event_type == "agent_message_chunk":
+                self._on_agent_message_chunk(update)
+            elif event_type == "tool_call":
+                self._on_tool_call(update)
+            elif event_type == "tool_call_update":
+                self._on_tool_call_update(update)
+            elif event_type == "plan":
+                self._on_plan(update)
+            elif event_type == "hook_annotation":
+                self._on_hook_annotation(update)
+            elif event_type == "user_message_chunk":
+                self._on_user_message_chunk(update)
+            elif event_type == "agent_thought_chunk":
+                self._on_agent_thought_chunk(update)
+            elif event_type == "task_backgrounded":
+                self._on_task_backgrounded(update)
+            elif event_type == "task_completed":
+                self._on_task_completed(update)
+            elif event_type == "auto_compact_started":
+                self._on_compact_started(update)
+            elif event_type == "auto_compact_completed":
+                self._on_compact_completed(update)
+            elif event_type == "retry_state":
+                self._on_retry_state(update)
+            elif event_type == "doom_loop_detected":
+                self._on_doom_loop(update)
+            elif event_type == "available_commands_update":
+                self._on_available_commands(update)
+            # Silently ignore: git_branch_update, compaction_checkpoint
+        except Exception as e:
+            # Never let one bad event abort replay / live tail
+            self._debug(f"DISPATCH_ERR type={event_type!r} err={e!r}")
+            try:
+                self.notify(
+                    f"Event error ({event_type or '?'}): {e}",
+                    severity="warning",
+                    timeout=4,
+                )
+            except Exception:
+                pass
 
         # Bound DOM growth for long-lived sessions (7d+ must stay responsive).
         self._maybe_prune_after_mount()
 
     def _on_agent_message_chunk(self, update: dict) -> None:
         """Handle streaming agent message text."""
-        content_obj = update.get("content", {})
-        text = content_obj.get("text", "")
+        text = self._update_text(update)
         if not text:
             return
 
@@ -3633,8 +3676,7 @@ Type anything else to send a message to the agent.
 
     def _on_agent_thought_chunk(self, update: dict) -> None:
         """Handle thinking/reasoning chunks."""
-        content_obj = update.get("content", {})
-        text = content_obj.get("text", "")
+        text = self._update_text(update)
         if not text:
             return
 
@@ -3771,8 +3813,13 @@ Type anything else to send a message to the agent.
     def _on_plan(self, update: dict) -> None:
         """Handle plan/todo updates."""
         entries = update.get("entries", [])
-        if not entries:
+        if not isinstance(entries, list) or not entries:
             return
+        # PlanPanel does entry.get — coerce string entries
+        entries = [
+            (e if isinstance(e, dict) else {"content": str(e), "status": "pending"})
+            for e in entries
+        ]
 
         content = self._content_scroll()
 
@@ -3796,8 +3843,7 @@ Type anything else to send a message to the agent.
 
     def _on_user_message_chunk(self, update: dict) -> None:
         """Handle user message display from updates stream."""
-        content_obj = update.get("content", {})
-        text = content_obj.get("text", "")
+        text = self._update_text(update)
         if not text:
             return
 
@@ -3858,6 +3904,8 @@ Type anything else to send a message to the agent.
     def _on_task_completed(self, update: dict) -> None:
         """Handle task completed notification."""
         snapshot = update.get("task_snapshot", {})
+        if not isinstance(snapshot, dict):
+            snapshot = {}
         task_id = snapshot.get("task_id", "?")
         command = snapshot.get("command", "?")
         exit_code = snapshot.get("exit_code", "?")
@@ -4038,7 +4086,7 @@ Type anything else to send a message to the agent.
                         event_type = update.get("sessionUpdate", "")
                         
                         if event_type == "agent_message_chunk":
-                            text = update.get("content", {}).get("text", "")
+                            text = self._update_text(update)
                             if text:
                                 cleaned, ephacts = extract_ephacts(text)
                                 if ephacts:
@@ -4053,7 +4101,7 @@ Type anything else to send a message to the agent.
                                 msg._chunks = [text]
                                 widgets_to_prepend.append(msg)
                         elif event_type == "user_message_chunk":
-                            text = update.get("content", {}).get("text", "")
+                            text = self._update_text(update)
                             if text:
                                 if is_system_reminder(text):
                                     widgets_to_prepend.append(SystemReminderPanel(text))

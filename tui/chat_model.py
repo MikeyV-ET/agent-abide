@@ -179,10 +179,19 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
             item.status = update["status"]
             if item.status in ("completed", "failed"):
                 item.collapsed = True
-        for c in update.get("content") or []:
+        content_field = update.get("content")
+        blocks = content_field if isinstance(content_field, list) else []
+        for c in blocks:
+            if not isinstance(c, dict):
+                continue
             if c.get("type") == "content":
                 inner = c.get("content") or {}
-                text = inner.get("text") or ""
+                if isinstance(inner, dict):
+                    text = inner.get("text") or ""
+                elif isinstance(inner, str):
+                    text = inner
+                else:
+                    text = ""
                 if text:
                     clean, _inter = extract_interjections(text)
                     item.output = clean  # latest-wins style full replace

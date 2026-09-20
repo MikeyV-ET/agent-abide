@@ -47,8 +47,15 @@ def coalesce_events(events: list[dict]) -> list[dict]:
             base = pending_chunks[0]
             for e in pending_chunks:
                 u = (e.get("params") or {}).get("update", {})
-                c = u.get("content") or {}
-                texts.append(c.get("text") or "")
+                if not isinstance(u, dict):
+                    u = {}
+                c = u.get("content")
+                if isinstance(c, dict):
+                    texts.append(c.get("text") or "")
+                elif isinstance(c, str):
+                    texts.append(c)
+                else:
+                    texts.append("")
             merged = {
                 **base,
                 "params": {

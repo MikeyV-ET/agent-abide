@@ -103,7 +103,11 @@ class ClaudeBackend(AgentBackend):
                 cmd.extend(["--session-id", session_id])
 
         # API key auth: set env var and use --bare mode
-        env = os.environ.copy()
+        env = self._build_child_env(
+            agent_cwd,
+            agent_name=kwargs.get("agent_name"),
+            interjection_enabled=bool(kwargs.get("interjection_enabled")),
+        )
         api_key = self._api_key or os.environ.get("ANTHROPIC_API_KEY")
         if api_key:
             env["ANTHROPIC_API_KEY"] = api_key
@@ -146,6 +150,32 @@ class ClaudeBackend(AgentBackend):
                                   agent_cwd=agent_cwd, **kwargs)
 
         return self._session_id
+
+    @staticmethod
+    def _build_child_env(agent_cwd: str, agent_name: str = None,
+                         interjection_enabled: bool = False) -> dict:
+        """Environment for the claude child process (mirrors GrokBackend).
+
+        AGENT_HOME/AGENT_NAME let interjection_hook.sh find the right queue.
+        BASH_ENV installs the hook itself: it is sourced by every ``bash -c``
+        the binary runs, and prepends any queued messages to that tool call's
+        stdout. Without it, queued interjections sit on disk until the turn
+        ends and nothing records that a message arrived.
+        """
+        from pathlib import Path as _Path
+
+        env = {
+            **os.environ,
+            "AGENT_HOME": agent_cwd,
+            "ASDAAAS_DIR": str(_Path(agent_cwd) / "asdaaas"),
+        }
+        if agent_name:
+            env["AGENT_NAME"] = agent_name
+        if interjection_enabled and agent_name:
+            hook_path = _Path(__file__).parent / "interjection_hook.sh"
+            if hook_path.exists():
+                env["BASH_ENV"] = str(hook_path)
+        return env
 
     @staticmethod
     def _session_file_exists(session_id: str) -> bool:

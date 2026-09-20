@@ -171,3 +171,36 @@ def test_refresh_tokens_seeds_itself_when_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(type(be), "session_file", property(lambda self: str(session)))
 
     assert be.refresh_tokens() == 80_100
+
+
+# --- interjection env wiring ----------------------------------------------
+
+
+def test_child_env_carries_agent_identity():
+    """The hook needs AGENT_HOME to find the right interjection queue."""
+    be = ClaudeBackend()
+    env = be._build_child_env("/home/eric/agents/Sixel/Astro", agent_name="Astro",
+                              interjection_enabled=False)
+    assert env["AGENT_HOME"] == "/home/eric/agents/Sixel/Astro"
+    assert env["AGENT_NAME"] == "Astro"
+    assert env["ASDAAAS_DIR"].endswith("/asdaaas")
+
+
+def test_bash_env_hook_installed_when_interjection_enabled():
+    """Mid-turn delivery rides BASH_ENV; grok sets it, Claude did not."""
+    be = ClaudeBackend()
+    env = be._build_child_env("/tmp/agent", agent_name="Astro", interjection_enabled=True)
+    assert env["BASH_ENV"].endswith("interjection_hook.sh")
+    assert os.path.exists(env["BASH_ENV"])
+
+
+def test_no_bash_env_when_interjection_disabled():
+    be = ClaudeBackend()
+    env = be._build_child_env("/tmp/agent", agent_name="Astro", interjection_enabled=False)
+    assert "BASH_ENV" not in env
+
+
+def test_no_bash_env_without_an_agent_name():
+    be = ClaudeBackend()
+    env = be._build_child_env("/tmp/agent", agent_name=None, interjection_enabled=True)
+    assert "BASH_ENV" not in env

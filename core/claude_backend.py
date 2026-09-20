@@ -273,10 +273,21 @@ class ClaudeBackend(AgentBackend):
                     result_text = frame.get("result", "")
                     if result_text and not speech_chunks:
                         speech_chunks.append(result_text)
+                try:
+                    self.sync_hot_stream()
+                except Exception:
+                    pass
                 break
             else:
                 self._process_frame(frame, speech_chunks, thought_chunks,
                                     on_speech_chunk, on_tool_call, on_meta)
+                # Live TUI reads history/hot.jsonl. Session jsonl grows during
+                # the turn (complete assistant/tool lines, not token deltas).
+                # Sync often so paint is not stuck until turn boundary.
+                try:
+                    self.sync_hot_stream()
+                except Exception:
+                    pass
 
         return ResponseResult(
             speech="".join(speech_chunks),
@@ -343,12 +354,16 @@ class ClaudeBackend(AgentBackend):
         # rate_limit_event, user echo, etc. -- skip silently
 
     def refresh_tokens(self) -> int:
-        """Return current accumulated token count.
+        """Return current token occupancy; also catch up hot.jsonl.
 
-        Claude Code tracks tokens per-turn via result frames. There is no
-        external file to read between turns — the accumulated count from
-        collect_response is the best available.
+        Claude has no updates.jsonl — session jsonl is the native SoR.
+        Main-loop refresh_tokens is our between-turn chance to tail it
+        (Grok does the same from refresh_tokens).
         """
+        try:
+            self.sync_hot_stream()
+        except Exception:
+            pass
         return self._total_tokens
 
     async def drain_stale(self) -> tuple[int, str]:

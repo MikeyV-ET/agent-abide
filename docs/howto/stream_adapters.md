@@ -30,3 +30,13 @@ claude session jsonl
 | `full_stream_hook` | inotify/poll orchestration, config tail_grok |
 
 Compat: `aa_stream.tail_grok_once` still works (shim).
+
+## Claude live paint lag (2026-09-20)
+
+TUI for Claude reads `hot.jsonl`. Session jsonl is written as **complete**
+assistant/tool lines (not token deltas), so speech still arrives in message-
+sized chunks. AA must still **tail during collect_response**, not only at
+turn end — otherwise the whole turn dumps at once when deliver finishes.
+
+`ClaudeBackend.collect_response` calls `sync_hot_stream()` after each frame
+and on `refresh_tokens`.

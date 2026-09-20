@@ -42,6 +42,8 @@ def test_write_health_embeds_stale_observer(tmp_path, monkeypatch):
     assert health["reasoning_effort"] == "medium"
     assert health["observer"]["state"] == "BUSY"
     assert health["observer"]["last_event_type"] == "claude:text"
+    # activity may be absent on older snapshots
+    assert "activity" in health["observer"]
     assert health["observer"]["model_id"] == "claude-opus-5"
 
 

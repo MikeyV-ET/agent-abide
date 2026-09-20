@@ -384,26 +384,33 @@ def test_dequeue_is_visible_too():
 
 
 def test_queue_traffic_does_not_move_the_state_machine():
-    """Metadata only: an arriving message is not the agent doing work."""
-    obs = _observer()
-    obs.process_event({"type": "user", "message": {"content": "go"}})
+    """SESSION_ACTIVITY must not flip BUSY/IDLE or inflate turn_event_count."""
+    from binary_state.claude import ClaudeBinaryStateObserver
+    from binary_state.types import ObserverState
+
+    obs = ClaudeBinaryStateObserver(pid=1, process_alive_fn=lambda p: True)
+    # prime as BUSY mid-turn
     obs.process_event(
         {
             "type": "assistant",
-            "message": {"stop_reason": "tool_use", "content": [
-                {"type": "tool_use", "id": "toolu_q", "name": "Bash", "input": {}}]},
+            "timestamp": "2026-09-20T15:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-5",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+            },
         }
     )
     before = obs.state_dict()
+    assert before["state"] == "BUSY"
     obs.process_event(_queue_line("enqueue"))
     after = obs.state_dict()
+    assert after["state"] == "BUSY"
+    assert after["activity"] == "message_enqueued"
+    assert after["last_event_type"] == "claude:queue:enqueue"
+    # machine: SESSION_ACTIVITY is metadata-only — no turn_event_count tick
+    assert after["turn_event_count"] == before["turn_event_count"]
 
-    assert after["state"] == before["state"] == ObserverState.BUSY.value
-    assert after["pending_tools"] == before["pending_tools"]
-    # turn_event_count DOES tick: machine.apply() increments it before it
-    # dispatches on kind, so even metadata events count. Documented rather than
-    # worked around — the counter lives in machine.py, which is not mine to change.
-    assert after["turn_event_count"] == before["turn_event_count"] + 1
 
 
 def test_arrival_is_still_readable_after_the_dequeue_lands():

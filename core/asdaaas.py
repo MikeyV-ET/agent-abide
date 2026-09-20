@@ -377,6 +377,7 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
             "since": observer_state.get("since"),
             "written_at": observer_state.get("written_at"),
             "last_event_type": observer_state.get("last_event_type"),
+            "activity": observer_state.get("activity"),
             "model_id": obs_model,
             "reasoning_effort": observer_state.get("reasoning_effort"),
             "doom_loop": observer_state.get("doom_loop"),

@@ -188,6 +188,24 @@ class BinaryActivityMachine:
             )
             return
 
+        # Metadata-only kinds: record but do not inflate turn_event_count
+        # (Claude queue-operation SESSION_ACTIVITY would otherwise tick every enqueue).
+        if ev.kind in (ActivityKind.MODEL_INFO, ActivityKind.SESSION_ACTIVITY):
+            if ev.kind == ActivityKind.MODEL_INFO:
+                if ev.model_id and ev.model_id not in ("unknown", "<synthetic>", "synthetic"):
+                    if not (ev.model_id.startswith("<") and ev.model_id.endswith(">")):
+                        self._model_id = ev.model_id
+                if ev.reasoning_effort:
+                    self._reasoning_effort = ev.reasoning_effort
+            else:  # SESSION_ACTIVITY
+                if ev.activity is not None:
+                    self._activity = ev.activity
+                if ev.model_id:
+                    self._model_id = ev.model_id
+                if ev.reasoning_effort:
+                    self._reasoning_effort = ev.reasoning_effort
+            return
+
         self._turn_event_count += 1
 
         if ev.kind == ActivityKind.TURN_END:
@@ -237,23 +255,6 @@ class BinaryActivityMachine:
                 ObserverState.GONE,
             ):
                 self._set_state(ObserverState.BUSY)
-
-        elif ev.kind == ActivityKind.MODEL_INFO:
-            if ev.model_id and ev.model_id not in ("unknown", "<synthetic>", "synthetic"):
-                if not (ev.model_id.startswith("<") and ev.model_id.endswith(">")):
-                    self._model_id = ev.model_id
-            if ev.reasoning_effort:
-                self._reasoning_effort = ev.reasoning_effort
-            return  # no silence bump
-
-        elif ev.kind == ActivityKind.SESSION_ACTIVITY:
-            if ev.activity is not None:
-                self._activity = ev.activity
-            if ev.model_id:
-                self._model_id = ev.model_id
-            if ev.reasoning_effort:
-                self._reasoning_effort = ev.reasoning_effort
-            return
 
         # silence from event type (tool_start sets its own)
         if ev.kind != ActivityKind.TOOL_START:

@@ -304,6 +304,19 @@ _current_backend_type = "unknown"
 def write_health(agent_name, status, detail="", total_tokens=0, context_window=CONTEXT_WINDOW, env=None,
                   observer_state=None):
     agent_dir(agent_name, env=env).mkdir(parents=True, exist_ok=True)
+    # Hot-path writes often omit observer_state; binary_state.json TTL is 1s so
+    # turn_engine's read_state_file() usually returns None. Always embed last
+    # snapshot for TUI (ignore_ttl).
+    if observer_state is None:
+        try:
+            from binary_state.machine import BinaryActivityMachine
+            obs_path = agent_dir(agent_name, env=env) / "binary_state.json"
+            if obs_path.is_file():
+                observer_state = BinaryActivityMachine.read_state_file(
+                    str(obs_path), ignore_ttl=True
+                )
+        except Exception:
+            observer_state = None
     health = {
         "agent": agent_name,
         "status": status,
@@ -317,12 +330,19 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
         "model": _rt.current_model_id,
         "session_id": _rt.current_session_id,
         "backend": _rt.current_backend_type,
+        "reasoning_effort": getattr(_rt, "current_reasoning_effort", None),
     }
     if observer_state is not None:
         health["observer"] = {
             "state": observer_state.get("state"),
             "since": observer_state.get("since"),
             "written_at": observer_state.get("written_at"),
+            "last_event_type": observer_state.get("last_event_type"),
+            "model_id": observer_state.get("model_id"),
+            "reasoning_effort": observer_state.get("reasoning_effort"),
+            "doom_loop": observer_state.get("doom_loop"),
+            "turn_event_count": observer_state.get("turn_event_count"),
+            "pid": observer_state.get("pid"),
         }
     path = agent_dir(agent_name, env=env) / "health.json"
     tmp = str(path) + ".tmp"
@@ -2308,7 +2328,8 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     session_file=_claude_file,
                     state_file=observer_state_file,
                     on_model_id=lambda model_id, effort: _rt.set_identity(
-                        model_id=model_id
+                        model_id=model_id,
+                        reasoning_effort=effort,
                     ),
                 )
             else:

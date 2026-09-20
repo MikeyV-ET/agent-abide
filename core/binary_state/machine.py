@@ -346,11 +346,16 @@ class BinaryActivityMachine:
         os.rename(tmp, path)
 
     @staticmethod
-    def read_state_file(path: str) -> Optional[dict]:
+    def read_state_file(path: str, *, ignore_ttl: bool = False) -> Optional[dict]:
+        """Read observer state file.
+
+        Default: None if past expires_at (live control plane).
+        ignore_ttl=True: return last snapshot anyway (health.json embedding).
+        """
         try:
             with open(path) as f:
                 state = json.load(f)
-            if time.time() > state.get("expires_at", 0):
+            if not ignore_ttl and time.time() > state.get("expires_at", 0):
                 return None
             return state
         except (FileNotFoundError, json.JSONDecodeError, OSError):

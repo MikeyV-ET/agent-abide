@@ -48,3 +48,54 @@ def test_resolve_prefers_hot(tmp_path: Path):
     kind, path = resolve_history_source(home, prefer="auto")
     assert kind == "hot"
     assert path == hot
+
+
+def test_select_tail_speech_first():
+    from tui_history import select_tail_events, is_speech_tui_event
+
+    def msg(role, text):
+        su = "user_message_chunk" if role == "user" else "agent_message_chunk"
+        return {
+            "params": {"update": {"sessionUpdate": su, "content": {"text": text}}},
+        }
+
+    def tool(i):
+        return {
+            "params": {"update": {"sessionUpdate": "tool_call", "toolCallId": str(i), "title": "t"}},
+        }
+
+    evs = [tool(i) for i in range(10)]
+    for i in range(5):
+        evs.append(msg("user", f"u{i}"))
+        evs.append(tool(100 + i))
+        evs.append(msg("assistant", f"a{i}"))
+    sel = select_tail_events(evs, 3, speech_first=True)
+    speech = [e for e in sel if is_speech_tui_event(e)]
+    assert len(speech) == 3
+    texts = [e["params"]["update"]["content"]["text"] for e in speech]
+    # last 3 speech in stream: ... u3, a3, u4, a4 → last 3 are a3, u4, a4
+    assert texts == ["a3", "u4", "a4"]
+    # tools between them retained
+    assert any(e["params"]["update"]["sessionUpdate"] == "tool_call" for e in sel)
+
+
+def test_line_to_tui_hot_and_updates():
+    from tui_history import line_to_tui_event
+    import json
+    hot = {
+        "format": "aa.stream",
+        "role": "assistant",
+        "body": {"kind": "text", "text": "hello"},
+    }
+    ev = line_to_tui_event(json.dumps(hot), "hot")
+    assert ev["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    grok = {
+        "params": {
+            "update": {
+                "sessionUpdate": "user_message_chunk",
+                "content": {"text": "hi"},
+            }
+        }
+    }
+    ev2 = line_to_tui_event(json.dumps(grok), "updates")
+    assert ev2["params"]["update"]["content"]["text"] == "hi"

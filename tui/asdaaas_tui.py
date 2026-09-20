@@ -3203,74 +3203,106 @@ Type anything else to send a message to the agent.
                 current_size = updates_path.stat().st_size
                 hist_kind = state.get("history_kind") or kind
                 if current_size > 0:
-                    # Large files: read a tail window. hot.jsonl lines embed full
-                    # native grok events → much fatter than updates.jsonl, so use
-                    # a bigger window and count paint-worthy events after bridge.
-                    if tail_count and current_size > 100000:
-                        if hist_kind == "hot":
-                            # ~8 MiB; expand once if still short on paint events
-                            read_size = min(current_size, 8 * 1024 * 1024)
-                        else:
-                            read_size = min(current_size, 500000)
-                        seek_pos = current_size - read_size
-                        with open(updates_path, "r", errors="replace") as f:
+                    # Binary tail window. hot.jsonl lines embed full native payloads
+                    # (often multi-KB); expand until we have enough *speech* events
+                    # for -t N (or hit ceiling).
+                    core = str(Path(__file__).resolve().parent.parent / "core")
+                    if core not in sys.path:
+                        sys.path.insert(0, core)
+                    from tui_history import (
+                        line_to_tui_event,
+                        select_tail_events,
+                        is_speech_tui_event,
+                    )
+
+                    want = int(tail_count) if tail_count else None
+                    # grow window: 2→8→32 MiB until speech count met or file start
+                    windows = [2, 8, 32, 128]
+                    if hist_kind != "hot":
+                        windows = [1, 2, 8]  # MiB; updates denser
+                    events: list = []
+                    data_start = 0
+                    raw_line_n = 0
+                    for mib in windows:
+                        read_size = min(current_size, mib * 1024 * 1024)
+                        seek_pos = max(0, current_size - read_size)
+                        with open(updates_path, "rb") as f:
                             f.seek(seek_pos)
                             if seek_pos > 0:
-                                f.readline()  # skip partial first line
+                                f.readline()  # drop partial
                             data_start = f.tell()
-                            tail_data = f.read()
+                            raw = f.read()
                             state["updates_offset"] = f.tell()
-                        all_lines = [l for l in tail_data.strip().split("\n") if l.strip()]
-                        lines = all_lines
-                        state["earliest_offset"] = data_start
-                    else:
-                        with open(updates_path, "r", errors="replace") as f:
-                            all_data = f.read()
-                            state["updates_offset"] = f.tell()
-                        lines = [l for l in all_data.strip().split("\n") if l.strip()]
-                        state["earliest_offset"] = 0
-
-                    aa_bridge = None
-                    if hist_kind == "hot":
-                        try:
-                            core = str(Path(__file__).resolve().parent.parent / "core")
-                            if core not in sys.path:
-                                sys.path.insert(0, core)
-                            from tui_history import aa_event_to_tui_update as aa_bridge
-                        except Exception:
-                            aa_bridge = None
-
-                    # Build event list; for hot, keep last tail_count *paint* events
-                    events = []
-                    for line in lines:
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if aa_bridge is not None:
-                            event = aa_bridge(obj)
-                            if event is None:
+                        text_data = raw.decode("utf-8", errors="replace")
+                        # (byte_offset, line) for earliest_offset after select
+                        paired = []
+                        pos = data_start
+                        parts = text_data.split("\n")
+                        for i, l in enumerate(parts):
+                            line_start = pos
+                            pos += len(l.encode("utf-8")) + (1 if i < len(parts) - 1 else 0)
+                            if not l.strip():
                                 continue
+                            paired.append((line_start, l))
+                        raw_line_n = len(paired)
+                        events = []  # list of (offset, event)
+                        for off, line in paired:
+                            ev = line_to_tui_event(line, hist_kind)
+                            if ev is not None:
+                                events.append((off, ev))
+                        speech_n = sum(1 for _, e in events if is_speech_tui_event(e))
+                        self._debug(
+                            f"REPLAY_WINDOW kind={hist_kind} mib={mib} "
+                            f"raw={raw_line_n} paint={len(events)} speech={speech_n}"
+                        )
+                        if want is None or speech_n >= want or seek_pos == 0:
+                            break
+
+                    # select_tail on events only, preserve offsets
+                    only_ev = [e for _, e in events]
+                    if want:
+                        only_ev = select_tail_events(only_ev, want, speech_first=True)
+                        # re-slice paired events to match selected tail span
+                        if only_ev:
+                            # map by id of object — select returns same object refs
+                            want_ids = {id(e) for e in only_ev}
+                            events = [(o, e) for o, e in events if id(e) in want_ids]
                         else:
-                            event = obj
-                        events.append(event)
-                    if tail_count and len(events) > tail_count:
-                        events = events[-tail_count:]
+                            events = []
+                    if events:
+                        state["earliest_offset"] = events[0][0]
+                    else:
+                        state["earliest_offset"] = data_start
 
                     replay_count = 0
-                    for event in events:
+                    speech_dispatched = 0
+                    for _off, event in events:
                         self.call_from_thread(
                             self._dispatch_event_for_agent, event, agent_name
                         )
                         replay_count += 1
+                        if is_speech_tui_event(event):
+                            speech_dispatched += 1
                     self._debug(
                         f"REPLAY kind={hist_kind} dispatched={replay_count} "
-                        f"raw_lines={len(lines)}"
+                        f"speech={speech_dispatched} raw_lines={raw_line_n}"
                     )
+                    # Surface count once UI is up (helps verify -t N)
+                    msg = (
+                        f"Replay: {speech_dispatched} speech / {replay_count} events"
+                        f" from {hist_kind}"
+                    )
+                    self.call_from_thread(lambda m=msg: self.notify(m, severity="information"))
                     time.sleep(1)
                     self.call_from_thread(self._force_scroll_bottom)
-            except Exception:
-                pass
+            except Exception as e:
+                self._debug(f"REPLAY error: {e!r}")
+                try:
+                    self.call_from_thread(
+                        self.notify, f"Replay error: {e}", severity="error"
+                    )
+                except Exception:
+                    pass
             state["replay_done"] = True
             self._replay_done = True
 
@@ -3883,23 +3915,35 @@ Type anything else to send a message to the agent.
             cursor = state["earliest_offset"]
             collected = []  # (line_start_offset, line_str)
 
+            hist_kind = state.get("history_kind") or "updates"
+            try:
+                core = str(Path(__file__).resolve().parent.parent / "core")
+                if core not in sys.path:
+                    sys.path.insert(0, core)
+                from tui_history import line_to_tui_event
+            except Exception:
+                line_to_tui_event = None  # type: ignore
+
             while cursor > 0 and speech_n < speech_target and bytes_read < max_bytes:
                 read_size = min(cursor, 1024 * 1024)  # 1 MiB steps
                 seek_pos = cursor - read_size
-                with open(updates_path, "r", errors="replace") as f:
+                with open(updates_path, "rb") as f:
                     f.seek(seek_pos)
                     if seek_pos > 0:
                         f.readline()  # skip partial line
                     data_start = f.tell()
-                    chunk = f.read(cursor - data_start)
-                bytes_read += len(chunk)
-                # Pair each complete line with its absolute file offset
+                    raw = f.read(cursor - data_start)
+                chunk = raw.decode("utf-8", errors="replace")
+                bytes_read += len(raw)
+                # Pair each complete line with its absolute *byte* offset
                 batch = []
                 pos = data_start
                 parts = chunk.split("\n")
                 for i, l in enumerate(parts):
                     line_start = pos
-                    pos += len(l) + (1 if i < len(parts) - 1 else 0)
+                    # byte length of line + newline (except possibly last partial)
+                    blen = len(l.encode("utf-8")) + (1 if i < len(parts) - 1 else 0)
+                    pos += blen
                     if not l.strip():
                         continue
                     if line_start >= state["earliest_offset"]:
@@ -3907,9 +3951,14 @@ Type anything else to send a message to the agent.
                     batch.append((line_start, l))
                 # Newest -> oldest within chunk
                 for line_start, line in reversed(batch):
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
+                    if line_to_tui_event is not None:
+                        event = line_to_tui_event(line, hist_kind)
+                    else:
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            event = None
+                    if not event:
                         continue
                     update = (event.get("params") or {}).get("update") or {}
                     et = update.get("sessionUpdate", "")
@@ -3944,7 +3993,12 @@ Type anything else to send a message to the agent.
                 # Build widgets directly instead of using _dispatch_event
                 for line in lines:
                     try:
-                        event = json.loads(line)
+                        if line_to_tui_event is not None:
+                            event = line_to_tui_event(line, hist_kind)
+                        else:
+                            event = json.loads(line)
+                        if not event:
+                            continue
                         update = event.get("params", {}).get("update", {})
                         event_type = update.get("sessionUpdate", "")
                         

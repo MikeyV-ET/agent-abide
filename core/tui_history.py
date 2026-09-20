@@ -124,10 +124,10 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
         return _frame("agent_thought_chunk", {"content": {"text": text}})
 
     if kind == "tool_call":
-        tid = body.get("id") or body.get("tool_id")
+        tid = body.get("id") or body.get("tool_id") or ""
         name = body.get("name") or "tool"
         update = {
-            "toolCallId": tid,
+            "toolCallId": str(tid) if tid is not None else "",
             "title": name,
             "name": name,
             "rawInput": body.get("args") or body.get("input"),
@@ -136,10 +136,10 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
         return _frame("tool_call", update)
 
     if kind == "tool_result":
-        tid = body.get("tool_id") or body.get("id")
+        tid = body.get("tool_id") or body.get("id") or ""
         content = body.get("content") or text or ""
         update = {
-            "toolCallId": tid,
+            "toolCallId": str(tid) if tid is not None else "",
             "status": body.get("status") or "completed",
             "rawOutput": content,
             "content": content,
@@ -163,3 +163,69 @@ def iter_hot_tui_events_from_offset(
         if u is not None:
             out.append(u)
     return out, new_off
+
+
+SPEECH_SESSION_UPDATES = frozenset({
+    "user_message_chunk",
+    "agent_message_chunk",
+    "agent_thought_chunk",
+})
+
+
+def is_speech_tui_event(event: dict[str, Any]) -> bool:
+    """True if a TUI update event carries visible speech/thought text."""
+    if not isinstance(event, dict):
+        return False
+    update = (event.get("params") or {}).get("update") or {}
+    su = update.get("sessionUpdate") or ""
+    if su not in SPEECH_SESSION_UPDATES:
+        return False
+    c = update.get("content") or {}
+    t = c.get("text", "") if isinstance(c, dict) else (c if isinstance(c, str) else "")
+    return bool(str(t).strip())
+
+
+def line_to_tui_event(line: str, hist_kind: str = "updates") -> Optional[dict[str, Any]]:
+    """Parse one jsonl line from hot or updates into a TUI dispatch event."""
+    import json as _json
+    try:
+        obj = _json.loads(line)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if hist_kind == "hot" or (
+        obj.get("format") == "aa.stream" or (obj.get("body") and obj.get("class"))
+    ):
+        return aa_event_to_tui_update(obj)
+    # already grok-shaped
+    if (obj.get("params") or {}).get("update") is not None:
+        return obj
+    return None
+
+
+def select_tail_events(
+    events: list[dict[str, Any]],
+    n: int,
+    *,
+    speech_first: bool = True,
+) -> list[dict[str, Any]]:
+    """Take a tail window of N items.
+
+    When speech_first (default), N counts *speech* events (user/agent/thought
+    with text). Tools inside that span are kept so context is not stripped.
+    """
+    if n is None or n <= 0 or len(events) <= n and not speech_first:
+        return list(events)
+    if not speech_first:
+        return events[-n:] if len(events) > n else list(events)
+
+    speech = 0
+    start = len(events)
+    for i in range(len(events) - 1, -1, -1):
+        start = i
+        if is_speech_tui_event(events[i]):
+            speech += 1
+            if speech >= n:
+                break
+    return events[start:]

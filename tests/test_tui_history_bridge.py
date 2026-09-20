@@ -99,3 +99,54 @@ def test_line_to_tui_hot_and_updates():
     }
     ev2 = line_to_tui_event(json.dumps(grok), "updates")
     assert ev2["params"]["update"]["content"]["text"] == "hi"
+
+
+def test_grok_native_passthrough_preserves_interjection():
+    import json
+    from tui_history import aa_event_to_tui_update
+
+    bash = "x\n<interjection>\n[eric] hi there</interjection>\ny\n"
+    native = {
+        "timestamp": 42.0,
+        "method": "session/update",
+        "params": {
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc1",
+                "status": "in_progress",
+                "content": [
+                    {"type": "content", "content": {"type": "text", "text": bash}}
+                ],
+            }
+        },
+    }
+    ev = {
+        "format": "aa.stream",
+        "backend": "grok",
+        "native": {"event": native},
+        "body": {"kind": "tool_call"},  # lossy body — must not win
+    }
+    out = aa_event_to_tui_update(ev)
+    assert out["params"]["update"]["sessionUpdate"] == "tool_call_update"
+    assert "hi there" in out["params"]["update"]["content"][0]["content"]["text"]
+
+
+def test_tool_result_decodes_bash_bytes():
+    import json
+    from tui_history import aa_event_to_tui_update
+
+    text = "<interjection>\nbell</interjection>"
+    payload = {"type": "Bash", "output": list(text.encode())}
+    ev = {
+        "format": "aa.stream",
+        "body": {
+            "kind": "tool_result",
+            "tool_id": "t",
+            "content": json.dumps(payload),
+            "status": "completed",
+        },
+    }
+    out = aa_event_to_tui_update(ev)
+    blob = out["params"]["update"]["content"][0]["content"]["text"]
+    assert "<interjection>" in blob
+    assert "bell" in blob

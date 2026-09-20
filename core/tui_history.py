@@ -79,15 +79,83 @@ def entry_to_tui_lines(entry: dict[str, Any]) -> list[str]:
     return [text]
 
 
+def _decode_tool_output(content) -> str:
+    """Turn grok/bash tool payload into plain text (for interjection scan)."""
+    import json as _json
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        s = content
+        # JSON-encoded bash wrapper?
+        if s.startswith("{") and ("output" in s or "type" in s):
+            try:
+                content = _json.loads(s)
+            except Exception:
+                return s
+        else:
+            return s
+    if isinstance(content, list):
+        # content[] blocks already
+        parts = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "content":
+                inner = item.get("content") or {}
+                if isinstance(inner, dict) and isinstance(inner.get("text"), str):
+                    parts.append(inner["text"])
+                elif isinstance(inner, str):
+                    parts.append(inner)
+            elif item.get("type") == "text" and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        # {'type':'Bash','output':[byte ints]} or {'text':...}
+        if isinstance(content.get("text"), str):
+            return content["text"]
+        out = content.get("output")
+        if isinstance(out, list) and out and isinstance(out[0], int):
+            try:
+                return bytes(out).decode("utf-8", errors="replace")
+            except Exception:
+                return ""
+        if isinstance(out, str):
+            return out
+        if isinstance(out, list):
+            # list of strings?
+            return "".join(str(x) for x in out)
+        return _json.dumps(content, ensure_ascii=False)
+    return str(content)
+
+
 def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Map one aa.stream v1 event → grok session/update shape for TUI dispatch.
 
-    Returns None when the event has nothing to paint (meta chrome, empty).
+    Grok-sourced hot lines keep the full native updates.jsonl event in
+    ``native.event``. Pass that through so tool stdout / <interjection> blocks
+    match prod TUI behavior. Body-based mapping is the fallback (Claude, etc.).
     """
     if not isinstance(ev, dict):
         return None
     if ev.get("format") and ev.get("format") != "aa.stream":
         return None
+
+    native = (ev.get("native") or {}).get("event")
+    backend = (ev.get("backend") or "").lower()
+    # Prefer native grok session/update — preserves tool content + interjections
+    if isinstance(native, dict):
+        upd = (native.get("params") or {}).get("update")
+        if isinstance(upd, dict) and upd.get("sessionUpdate"):
+            out = {
+                "timestamp": native.get("timestamp", ev.get("ts")),
+                "method": native.get("method", "session/update"),
+                "params": {"update": dict(upd)},
+                "_aa_stream": True,
+                "_aa_class": ev.get("class"),
+                "_aa_seq": ev.get("stream_seq"),
+                "_aa_backend": backend or "grok",
+            }
+            return out
 
     body = ev.get("body") or {}
     kind = body.get("kind") or ""
@@ -102,20 +170,17 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
             "timestamp": ts,
             "method": "session/update",
             "params": {"update": u},
-            # breadcrumb for debugging / dual-path
             "_aa_stream": True,
             "_aa_class": ev.get("class"),
             "_aa_seq": ev.get("stream_seq"),
+            "_aa_backend": backend,
         }
 
     if kind in ("text_delta", "text"):
         if not text:
             return None
-        content = {"text": text} if kind == "text_delta" or True else text
-        # TUI chunk handlers expect content as {"text": ...}
         if role in ("user", "human"):
             return _frame("user_message_chunk", {"content": {"text": text}})
-        # assistant / agent / default
         return _frame("agent_message_chunk", {"content": {"text": text}})
 
     if kind in ("thinking_delta", "thinking"):
@@ -126,28 +191,41 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
     if kind == "tool_call":
         tid = body.get("id") or body.get("tool_id") or ""
         name = body.get("name") or "tool"
-        update = {
-            "toolCallId": str(tid) if tid is not None else "",
-            "title": name,
-            "name": name,
-            "rawInput": body.get("args") or body.get("input"),
-            "status": body.get("status") or "started",
-        }
-        return _frame("tool_call", update)
+        return _frame(
+            "tool_call",
+            {
+                "toolCallId": str(tid) if tid is not None else "",
+                "title": name,
+                "name": name,
+                "rawInput": body.get("args") or body.get("input"),
+                "status": body.get("status") or "started",
+            },
+        )
 
     if kind == "tool_result":
         tid = body.get("tool_id") or body.get("id") or ""
-        content = body.get("content") or text or ""
-        update = {
-            "toolCallId": str(tid) if tid is not None else "",
-            "status": body.get("status") or "completed",
-            "rawOutput": content,
-            "content": content,
-        }
-        return _frame("tool_call_update", update)
+        raw = body.get("content") or text or ""
+        decoded = _decode_tool_output(raw)
+        # Shape matching grok tool_call_update so _on_tool_call_update
+        # can find content[].content.text and extract interjections.
+        return _frame(
+            "tool_call_update",
+            {
+                "toolCallId": str(tid) if tid is not None else "",
+                "status": body.get("status") or "completed",
+                "rawOutput": decoded,
+                "content": [
+                    {
+                        "type": "content",
+                        "content": {"type": "text", "text": decoded},
+                    }
+                ],
+            },
+        )
 
     # meta / usage / raw_only — no paint
     return None
+
 
 
 def iter_hot_tui_events_from_offset(

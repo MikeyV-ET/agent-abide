@@ -3699,35 +3699,70 @@ Type anything else to send a message to the agent.
         if status:
             panel.set_status(status)
 
-        # Extract text content
-        for item in content_list:
-            if item.get("type") == "content":
-                inner = item.get("content", {})
-                text = inner.get("text", "")
-                if text:
-                    # Extract interjection blocks and mount as separate widgets
-                    clean_text, interjections = self._extract_interjections(text)
-                    if interjections:
-                        content = self._content_scroll()
-                        mounted_any = False
-                        for msg in interjections:
-                            key = interjection_key(msg)
-                            # App-level + per-panel dedup: same interjection is
-                            # re-emitted on every tool_call_update as stdout grows,
-                            # and BASH_ENV injects into every concurrent tool stream.
-                            if key in self._seen_interjections or msg in panel._mounted_interjections:
-                                continue
-                            self._seen_interjections.add(key)
-                            panel._mounted_interjections.add(msg)
-                            content.mount(InterjectionBlock(msg), before=panel)
-                            mounted_any = True
-                        if mounted_any and self._following_tail():
-                            content.refresh(layout=True)
-                    panel.set_output(clean_text)
-            elif item.get("type") == "diff":
-                # Show diff info
-                path = item.get("path", "")
-                panel.set_output(f"[diff] {path}")
+        # Collect text from content[] and rawOutput (interjections live in stdout)
+        texts = []
+        if isinstance(content_list, list):
+            for item in content_list:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "content":
+                    inner = item.get("content", {})
+                    if isinstance(inner, dict):
+                        t = inner.get("text", "")
+                        if t:
+                            texts.append(str(t))
+                    elif isinstance(inner, str) and inner:
+                        texts.append(inner)
+                elif item.get("type") == "diff":
+                    path = item.get("path", "")
+                    panel.set_output(f"[diff] {path}")
+        elif isinstance(content_list, str) and content_list.strip():
+            texts.append(content_list)
+        raw_out = update.get("rawOutput")
+        if isinstance(raw_out, str) and raw_out.strip():
+            texts.append(raw_out)
+        elif raw_out is not None and not isinstance(raw_out, str):
+            # bash wrapper dict / byte array JSON — decode best-effort
+            try:
+                core = str(Path(__file__).resolve().parent.parent / "core")
+                if core not in sys.path:
+                    sys.path.insert(0, core)
+                from tui_history import _decode_tool_output
+                decoded = _decode_tool_output(raw_out)
+                if decoded:
+                    texts.append(decoded)
+            except Exception:
+                texts.append(str(raw_out))
+
+        # Dedup identical consecutive blobs (content + rawOutput often duplicate)
+        seen_txt = set()
+        ordered = []
+        for t in texts:
+            if t in seen_txt:
+                continue
+            seen_txt.add(t)
+            ordered.append(t)
+
+        for text in ordered:
+            clean_text, interjections = self._extract_interjections(text)
+            if interjections:
+                content = self._content_scroll()
+                mounted_any = False
+                for msg in interjections:
+                    key = interjection_key(msg)
+                    # App-level + per-panel dedup: same interjection is
+                    # re-emitted on every tool_call_update as stdout grows,
+                    # and BASH_ENV injects into every concurrent tool stream.
+                    if key in self._seen_interjections or msg in panel._mounted_interjections:
+                        continue
+                    self._seen_interjections.add(key)
+                    panel._mounted_interjections.add(msg)
+                    content.mount(InterjectionBlock(msg), before=panel)
+                    mounted_any = True
+                if mounted_any and self._following_tail():
+                    content.refresh(layout=True)
+            if clean_text.strip():
+                panel.set_output(clean_text)
 
         out_len = len(panel.tool_output) if panel.tool_output else 0
         self._debug(f"TOOL_UPDATE id={tool_id[:8]} status={status} out_len={out_len} collapsed={panel._collapsed}")

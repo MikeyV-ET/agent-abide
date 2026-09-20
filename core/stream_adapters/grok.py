@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from aa_stream import (
+    BODY_MAP_V,
+    FORMAT_FAMILY,
+    FORMAT_V,
     NATIVE_GROK,
     append_hot_events,
     build_event,

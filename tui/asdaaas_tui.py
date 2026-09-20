@@ -7,7 +7,7 @@ The human operator should not be able to tell the difference from the real grok 
 
 Architecture:
   Input:  User types in InputBar → written to asdaaas TUI adapter inbox as JSON
-  Output: Tails updates.jsonl from the agent's session → renders events in real-time
+  Output: Tails history/hot.jsonl (aa.stream) when present, else updates.jsonl → real-time
   Status: Polls health.json + gaze.json for the status bar
 
 Layout:
@@ -3087,7 +3087,7 @@ Type anything else to send a message to the agent.
             self._current_thinking = None
 
     def _find_updates_for_agent(self, agent_name: str) -> Optional[Path]:
-        """Find updates.jsonl for a specific agent."""
+        """Find grok updates.jsonl for a specific agent (legacy native path)."""
         sessions_root = Config.sessions_root()
         agent_path = Config.agent_home(agent_name)
         encoded = str(agent_path).replace("/", "%2F")
@@ -3109,33 +3109,78 @@ Type anything else to send a message to the agent.
                 return updates
         return None
 
+    def _resolve_display_history(self, agent_name: str) -> tuple[str, Optional[Path]]:
+        """Prefer asdaaas/history/hot.jsonl; fall back to updates.jsonl.
+
+        Returns (kind, path) kind in hot|updates|none.
+        Env TUI_HISTORY_SOURCE=hot|updates|auto (default auto).
+        """
+        try:
+            core = str(Path(__file__).resolve().parent.parent / "core")
+            if core not in sys.path:
+                sys.path.insert(0, core)
+            from tui_history import resolve_history_source, hot_jsonl_path
+        except Exception:
+            # fallback: updates only
+            if agent_name == self._agents[0]:
+                p = Config.find_updates_file()
+            else:
+                p = self._find_updates_for_agent(agent_name)
+            return ("updates", p) if p else ("none", None)
+
+        home = Config.agent_home(agent_name)
+        prefer = os.environ.get("TUI_HISTORY_SOURCE") or "auto"
+        # Explicit --updates CLI forces updates for primary
+        if agent_name == self._agents[0] and Config.UPDATES_FILE:
+            return ("updates", Path(Config.UPDATES_FILE))
+
+        kind, path = resolve_history_source(home, prefer=prefer)
+        if kind == "hot" and path and path.exists():
+            return ("hot", path)
+        # updates: try tui_history candidates then grok sessions
+        if kind == "updates" and path and path.exists():
+            return ("updates", path)
+        if agent_name == self._agents[0]:
+            up = Config.find_updates_file()
+        else:
+            up = self._find_updates_for_agent(agent_name)
+        if up:
+            return ("updates", up)
+        # last chance: empty hot path may appear later
+        hot = hot_jsonl_path(home)
+        return ("hot" if prefer == "hot" else "none", hot if prefer == "hot" else None)
+
     def _tail_updates_for_agent(self, agent_name: str) -> None:
-        """Background thread: tail updates.jsonl for a specific agent."""
+        """Background thread: tail display history (hot.jsonl or updates.jsonl)."""
         worker = get_current_worker()
         state = self._agent_state[agent_name]
 
-        # Claude-backed agents don't produce updates.jsonl (grok binary artifact).
-        # Skip tailing — the status poller still works via health.json/gaze.json.
-        if state.get("backend") == "claude":
-            return
+        kind, updates_path = self._resolve_display_history(agent_name)
 
-        # Find updates file for this agent
-        if agent_name == self._agents[0]:
-            # Primary agent uses Config
-            updates_path = Config.find_updates_file()
-        else:
-            updates_path = self._find_updates_for_agent(agent_name)
-
-        if not updates_path:
+        # Claude-backed: no grok updates.jsonl. hot.jsonl is the path once
+        # stream_adapters.claude / full_stream_hook populate it.
+        if state.get("backend") == "claude" and kind != "hot":
+            # Wait briefly for hot to appear (adapter may start after TUI)
             while not worker.is_cancelled:
-                updates_path = self._find_updates_for_agent(agent_name)
-                if updates_path:
+                kind, updates_path = self._resolve_display_history(agent_name)
+                if kind == "hot" and updates_path and updates_path.exists():
+                    break
+                time.sleep(5)
+            if worker.is_cancelled or kind != "hot" or not updates_path:
+                return
+
+        if not updates_path or not Path(updates_path).exists():
+            while not worker.is_cancelled:
+                kind, updates_path = self._resolve_display_history(agent_name)
+                if updates_path and Path(updates_path).exists():
                     break
                 time.sleep(5)
 
         if worker.is_cancelled or not updates_path:
             return
 
+        updates_path = Path(updates_path)
+        state["history_kind"] = kind
         # Cache the path for history loading
         state["updates_path"] = updates_path
 
@@ -3187,9 +3232,24 @@ Type anything else to send a message to the agent.
                         else:
                             state["earliest_offset"] = 0
                     replay_count = 0
+                    aa_bridge = None
+                    if (state.get("history_kind") or kind) == "hot":
+                        try:
+                            core = str(Path(__file__).resolve().parent.parent / "core")
+                            if core not in sys.path:
+                                sys.path.insert(0, core)
+                            from tui_history import aa_event_to_tui_update as aa_bridge
+                        except Exception:
+                            aa_bridge = None
                     for line in lines:
                         try:
-                            event = json.loads(line)
+                            obj = json.loads(line)
+                            if aa_bridge is not None:
+                                event = aa_bridge(obj)
+                                if event is None:
+                                    continue
+                            else:
+                                event = obj
                             self.call_from_thread(
                                 self._dispatch_event_for_agent, event, agent_name
                             )
@@ -3234,20 +3294,38 @@ Type anything else to send a message to the agent.
 
                     parsed = []
                     skip_count = 0
+                    hist_kind = state.get("history_kind") or kind
+                    aa_bridge = None
+                    if hist_kind == "hot":
+                        try:
+                            core = str(Path(__file__).resolve().parent.parent / "core")
+                            if core not in sys.path:
+                                sys.path.insert(0, core)
+                            from tui_history import aa_event_to_tui_update as aa_bridge
+                        except Exception:
+                            aa_bridge = None
                     for line in lines:
                         if not line.strip():
                             continue
                         try:
-                            parsed.append(json.loads(line))
+                            obj = json.loads(line)
                         except json.JSONDecodeError:
                             skip_count += 1
-                    batch = coalesce_events(parsed)
+                            continue
+                        if hist_kind == "hot" and aa_bridge is not None:
+                            ev = aa_bridge(obj)
+                            if ev is not None:
+                                parsed.append(ev)
+                            # else: meta chrome — skip paint
+                        else:
+                            parsed.append(obj)
+                    batch = coalesce_events(parsed) if hist_kind != "hot" else parsed
                     for event in batch:
                         self.call_from_thread(
                             self._dispatch_event_for_agent, event, agent_name
                         )
                     self._debug(
-                        f"TAIL_POLL read={len(new_data)} lines={len(lines)} "
+                        f"TAIL_POLL kind={hist_kind} read={len(new_data)} lines={len(lines)} "
                         f"parsed={len(parsed)} coalesced={len(batch)} "
                         f"skipped={skip_count} offset={state['updates_offset']}"
                     )
@@ -3255,9 +3333,11 @@ Type anything else to send a message to the agent.
                     state["updates_offset"] = 0
 
             except FileNotFoundError:
-                new_path = self._find_updates_for_agent(agent_name)
-                if new_path:
-                    updates_path = new_path
+                new_kind, new_path = self._resolve_display_history(agent_name)
+                if new_path and Path(new_path).exists():
+                    updates_path = Path(new_path)
+                    state["history_kind"] = new_kind
+                    state["updates_path"] = updates_path
                     state["updates_offset"] = 0
             except Exception:
                 pass

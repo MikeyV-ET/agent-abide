@@ -54,11 +54,61 @@ def load_full_stream_config(agent_name: str, env=None) -> Optional[Dict[str, Any
 def maybe_tail_grok_after_turn(
     agent_name: str, env=None, session_id: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    """One-shot drain (end of turn safety net)."""
+    """One-shot drain (end of turn safety net). Name kept; any backend."""
     cfg = load_full_stream_config(agent_name, env)
-    if not cfg or not cfg.get("tail_grok"):
+    if not _stream_tail_enabled(cfg):
         return None
     return _do_tail(agent_name, env=env, session_id=session_id, cfg=cfg)
+
+
+def _stream_tail_enabled(cfg: Optional[Dict[str, Any]]) -> bool:
+    """True if history config wants native→hot tailing.
+
+    Accepts legacy ``tail_grok`` and generic ``tail_stream`` / ``tail_backend``.
+    """
+    if not cfg:
+        return False
+    if cfg.get("tail_stream") or cfg.get("tail_backend"):
+        return True
+    return bool(cfg.get("tail_grok"))
+
+
+def resolve_agent_backend(agent_name: str, env=None, cfg: Optional[Dict[str, Any]] = None) -> str:
+    """backend from history config, agents.json, or health.json (default grok)."""
+    cfg = cfg or {}
+    b = (cfg.get("backend") or "").strip().lower()
+    if b:
+        return b
+    # agents.json
+    try:
+        import json as _json
+        home = Path.home()
+        for cand in (
+            home / "agents" / "config" / "agents.json",
+            Path(os.environ.get("ASDAAAS_CONFIG") or "") if os.environ.get("ASDAAAS_CONFIG") else None,
+        ):
+            if cand is None:
+                continue
+            path = cand if cand.is_file() else (cand / "agents.json" if cand.is_dir() else None)
+            if path is None or not path.is_file():
+                continue
+            data = _json.loads(path.read_text(encoding="utf-8"))
+            ac = (data.get("agents") or {}).get(agent_name) or {}
+            if ac.get("backend"):
+                return str(ac["backend"]).lower()
+    except Exception:
+        pass
+    # health.json
+    try:
+        import json as _json
+        hp = _agent_home(agent_name, env) / "asdaaas" / "health.json"
+        if hp.is_file():
+            h = _json.loads(hp.read_text(encoding="utf-8"))
+            if h.get("backend"):
+                return str(h["backend"]).lower()
+    except Exception:
+        pass
+    return "grok"
 
 
 def _do_tail(
@@ -70,16 +120,18 @@ def _do_tail(
 ) -> Dict[str, Any]:
     cfg = cfg or load_full_stream_config(agent_name, env) or {}
     try:
-        from aa_stream import tail_grok_once
+        from stream_adapters import tail_once_for_backend
     except Exception as e:
-        print(f"[full_stream_hook] import aa_stream failed: {e}")
+        print(f"[full_stream_hook] import stream_adapters failed: {e}")
         return {"status": "error", "error": f"import: {e}"}
 
     home = _agent_home(agent_name, env)
+    backend = resolve_agent_backend(agent_name, env=env, cfg=cfg)
     max_bytes = cfg.get("max_bytes_per_tick")
     max_lines = cfg.get("max_lines_per_tick")
     try:
-        result = tail_grok_once(
+        result = tail_once_for_backend(
+            backend,
             home,
             agent_name,
             session_id=session_id or cfg.get("session_id"),
@@ -89,7 +141,7 @@ def _do_tail(
         n = result.get("lines_ingested") or 0
         if n:
             print(
-                f"[full_stream_hook] {agent_name}: tailed {n} lines "
+                f"[full_stream_hook] {agent_name}/{backend}: tailed {n} lines "
                 f"→ hot {result.get('hot_bytes')}B"
             )
         return result
@@ -99,26 +151,45 @@ def _do_tail(
         return {"status": "error", "error": str(e)}
 
 
-def _resolve_updates_path(agent_name: str, env=None, session_id: Optional[str] = None) -> Optional[Path]:
+def _resolve_native_path(
+    agent_name: str,
+    env=None,
+    session_id: Optional[str] = None,
+    backend: Optional[str] = None,
+) -> Optional[Path]:
+    """Native session file to watch (updates.jsonl or claude session jsonl)."""
+    home = _agent_home(agent_name, env)
+    backend = (backend or resolve_agent_backend(agent_name, env=env)).lower()
     try:
-        from aa_stream import find_live_updates
         from full_stream import resolve_history_dir
         from aa_stream import read_checkpoint
 
-        home = _agent_home(agent_name, env)
-        # Prefer live largest / session
-        p = find_live_updates(home, session_id)
-        if p and p.exists():
-            return Path(p).resolve()
-        # Fall back to last checkpoint path
-        ck = read_checkpoint(resolve_history_dir(home), "grok")
+        if backend in ("claude", "anthropic"):
+            from stream_adapters.claude import find_live_session
+
+            p = find_live_session(home, session_id)
+            if p and p.exists():
+                return Path(p).resolve()
+            ck = read_checkpoint(resolve_history_dir(home), "claude")
+        else:
+            from aa_stream import find_live_updates
+
+            p = find_live_updates(home, session_id)
+            if p and p.exists():
+                return Path(p).resolve()
+            ck = read_checkpoint(resolve_history_dir(home), "grok")
         if ck.get("path"):
             cp = Path(ck["path"])
             if cp.exists():
                 return cp.resolve()
     except Exception as e:
-        print(f"[full_stream_hook] resolve updates path failed: {e}")
+        print(f"[full_stream_hook] resolve native path failed: {e}")
     return None
+
+
+def _resolve_updates_path(agent_name: str, env=None, session_id: Optional[str] = None) -> Optional[Path]:
+    """Back-compat alias: native source path for inotify."""
+    return _resolve_native_path(agent_name, env=env, session_id=session_id)
 
 
 class _UpdatesInotify:
@@ -217,7 +288,7 @@ def start_background_tailer(
     Idempotent per agent_name.
     """
     cfg = load_full_stream_config(agent_name, env)
-    if not cfg or not cfg.get("tail_grok"):
+    if not _stream_tail_enabled(cfg):
         return False
 
     with _lock:
@@ -245,13 +316,16 @@ def start_background_tailer(
 
             while not stop.is_set():
                 cfg_now = load_full_stream_config(agent_name, env)
-                if not cfg_now or not cfg_now.get("tail_grok"):
+                if not _stream_tail_enabled(cfg_now):
                     print(
-                        f"[full_stream_hook] {agent_name}: tail_grok off — background exit"
+                        f"[full_stream_hook] {agent_name}: stream tail off — background exit"
                     )
                     break
 
-                src = _resolve_updates_path(agent_name, env=env, session_id=session_id)
+                backend = resolve_agent_backend(agent_name, env=env, cfg=cfg_now)
+                src = _resolve_native_path(
+                    agent_name, env=env, session_id=session_id, backend=backend
+                )
                 if not src:
                     stop.wait(1.0)
                     continue

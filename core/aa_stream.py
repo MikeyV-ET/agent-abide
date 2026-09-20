@@ -234,6 +234,20 @@ def map_grok_event(*a, **k):
     return _t(*a, **k)
 
 
+def tail_claude_once(*a, **k):
+    from stream_adapters.claude import tail_claude_once as _t
+    return _t(*a, **k)
+
+def wrap_claude_line(*a, **k):
+    from stream_adapters.claude import wrap_claude_line as _t
+    return _t(*a, **k)
+
+def map_claude_event(*a, **k):
+    from stream_adapters.claude import map_claude_event as _t
+    return _t(*a, **k)
+
+
+
 def append_hot_events(fs_dir: Path, events: List[Dict[str, Any]]) -> int:
     """Append events to hot.jsonl. Returns bytes written."""
     if not events:

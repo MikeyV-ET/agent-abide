@@ -25,29 +25,29 @@ Frontends (TUI, SA) READ hot (and speech) — do not write history.
 | Item | Status |
 |------|--------|
 | `core/stream_adapters/grok.py` | map/wrap/tail_grok_once |
-| `core/stream_adapters/claude.py` | **stub only** |
+| `core/stream_adapters/claude.py` | map/wrap/tail_claude_once |
 | `core/stream_adapters/__init__.py` | `tail_once_for_backend` |
 | `aa_stream` shims | `tail_grok_once` still importable |
 | `full_stream_hook` docstring | orchestration role |
 | Tests | 9 passed stream + parser tui |
-| TUI live tail still on updates.jsonl | **not switched yet** |
+| TUI live tail prefers hot.jsonl | **P1 done (auto)** |
 
 ## TODO after compaction (implement)
 
 ### 1. Wire hook to agent backend
-- [ ] `full_stream_hook._do_tail` use `tail_once_for_backend(backend, …)`  
-- [ ] Resolve `backend` from agents.json / asdaaas config (not hardcode grok)
+- [x] `full_stream_hook._do_tail` use `tail_once_for_backend(backend, …)`  
+- [x] Resolve `backend` from agents.json / asdaaas config (not hardcode grok)
 
 ### 2. Claude adapter (Astro)
-- [ ] `find_live_session` via `api/session_locator.py`  
-- [ ] `map_claude_event` from Claude session jsonl shapes  
-- [ ] `tail_claude_once` → same checkpoint + `append_hot_events`  
-- [ ] Enable `tail_grok`-style config flag or generic `tail_backend` for Astro
+- [x] `find_live_session` (dash-cwd + agents.json / health; locator optional)  
+- [x] `map_claude_event` from Claude session jsonl shapes  
+- [x] `tail_claude_once` → same checkpoint + `append_hot_events`  
+- [x] `tail_stream` / `tail_backend` / legacy `tail_grok` all enable
 
 ### 3. TUI P1 — live paint from hot
-- [ ] `tui_adapter` / `tui/asdaaas_tui.py`: tail `history/hot.jsonl` when present  
-- [ ] `TUI_HISTORY_SOURCE=auto|hot|updates`  
-- [ ] Catch-up on start via `entries_from_hot` + `entry_to_tui_lines`  
+- [x] `tui/asdaaas_tui.py`: tail `history/hot.jsonl` when present  
+- [x] `TUI_HISTORY_SOURCE=auto|hot|updates`  
+- [x] Catch-up: replay hot lines via `aa_event_to_tui_update` → dispatch  
 - [ ] Fallback if no history/ (Jr-style conversation.jsonl)
 
 ### 4. Cleanup
@@ -65,3 +65,11 @@ cd ~/projects/agent-abide-dev
 git checkout feat/tui-hot-jsonl
 PYTHONPATH=core python3 -m pytest tests/test_aa_stream_hot.py tests/test_aa_stream_parser_tui.py -q
 ```
+
+
+## Implemented post-compaction (2026-09-19 ~22:25 PDT)
+
+- `full_stream_hook`: `resolve_agent_backend`, `_stream_tail_enabled`, `_do_tail` → `tail_once_for_backend`
+- `stream_adapters.claude`: real adapter; smoke on Astro session path
+- TUI P1: `_resolve_display_history` + aa.stream→grok update bridge; Claude waits for hot
+- Tests: 22 passed (stream + parser + claude + tui bridge + hook)

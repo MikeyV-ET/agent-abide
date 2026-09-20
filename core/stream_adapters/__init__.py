@@ -7,7 +7,7 @@ Contract:
     append_hot_events(fs_dir, events)   # common writer in aa_stream
 
 Grok: stream_adapters.grok
-Claude: stream_adapters.claude (stub for Astro)
+Claude: stream_adapters.claude (session jsonl → hot; Astro)
 """
 from __future__ import annotations
 

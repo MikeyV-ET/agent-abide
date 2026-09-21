@@ -3407,7 +3407,7 @@ Type anything else to send a message to the agent.
                     for line in lines:
                         if not line.strip():
                             continue
-                        if len(line) > 32 * 1024:
+                        if len(line) > 2 * 1024 * 1024:
                             skip_count += 1
                             continue
                         try:
@@ -4315,7 +4315,9 @@ Type anything else to send a message to the agent.
                     continue
                 if line_start >= earliest_offset:
                     continue
-                if len(lb) > 32 * 1024:
+                # Fat lines: still decode if under 2MB for thin tool extract;
+                # multi-MB base64 stays skipped.
+                if len(lb) > 2 * 1024 * 1024:
                     continue
                 try:
                     l = lb.decode("utf-8", errors="replace")

@@ -356,8 +356,13 @@ def line_to_tui_event(line: str, hist_kind: str = "updates") -> Optional[dict[st
     import json as _json
     if line is None:
         return None
-    # Cheap length gate BEFORE json.loads (1.4MB base64 lines freeze the TUI)
+    # Cheap length gate BEFORE full json.loads (1.4MB lines freeze the TUI).
+    # Tool *completions* are often fat (stdout + byte-array rawOutput) but still
+    # need a panel body — thin-extract instead of dropping → empty ✓ title-only.
     if len(line) > MAX_TUI_LINE_BYTES:
+        thin = _thin_event_from_fat_line(line)
+        if thin is not None:
+            return thin
         return None
     try:
         obj = _json.loads(line)

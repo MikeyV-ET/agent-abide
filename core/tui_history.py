@@ -789,6 +789,16 @@ def thin_tip_events(
         et = update.get("sessionUpdate", "") or ""
         if et in _TIP_DROP_SESSION_UPDATES:
             continue
+        # Continues / session-limit / aa.control: not tip dialogue
+        if et in (
+            "user_message_chunk",
+            "agent_message_chunk",
+            "agent_thought_chunk",
+        ):
+            c = update.get("content") or {}
+            text = c.get("text", "") if isinstance(c, dict) else (c if isinstance(c, str) else "")
+            if is_chrome_speech(str(text)):
+                continue
         if et in ("tool_call", "tool_call_update"):
             tid = _tool_id(update) or f"anon:{id(ev)}"
             if tid in tool_idx:

@@ -138,3 +138,87 @@ def test_dispatch_backend_claude(tmp_path: Path):
     r = tail_once_for_backend("claude", home, "A", source=src)
     assert r["status"] == "ok"
     assert r["lines_ingested"] == 1
+
+
+# --- binary payloads must not reach hot.jsonl ------------------------------
+#
+# Reading an image puts its base64 into the session transcript. Unfiltered,
+# that lands in hot.jsonl twice (verbatim in `native`, truncated in `body`)
+# and the TUI paints it as a wall of characters. Measured on Astro's own
+# stream: two lines of 1.47 MB and 893 KB, file grown to 7.4 MB.
+
+import json as _json  # noqa: E402
+
+from stream_adapters.claude import wrap_claude_line, map_claude_event  # noqa: E402
+
+
+def _image_tool_result(nbytes=400_000):
+    return {
+        "type": "user",
+        "timestamp": "2026-09-20T17:20:00.000Z",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_img",
+                    "content": [
+                        {"type": "text", "text": "Read image /tmp/shot.png"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "iVBORw0KGgo" + ("A" * nbytes),
+                            },
+                        },
+                    ],
+                }
+            ]
+        },
+    }
+
+
+def _wrapped(obj):
+    return wrap_claude_line(
+        obj, agent="Astro", session_id="sid", stream_seq=1,
+        source_path="/tmp/sess.jsonl", offset=0,
+    )
+
+
+def test_image_data_is_elided_from_the_hot_event():
+    event = _wrapped(_image_tool_result())
+    blob = _json.dumps(event)
+    assert "A" * 5000 not in blob
+    assert len(blob) < 100_000  # was ~1.5 MB unfiltered
+
+
+def test_elision_keeps_the_fact_that_an_image_was_there():
+    """Drop the bytes, keep the meaning — a reader must still see it happened."""
+    _, _, _, body = map_claude_event(_image_tool_result())
+    content = body["content"]
+    assert "image" in content.lower()
+    assert "image/png" in content or "png" in content.lower()
+
+
+def test_surrounding_text_survives_elision():
+    _, _, _, body = map_claude_event(_image_tool_result())
+    assert "Read image /tmp/shot.png" in body["content"]
+
+
+def test_ordinary_tool_results_are_untouched():
+    obj = {
+        "type": "user",
+        "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "hello world"}
+        ]},
+    }
+    _, _, _, body = map_claude_event(obj)
+    assert body["content"] == "hello world"
+
+
+def test_native_copy_is_elided_too():
+    """`native` carries the raw line verbatim — the bigger of the two leaks."""
+    event = _wrapped(_image_tool_result())
+    native_blob = _json.dumps(event.get("native"))
+    assert len(native_blob) < 50_000
+    assert "A" * 5000 not in native_blob

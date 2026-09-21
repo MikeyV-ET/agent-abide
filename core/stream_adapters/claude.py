@@ -114,6 +114,62 @@ def find_live_session(
     return max(files, key=lambda p: p.stat().st_mtime).resolve()
 
 
+#: Base64 image payloads are the one thing in a Claude transcript that is
+#: megabytes wide and worth nothing downstream. Unfiltered they land in
+#: hot.jsonl twice — verbatim in `native`, truncated in `body` — and the TUI
+#: paints them as a wall of characters. Keep the fact, drop the bytes.
+ELIDE_OVER_CHARS = 4096
+
+
+def _elide_blob(value: str, label: str = "data") -> str:
+    return f"[{label}: {len(value)} chars elided]"
+
+
+def _elide_binary(node):
+    """Recursively replace oversized base64 payloads with a short marker.
+
+    Structure is preserved so anything reading the shape of the event still
+    works; only the payload string is replaced.
+    """
+    if isinstance(node, dict):
+        out = {}
+        for k, v in node.items():
+            if k == "data" and isinstance(v, str) and len(v) > ELIDE_OVER_CHARS:
+                media = node.get("media_type") or "binary"
+                out[k] = _elide_blob(v, media)
+            else:
+                out[k] = _elide_binary(v)
+        return out
+    if isinstance(node, list):
+        return [_elide_binary(v) for v in node]
+    if isinstance(node, str) and len(node) > ELIDE_OVER_CHARS * 8:
+        return _elide_blob(node)
+    return node
+
+
+def _flatten_tool_result_content(content) -> str:
+    """tool_result content may be a string or a list of blocks (text/image)."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return json.dumps(_elide_binary(content), ensure_ascii=False)
+    parts = []
+    for b in content:
+        if not isinstance(b, dict):
+            parts.append(str(b))
+            continue
+        if b.get("type") == "image":
+            src = b.get("source") or {}
+            media = src.get("media_type") or "image"
+            size = len(src.get("data") or "")
+            parts.append(f"[image: {media}, {size} chars elided]")
+        elif b.get("type") == "text":
+            parts.append(b.get("text") or "")
+        else:
+            parts.append(json.dumps(_elide_binary(b), ensure_ascii=False))
+    return "\n".join(p for p in parts if p)
+
+
 def _content_blocks(obj: dict) -> list:
     msg = obj.get("message") or {}
     c = msg.get("content")
@@ -145,9 +201,7 @@ def _text_from_blocks(blocks: list) -> str:
         elif t == "tool_use":
             parts.append(f"[tool: {b.get('name', '?')}]")
         elif t == "tool_result":
-            content = b.get("content", "")
-            if not isinstance(content, str):
-                content = json.dumps(content, ensure_ascii=False)
+            content = _flatten_tool_result_content(b.get("content", ""))
             parts.append(f"[result: {content[:200]}]")
     return "\n".join(p for p in parts if p)
 
@@ -167,9 +221,7 @@ def map_claude_event(obj: dict) -> Tuple[str, str, Optional[str], Optional[Dict[
         texts = [b for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
         if results and not texts:
             b0 = results[0]
-            content = b0.get("content", "")
-            if not isinstance(content, str):
-                content = json.dumps(content, ensure_ascii=False)
+            content = _flatten_tool_result_content(b0.get("content", ""))
             if len(content) > 200_000:
                 content = content[:200_000]
             return "tool", "end", "tool", {
@@ -244,7 +296,7 @@ def wrap_claude_line(
         session_id=session_id,
         stream_seq=stream_seq,
         native_schema=NATIVE_CLAUDE,
-        native_event=obj,
+        native_event=_elide_binary(obj),
         class_=class_,
         phase=phase,
         role=role,

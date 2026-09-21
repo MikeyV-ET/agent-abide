@@ -3131,6 +3131,178 @@ Type anything else to send a message to the agent.
                 return updates
         return None
 
+
+    def _tail_hot_jsonl_for_agent(self, agent_name: str, hot_path: "Path") -> None:
+        """Tail asdaaas/history/hot.jsonl for Claude (and any hot-only) agents."""
+        worker = get_current_worker()
+        state = self._agent_state[agent_name]
+        hot_path = Path(hot_path)
+        state["updates_path"] = hot_path
+        state["hist_kind"] = "hot"
+
+        is_primary = bool(self._agents) and (agent_name == self._agents[0])
+        should_replay = (is_primary and self._replay_mode) or (not is_primary)
+        if self._tail_count:
+            tail_count = int(self._tail_count)
+        else:
+            tail_count = 50 if is_primary else 30
+
+        def _line_to_event(line: str):
+            try:
+                core = str(Path(__file__).resolve().parent.parent / "core")
+                if core not in sys.path:
+                    sys.path.insert(0, core)
+                from tui_history import line_to_tui_event
+                return line_to_tui_event(line, "hot")
+            except Exception:
+                pass
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(o, dict):
+                return None
+            body = o.get("body") or {}
+            kind = body.get("kind")
+            if o.get("class") == "message" and kind in ("text", "text_delta", None, "thinking"):
+                text = body.get("text") or ""
+                if not str(text).strip():
+                    return None
+                role = (o.get("role") or "assistant").lower()
+                if kind == "thinking" or role == "thinking":
+                    su = "agent_thought_chunk"
+                elif role == "user":
+                    su = "user_message_chunk"
+                else:
+                    su = "agent_message_chunk"
+                return {
+                    "params": {
+                        "update": {
+                            "sessionUpdate": su,
+                            "content": {"text": str(text)},
+                        }
+                    }
+                }
+            return None
+
+        try:
+            size = hot_path.stat().st_size
+        except OSError:
+            size = 0
+
+        if should_replay and size > 0:
+            read_size = min(size, 2 * 1024 * 1024)
+            seek = max(0, size - read_size)
+            try:
+                with open(hot_path, "rb") as f:
+                    f.seek(seek)
+                    if seek > 0:
+                        f.readline()
+                    data_start = f.tell()
+                    raw = f.read().decode("utf-8", errors="replace")
+                    state["updates_offset"] = f.tell()
+                events = []
+                pos = data_start
+                parts = raw.split("\n")
+                for i, lb in enumerate(parts):
+                    ls = pos
+                    blen = len(lb.encode("utf-8", errors="replace")) + (
+                        1 if i < len(parts) - 1 else 0
+                    )
+                    pos += blen
+                    if not lb.strip():
+                        continue
+                    ev = _line_to_event(lb)
+                    if ev:
+                        events.append((ls, ev))
+                speech_n = 0
+                kept = []
+                for ls, ev in reversed(events):
+                    kept.append((ls, ev))
+                    u = (ev.get("params") or {}).get("update") or {}
+                    if u.get("sessionUpdate") in (
+                        "user_message_chunk",
+                        "agent_message_chunk",
+                        "agent_thought_chunk",
+                    ):
+                        speech_n += 1
+                        if speech_n >= tail_count:
+                            break
+                kept.reverse()
+                if kept:
+                    state["earliest_offset"] = kept[0][0]
+                else:
+                    state["earliest_offset"] = data_start
+                replay = 0
+                for _ls, ev in kept:
+                    try:
+                        self.call_from_thread(
+                            self._dispatch_event_for_agent, ev, agent_name
+                        )
+                        replay += 1
+                    except Exception:
+                        pass
+                self._debug(f"HOT_REPLAY agent={agent_name} n={replay}")
+                time.sleep(0.3)
+                try:
+                    self.call_from_thread(self._force_scroll_bottom)
+                except Exception:
+                    pass
+            except Exception as e:
+                self._debug(f"HOT_REPLAY failed {agent_name}: {e!r}")
+                try:
+                    state["updates_offset"] = hot_path.stat().st_size
+                    state["earliest_offset"] = state["updates_offset"]
+                except OSError:
+                    state["updates_offset"] = 0
+                    state["earliest_offset"] = 0
+        else:
+            try:
+                state["updates_offset"] = hot_path.stat().st_size
+                state["earliest_offset"] = state["updates_offset"]
+            except OSError:
+                state["updates_offset"] = 0
+                state["earliest_offset"] = 0
+
+        offset = int(state.get("updates_offset") or 0)
+        while not worker.is_cancelled:
+            if state.get("removed"):
+                break
+            try:
+                size = hot_path.stat().st_size
+                if size < offset:
+                    offset = 0
+                if size > offset:
+                    with open(hot_path, "rb") as f:
+                        f.seek(offset)
+                        chunk = f.read()
+                    if not chunk.endswith(b"\n"):
+                        last = chunk.rfind(b"\n")
+                        if last == -1:
+                            time.sleep(0.2)
+                            continue
+                        chunk = chunk[: last + 1]
+                    offset += len(chunk)
+                    state["updates_offset"] = offset
+                    text = chunk.decode("utf-8", errors="replace")
+                    for line in text.split("\n"):
+                        if not line.strip():
+                            continue
+                        ev = _line_to_event(line)
+                        if not ev:
+                            continue
+                        try:
+                            self.call_from_thread(
+                                self._dispatch_event_for_agent, ev, agent_name
+                            )
+                        except Exception:
+                            pass
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                self._debug(f"hot tail {agent_name}: {e!r}")
+            time.sleep(0.25)
+
     def _tail_updates_for_agent(self, agent_name: str) -> None:
         """Background thread: tail updates.jsonl for a specific agent."""
         worker = get_current_worker()

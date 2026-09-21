@@ -26,6 +26,40 @@ if TYPE_CHECKING:
     from asdaaas import CommandWatchdog, PendingQueue
 
 
+#: The only command actions turn_engine's drains handle themselves. Everything
+#: else belongs to the main loop in asdaaas.py and must be handed back to it.
+#:
+#: Inverted on purpose. There used to be four drains, each with its own list of
+#: actions to requeue — and the lists had drifted: one had restart/shutdown, one
+#: had reasoning_effort but not them, one lacked both, one requeued nothing.
+#: Anything missing from a site's list was counted as handled and silently
+#: dropped, which is how {"action": "restart"} vanished on its way to the main
+#: loop. A short list of what we DO handle cannot drift that way.
+LOCAL_ACTIONS = frozenset({"delay", "ack"})
+
+
+def requeue_for_main_loop(agent_name, commands, env=None):
+    """Write back every command whose action turn_engine does not handle."""
+    # Local imports: this module imports these inside methods, not at the top,
+    # so a module-level helper has to bring its own.
+    import json
+    import os
+    import tempfile
+
+    from asdaaas import agent_dir
+
+    passing = [c for c in commands if c.get("action", "") not in LOCAL_ACTIONS]
+    if not passing:
+        return 0
+    cmd_dir = agent_dir(agent_name, env=env) / "commands"
+    cmd_dir.mkdir(parents=True, exist_ok=True)
+    for c in passing:
+        fd, _tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
+        with os.fdopen(fd, "w") as f:
+            json.dump(c, f)
+    return len(passing)
+
+
 @dataclass
 class GatherResult:
     """What was collected during the gather phase."""
@@ -500,13 +534,8 @@ class TurnEngine:
                     self.next_turn_delay = float(dv)
                     self.delay_until_event = False
                 ptr.agent_wrote_delay = True
-            elif pa in ("compact", "gaze", "awareness", "reasoning_effort",
-                        "restart", "shutdown"):
-                # Lifecycle commands are handled by the main loop, not here.
-                # Without requeueing them they are counted as processed and
-                # dropped — and an agent can only ever write them from inside
-                # a turn, so self-restart never fired.
-                requeue.append(pc)
+            else:
+                requeue.append(pc)  # main loop's business — see LOCAL_ACTIONS
 
         if requeue:
             cmd_dir = agent_dir(agent_name, env=self.env) / "commands"
@@ -546,8 +575,8 @@ class TurnEngine:
                     ptr.agent_wrote_delay = True
                 elif la == "ack":
                     ack_doorbells(agent_name, lc.get("handled", []), env=self.env)
-                elif la in ("compact", "gaze", "awareness", "reasoning_effort"):
-                    requeue.append(lc)
+                else:
+                    requeue.append(lc)  # main loop's business — see LOCAL_ACTIONS
             if late_cmds:
                 print(f"[asdaaas] Late command poll: {len(late_cmds)} command(s)")
                 if requeue:
@@ -1089,6 +1118,7 @@ class TurnEngine:
                     piggyback_ack = cmd.get("ack", [])
                     if piggyback_ack:
                         ack_doorbells(agent_name, piggyback_ack, env=self.env)
+                requeue_for_main_loop(agent_name, stragglers, env=self.env)
                 if stragglers:
                     print(f"[asdaaas] Drained {len(stragglers)} straggler command(s) before delay")
                 if self.delay_until_event:
@@ -1141,12 +1171,7 @@ class TurnEngine:
                     agent_wrote_delay = True
                 elif fa == "ack":
                     ack_doorbells(agent_name, fc.get("handled", []), env=self.env)
-                elif fa in ("compact", "gaze", "awareness"):
-                    cmd_dir = _agent_dir(agent_name, env=self.env) / "commands"
-                    cmd_dir.mkdir(parents=True, exist_ok=True)
-                    fd, tmp = tempfile.mkstemp(dir=str(cmd_dir), suffix=".json", prefix="cmd_requeue_")
-                    with os.fdopen(fd, "w") as f:
-                        json.dump(fc, f)
+            requeue_for_main_loop(agent_name, final_cmds, env=self.env)
             if final_cmds:
                 print(f"[asdaaas] Pre-continue poll: {len(final_cmds)} command(s)")
                 if self.delay_until_event or self.next_turn_delay > 0:

@@ -804,40 +804,68 @@ def is_tip_paint_event(event: dict) -> bool:
     return False
 
 
+
 def select_tip_paint_lines(
     events: list[dict[str, Any]],
     n_lines: int,
 ) -> list[dict[str, Any]]:
-    """Last N *TUI paint lines* for catch-up (the real meaning of ``-t N``).
+    """Catch-up tip for ``-t N``.
 
-    Eric: ``-t50`` = ~50 lines in the TUI, not 50 dialogue turns and a pile of
-    tool frames. Walk backward from the tip: drop session meta + chrome,
-    collapse tool_call/update to one line per toolCallId (latest state), stop
-    at N paint lines, return chronological order.
+    Product (Eric, 2026-09-21):
+      - ``-t50`` should feel like ~50 lines of *conversation* on screen, not a
+        wall of tool panels that push chat out of the tip.
+      - Tool storms must not expand to hundreds of events (collapse per id).
+      - Chrome / session meta never mount on the tip.
+
+    Algorithm:
+      1. Walk backward and take the last **N dialogue** speeches
+         (user/agent/thought, non-chrome).
+      2. Keep events in that span that are tip-paint worthy.
+      3. Collapse tool_call/update → one line per toolCallId (latest state).
+      4. Cap tool lines at N so paint ≤ ~2N (dialogue + tools). If over cap,
+         drop *oldest* tools first (keep tools nearest the tip).
     """
     if not events or not n_lines or n_lines <= 0:
         return []
 
-    out_rev: list[dict[str, Any]] = []
-    seen_tools: set[str] = set()
-    paint = 0
+    # --- 1. find start index of last N dialogue ---
+    dialogue_hits = 0
+    start = len(events)
+    for i in range(len(events) - 1, -1, -1):
+        start = i
+        if is_dialogue_speech(events[i]):
+            dialogue_hits += 1
+            if dialogue_hits >= n_lines:
+                break
+    span = events[start:]
 
-    for ev in reversed(events):
+    # --- 2–3. filter + collapse tools (forward, last state wins) ---
+    out: list[dict[str, Any]] = []
+    tool_idx: dict[str, int] = {}
+    for ev in span:
         if not is_tip_paint_event(ev):
             continue
         et = _event_session_update(ev)
         if et in ("tool_call", "tool_call_update"):
             tid = _event_tool_id(ev) or f"anon:{id(ev)}"
-            if tid in seen_tools:
-                continue  # older frame of same tool; already have newer
-            seen_tools.add(tid)
-        out_rev.append(ev)
-        paint += 1
-        if paint >= n_lines:
-            break
+            if tid in tool_idx:
+                out[tool_idx[tid]] = ev
+            else:
+                tool_idx[tid] = len(out)
+                out.append(ev)
+            continue
+        out.append(ev)
 
-    out_rev.reverse()
-    return out_rev
+    # --- 4. cap tools at n_lines (drop oldest tool lines) ---
+    tool_positions = [
+        i for i, ev in enumerate(out)
+        if _event_session_update(ev) in ("tool_call", "tool_call_update")
+    ]
+    if len(tool_positions) > n_lines:
+        drop = set(tool_positions[: len(tool_positions) - n_lines])  # oldest
+        out = [ev for i, ev in enumerate(out) if i not in drop]
+
+    return out
 
 
 def thin_tip_events(
@@ -846,12 +874,7 @@ def thin_tip_events(
     *,
     speech_first: bool = True,
 ) -> list[dict[str, Any]]:
-    """Backward-compatible name: ``n_speech`` is treated as **TUI paint lines**.
-
-    Historically this meant dialogue-speech budget; product intent is ``-t N`` =
-    N lines on screen. Delegates to :func:`select_tip_paint_lines`.
-    """
-    # speech_first kept for call-site compat; paint-line select is the contract.
+    """Alias: ``n_speech`` is the dialogue budget for :func:`select_tip_paint_lines`."""
     _ = speech_first
     return select_tip_paint_lines(events, n_speech)
 

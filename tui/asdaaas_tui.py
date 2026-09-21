@@ -3762,6 +3762,40 @@ Type anything else to send a message to the agent.
             self._scroll_to_bottom()
 
 
+
+    def _tool_command_from_update(self, update: dict) -> str:
+        """Best-effort shell/args string for sticky tool panel command line."""
+        ri = update.get("rawInput")
+        if isinstance(ri, dict):
+            for k in ("command", "cmd", "query", "path", "pattern"):
+                v = ri.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            try:
+                import json as _json
+                return _json.dumps(ri, ensure_ascii=False)[:400]
+            except Exception:
+                return str(ri)[:400]
+        if isinstance(ri, str) and ri.strip():
+            return ri.strip()
+        for k in ("command", "arguments", "args", "input"):
+            v = update.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+            if isinstance(v, dict):
+                c = v.get("command") or v.get("cmd")
+                if isinstance(c, str) and c.strip():
+                    return c.strip()
+        title = (update.get("title") or "").strip()
+        if title.lower().startswith("execute `") and title.endswith("`"):
+            return title[9:-1].strip()
+        if title.lower().startswith("execute `"):
+            # multiline title
+            rest = title[9:]
+            if "`" in rest:
+                return rest.split("`")[0].strip()
+        return ""
+
     def _tool_update_blob(self, update: dict) -> str:
         """Flatten tool_call / tool_call_update fields for delay detection."""
         parts = [str(update.get("title") or "")]
@@ -3919,6 +3953,9 @@ Type anything else to send a message to the agent.
             st = update.get("status")
             if st and st not in ("update", "started", "pending"):
                 existing.set_status(st)
+            cmd = self._tool_command_from_update(update)
+            if cmd:
+                existing.set_command(cmd)
             existing.refresh(layout=True)
             panel = existing
         else:
@@ -4040,6 +4077,10 @@ Type anything else to send a message to the agent.
             panel.tool_title = title
         if status:
             panel.set_status(status)
+
+        cmd = self._tool_command_from_update(update)
+        if cmd:
+            panel.set_command(cmd)
 
         for text in ordered:
             clean_text, interjections = self._extract_interjections(text)

@@ -73,23 +73,19 @@ def _flatten_to_text(renderable, width: int = 120) -> Text:
 
 
 class ToolCallPanel(Static):
-    """Tool call panel: default snippet view, full body on click expand.
+    """Tool call panel: command sticky + output snippet; full body on expand.
 
-    Display policy (Eric 2026-08-04): tools are secondary to thinking; Grok-4.5
-    tool dumps should not dominate scrollback. Default = small snippet + expand.
-    Border shows HH:MM:SS + short id for citation.
-
-    SNIPPET_LINES counts newline-separated logical lines. A single huge JSON
-    line (e.g. memory_query result) has n_lines=1 but soft-wraps across the
-    viewport — _collapsed_snippet also caps chars and ~visual rows.
+    Display policy (Eric 2026-08-04 / 2026-09-20): tools secondary to thinking;
+    keep *both* the command and the return so you can see what ran.
     """
 
     SNIPPET_LINES = 4
     SNIPPET_MAX_CHARS = 480
-    SNIPPET_MAX_VISUAL_ROWS = 6  # ~80-col wrap budget
+    SNIPPET_MAX_VISUAL_ROWS = 6
     MAX_EXPANDED_LINES = 80
     MAX_STORED_CHARS = 65536
-    MAX_ACTIVE_LINES = 15  # legacy alias
+    MAX_ACTIVE_LINES = 15
+    COMMAND_MAX_CHARS = 240
 
     def __init__(self, tool_id: str, title: str, kind: str = "", ts: str = "", **kwargs):
         super().__init__(**kwargs)
@@ -97,10 +93,11 @@ class ToolCallPanel(Static):
         self.tool_title = title
         self.tool_kind = kind
         self.tool_status = "running"
+        self.tool_command = ""  # sticky: what was run (never wiped by set_output)
         self.tool_output = ""
         self.tool_ts = ts or ""
         self.border_title = title.replace("[", "\\[")
-        self._collapsed = True  # snippet mode by default
+        self._collapsed = True
         self._mounted_interjections: set[str] = set()
 
     def _cap_output(self, content: str) -> str:
@@ -109,6 +106,25 @@ class ToolCallPanel(Static):
         keep = self.MAX_STORED_CHARS - 80
         return f"[… truncated {len(content) - keep} chars …]\n" + content[-keep:]
 
+    def set_command(self, command: str) -> None:
+        """Record the invocation (args / shell). Sticky across set_output."""
+        if not command or not str(command).strip():
+            return
+        cmd = str(command).strip()
+        # Prefer a single-line summary for the header row
+        first = cmd.splitlines()[0].strip()
+        if len(cmd.splitlines()) > 1:
+            first = first + " …"
+        if len(first) > self.COMMAND_MAX_CHARS:
+            first = first[: self.COMMAND_MAX_CHARS - 1] + "…"
+        # Don't replace a more specific command with a weaker one
+        if self.tool_command and len(first) < len(self.tool_command) and first in self.tool_command:
+            return
+        if self.tool_command and self.tool_command.startswith(first) and len(self.tool_command) > len(first):
+            return
+        self.tool_command = first
+        self.refresh(layout=True)
+
     def set_status(self, status: str):
         self.tool_status = status
         if status in ("completed", "failed"):
@@ -116,6 +132,7 @@ class ToolCallPanel(Static):
         self.refresh(layout=True)
 
     def set_output(self, content: str):
+        """Set return/stdout. Does **not** clear tool_command."""
         self.tool_output = self._cap_output(content)
         if self._collapsed:
             self.refresh()
@@ -130,12 +147,10 @@ class ToolCallPanel(Static):
             self.refresh(layout=True)
 
     def on_click(self, event) -> None:
-        """Toggle snippet vs full body."""
         self._collapsed = not self._collapsed
         self.refresh(layout=True)
 
     def _collapsed_snippet(self) -> tuple[str, bool]:
-        """(snippet_text, more_hidden) — handles soft-wrapped single lines."""
         raw = self.tool_output or ""
         if not raw:
             return "", False
@@ -161,9 +176,15 @@ class ToolCallPanel(Static):
             "search": "🔍", "think": "💭", "other": "📋",
         }
         kind_icon = kind_icons.get(self.tool_kind, "🔧")
-        label = (self.tool_title or "").strip() or (self.tool_kind or "tool")
-        if label.lower() in ("tool", "unknown tool", "unknown"):
-            label = self.tool_kind or "tool"
+        # Prefer sticky command in the border when we have it
+        label = (self.tool_command or self.tool_title or "").strip() or (
+            self.tool_kind or "tool"
+        )
+        if label.lower() in ("tool", "unknown tool", "unknown", "run_terminal_command"):
+            label = self.tool_command or self.tool_kind or "tool"
+        # Keep border readable
+        if len(label) > 60:
+            label = label[:57] + "…"
         ref = short_ref(self.tool_id)
         ts = self.tool_ts or ""
         if ts and ref:
@@ -199,11 +220,16 @@ class ToolCallPanel(Static):
         lines = self.tool_output.split("\n") if self.tool_output else []
         n_lines = len(lines) if self.tool_output else 0
 
+        def _prepend_command(body: Text) -> None:
+            if self.tool_command:
+                body.append(f"$ {self.tool_command}\n", style=f"bold {Theme.BR_CYAN}")
+
         if self._collapsed:
             self.styles.border = ("round", color)
             self.styles.padding = (0, 1)
             self.border_title = title.replace("[", "\\[")
             body = Text()
+            _prepend_command(body)
             if not self.tool_output:
                 cite = self.tool_ts or short_ref(self.tool_id)
                 empty = f"(no output yet — cite {cite})" if cite else "(no output yet)"
@@ -231,17 +257,19 @@ class ToolCallPanel(Static):
         self.styles.padding = (0, 1)
         self.border_title = (title + " [expanded — click to collapse]").replace("[", "\\[")
 
+        body = Text()
+        _prepend_command(body)
         if self.tool_output:
             if n_lines > self.MAX_EXPANDED_LINES:
                 display = "\n".join(
                     lines[:40] + [f"... ({n_lines - 60} lines) ..."] + lines[-20:]
                 )
-                content = Text(display, style=Theme.GRAY)
+                body.append(display, style=Theme.GRAY)
             else:
-                content = Text(self.tool_output, style=Theme.GRAY)
+                body.append(self.tool_output, style=Theme.GRAY)
         else:
-            content = Text("(no output)", style=f"italic {Theme.DARK4}")
-        return content
+            body.append("(no output)", style=f"italic {Theme.DARK4}")
+        return body
 
 
 class PlanPanel(Static):

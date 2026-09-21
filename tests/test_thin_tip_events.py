@@ -1,4 +1,4 @@
-"""-t N catch-up is dialogue only; tools do not end the tip."""
+"""-t N = N history lines (not turns, not a tool quota)."""
 from __future__ import annotations
 
 import sys
@@ -9,8 +9,8 @@ sys.path.insert(0, str(ROOT / "core"))
 
 from tui_history import (  # noqa: E402
     select_tip_paint_lines,
-    tip_max_tools,
     is_dialogue_speech,
+    is_tip_paint_event,
     _event_session_update,
     line_to_tui_event,
 )
@@ -27,41 +27,56 @@ def _ev(su: str, text: str = "", tool_id: str = "") -> dict:
     return {"params": {"update": u}}
 
 
-def test_catchup_tool_budget_is_zero():
-    assert tip_max_tools(50) == 0
-    assert tip_max_tools(1) == 0
-
-
-def test_tip_is_dialogue_only_no_trailing_tools():
+def test_t50_is_fifty_lines_mixed():
     events = []
-    for i in range(30):
-        events.append(_ev("user_message_chunk", f"user {i}"))
-        events.append(_ev("agent_message_chunk", f"agent {i}"))
+    for i in range(40):
+        events.append(_ev("user_message_chunk", f"u{i}"))
+        events.append(_ev("agent_message_chunk", f"a{i}"))
         events.append(_ev("tool_call", tool_id=f"t{i}"))
         events.append(_ev("tool_call_update", tool_id=f"t{i}"))
-    events.append(_ev("user_message_chunk", "ERIC_FINAL"))
-    events.append(_ev("agent_message_chunk", "AGENT_FINAL"))
-    for j in range(10):
-        events.append(_ev("tool_call_update", tool_id=f"trail{j}"))
-    out = select_tip_paint_lines(events, 20)
-    assert all(is_dialogue_speech(e) for e in out), [
-        _event_session_update(e) for e in out[-5:]
-    ]
-    assert len(out) == 20
-    texts = []
+        events.append(_ev("tool_call_update", tool_id=f"t{i}"))
+        events.append(_ev("task_completed"))
+    out = select_tip_paint_lines(events, 50)
+    assert len(out) == 50
+    assert all(is_tip_paint_event(e) for e in out)
+    types = [_event_session_update(e) for e in out]
+    assert "task_completed" not in types
+    # tools collapsed: at most one entry per id in the window
+    tool_ids = []
     for e in out:
-        c = (e.get("params") or {}).get("update", {}).get("content") or {}
-        if isinstance(c, dict):
-            texts.append(c.get("text", ""))
-    assert "ERIC_FINAL" in texts
-    assert "AGENT_FINAL" in texts
-    assert out[-1] and "AGENT_FINAL" in str(
-        ((out[-1].get("params") or {}).get("update") or {}).get("content")
-    )
+        if _event_session_update(e) in ("tool_call", "tool_call_update"):
+            u = (e.get("params") or {}).get("update") or {}
+            tool_ids.append(u.get("toolCallId"))
+    assert len(tool_ids) == len(set(tool_ids))
 
 
-def test_live_agents_tip_ends_on_dialogue():
-    for label, path in [
+def test_lines_not_turns():
+    """Dense tools: 50 lines can be fewer than 50 dialogue turns."""
+    events = []
+    for i in range(10):
+        events.append(_ev("agent_message_chunk", f"speech {i}"))
+        for j in range(10):
+            events.append(_ev("tool_call_update", tool_id=f"t{i}_{j}"))
+    out = select_tip_paint_lines(events, 50)
+    assert len(out) == 50
+    d = sum(1 for e in out if is_dialogue_speech(e))
+    assert d < 50  # tools count as lines too
+
+
+def test_chronological_and_exact_n():
+    events = [_ev("agent_message_chunk", f"m{i}") for i in range(100)]
+    out = select_tip_paint_lines(events, 50)
+    assert len(out) == 50
+    texts = [
+        ((e.get("params") or {}).get("update") or {}).get("content", {}).get("text")
+        for e in out
+    ]
+    assert texts[0] == "m50"
+    assert texts[-1] == "m99"
+
+
+def test_live_hot_exactly_n_lines():
+    for name, path in [
         ("Trip-G", Path("/home/eric/agents/Trip-G/asdaaas/history/hot.jsonl")),
         ("Squiggy", Path("/home/eric/agents/LeviSmith/Squiggy/asdaaas/history/hot.jsonl")),
     ]:
@@ -79,11 +94,4 @@ def test_live_agents_tip_ends_on_dialogue():
         ]
         events = [e for e in events if e]
         out = select_tip_paint_lines(events, 50)
-        tools = [
-            e
-            for e in out
-            if _event_session_update(e) in ("tool_call", "tool_call_update")
-        ]
-        assert not tools, f"{label} still has {len(tools)} tools on tip"
-        assert is_dialogue_speech(out[-1]), f"{label} tip does not end on dialogue"
-        assert sum(1 for e in out if is_dialogue_speech(e)) == 50
+        assert len(out) == 50, f"{name} got {len(out)}"

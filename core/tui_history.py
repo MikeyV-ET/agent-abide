@@ -827,18 +827,10 @@ def is_tip_paint_event(event: dict) -> bool:
 
 
 
-def tip_max_tools(n_dialogue: int) -> int:
-    """Tool panels allowed on initial ``-t`` catch-up.
 
-    Product (Eric 2026-09-21, after several tip iterations): catch-up is
-    **dialogue only**. Any positive tool budget (even 8) prefers tools nearest
-    the tip, so the scroll *ends* on a stack of tool panels and looks like the
-    turn finished on tools / delay. Live tail still paints tools as they
-    happen; PageUp lazy-load can bring tools back with speech.
-
-    ``n_dialogue`` retained for call-site compatibility.
-    """
-    _ = n_dialogue
+def tip_max_tools(n_lines: int) -> int:
+    """Deprecated no-op. ``-t`` is lines of history, not a tool quota."""
+    _ = n_lines
     return 0
 
 
@@ -848,69 +840,44 @@ def select_tip_paint_lines(
     *,
     max_tools: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Catch-up tip for ``-t N``.
+    """Catch-up tip: last **N TUI history lines** (``-t N``).
 
-    ``-t N`` = last **N dialogue** lines (user/agent/thought, non-chrome).
-    Catch-up mounts **dialogue only** (``tip_max_tools`` → 0). Tools are live-tail
-    / lazy-load, not initial tip — otherwise the scroll ends on tool panels.
+    Product (Eric): preload *lines of history*, not turns and not an explicit
+    tool count. Walk backward from the tip:
+
+      - each user/agent/thought (non-chrome) = 1 line
+      - each toolCallId (collapsed to latest tool_call/update) = 1 line
+      - drop session meta / chrome
+      - stop when N lines collected
+      - return chronological order
+
+    ``max_tools`` is ignored (kept so old call sites do not break).
     """
+    _ = max_tools
     if not events or not n_lines or n_lines <= 0:
         return []
 
-    tool_cap = tip_max_tools(n_lines) if max_tools is None else max(0, int(max_tools))
+    out_rev: list[dict[str, Any]] = []
+    seen_tools: set[str] = set()
+    paint = 0
 
-    # --- 1. last N dialogue define the span ---
-    dialogue_hits = 0
-    start = len(events)
-    for i in range(len(events) - 1, -1, -1):
-        start = i
-        if is_dialogue_speech(events[i]):
-            dialogue_hits += 1
-            if dialogue_hits >= n_lines:
-                break
-    span = events[start:]
-
-    # --- 2–3. dialogue always; tools collapsed (last state wins) ---
-    out: list[dict[str, Any]] = []
-    tool_idx: dict[str, int] = {}
-    for ev in span:
+    for ev in reversed(events):
         if not is_tip_paint_event(ev):
             continue
         et = _event_session_update(ev)
         if et in ("tool_call", "tool_call_update"):
-            if tool_cap <= 0:
-                continue
             tid = _event_tool_id(ev) or f"anon:{id(ev)}"
-            if tid in tool_idx:
-                out[tool_idx[tid]] = ev
-            else:
-                tool_idx[tid] = len(out)
-                out.append(ev)
-            continue
-        out.append(ev)
+            if tid in seen_tools:
+                continue  # older frame of same tool; already have newer from tip
+            seen_tools.add(tid)
+        out_rev.append(ev)
+        paint += 1
+        if paint >= n_lines:
+            break
 
-    # --- 4. hard tool cap (drop oldest first — keep tools nearest tip) ---
-    def _tool_positions(rows: list) -> list[int]:
-        return [
-            i
-            for i, ev in enumerate(rows)
-            if _event_session_update(ev) in ("tool_call", "tool_call_update")
-        ]
+    out_rev.reverse()
+    return out_rev
 
-    tool_positions = _tool_positions(out)
-    if len(tool_positions) > tool_cap:
-        drop = set(tool_positions[: len(tool_positions) - tool_cap])
-        out = [ev for i, ev in enumerate(out) if i not in drop]
-
-    # --- 5. never trail tools after last dialogue on catch-up ---
-    last_dlg = -1
-    for i, ev in enumerate(out):
-        if is_dialogue_speech(ev):
-            last_dlg = i
-    if last_dlg >= 0:
-        out = out[: last_dlg + 1]
-
-    return out
 
 
 def thin_tip_events(

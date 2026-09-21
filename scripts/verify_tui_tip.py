@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""Verify -t catch-up tip ends on dialogue (no tool stack at bottom).
-
-Usage:
-  python3 scripts/verify_tui_tip.py
-  python3 scripts/verify_tui_tip.py --agent Squiggy --n 50
-
-This is the offline half of TUI verification. Live TUI still needs a human
-or a future headless Textual driver; this locks the *selection* contract so
-we stop shipping "8 tools at the end" by accident.
-"""
+"""Verify -t N catch-up selects exactly N history lines (not turns)."""
 from __future__ import annotations
 
 import argparse
@@ -50,8 +41,7 @@ def tip_for(home: Path, n: int):
             if ev:
                 batch.append(ev)
         tip = select_tip_paint_lines(batch, n)
-        d = sum(1 for e in tip if is_dialogue_speech(e))
-        if d >= n or seek == 0:
+        if len(tip) >= n or seek == 0:
             events = batch
             break
     return select_tip_paint_lines(events, n)
@@ -59,7 +49,7 @@ def tip_for(home: Path, n: int):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--agent", action="append", default=None)
+    ap.add_argument("--agent", action="append")
     ap.add_argument("--n", type=int, default=50)
     args = ap.parse_args()
     agents = args.agent or list(HOMES)
@@ -67,28 +57,20 @@ def main() -> int:
     for name in agents:
         home = HOMES.get(name) or Path(name)
         tip = tip_for(home if name in HOMES else home, args.n)
-        tools = [
-            e
+        d = sum(1 for e in tip if is_dialogue_speech(e))
+        tools = sum(
+            1
             for e in tip
             if _event_session_update(e) in ("tool_call", "tool_call_update")
-        ]
-        d = sum(1 for e in tip if is_dialogue_speech(e))
-        last = _event_session_update(tip[-1]) if tip else None
-        last_txt = ""
-        if tip:
-            c = ((tip[-1].get("params") or {}).get("update") or {}).get("content")
-            if isinstance(c, dict):
-                last_txt = str(c.get("text") or "")[:80].replace("\n", " ")
-        ok = d == args.n and not tools and last in (
-            "user_message_chunk",
-            "agent_message_chunk",
-            "agent_thought_chunk",
         )
-        status = "OK" if ok else "FAIL"
+        last = _event_session_update(tip[-1]) if tip else None
+        ok = len(tip) == args.n
         if not ok:
             rc = 1
-        print(f"[{status}] {name}: dialogue={d}/{args.n} tools={len(tools)} last={last}")
-        print(f"         last_text={last_txt!r}")
+        print(
+            f"[{'OK' if ok else 'FAIL'}] {name}: lines={len(tip)}/{args.n} "
+            f"(dialogue={d} tools={tools}) last={last}"
+        )
     return rc
 
 

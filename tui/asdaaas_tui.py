@@ -2094,10 +2094,10 @@ Type anything else to send a message to the agent.
             pass
 
     def _initial_tail_speech_count(self, agent_name: str) -> int:
-        """Catch-up size for ``-t N``: N dialogue lines (+ collapsed tools).
+        """How many TUI history *lines* to preload (``-t N``).
 
-        Tools in the span collapse to one line each and are capped so they
-        cannot push chat out of the tip. PageUp lazy-load owns older history.
+        Lines = paint widgets after collapse (speech + one panel per tool id),
+        not dialogue turns and not a separate tool quota. PageUp loads older.
         """
         if self._tail_count:
             return max(1, int(self._tail_count))
@@ -3319,25 +3319,20 @@ Type anything else to send a message to the agent.
                             ev = line_to_tui_event(line, hist_kind)
                             if ev is not None:
                                 events.append((off, ev))
-                        # Need enough *dialogue* in the window to fill -t N.
+                        # Need enough *history lines* in the window to fill -t N.
                         only_probe = [e for _, e in events]
-                        dialogue_n = sum(1 for e in only_probe if is_dialogue_speech(e))
                         tip_probe = (
                             select_tip_paint_lines(only_probe, want)
                             if want
                             else only_probe
                         )
                         paint_n = len(tip_probe)
-                        tip_dialogue = sum(
-                            1 for e in tip_probe if is_dialogue_speech(e)
-                        )
                         self._debug(
                             f"REPLAY_WINDOW kind={hist_kind} mib={mib} "
                             f"raw={raw_line_n} events={len(events)} "
-                            f"dialogue={dialogue_n} tip_dialogue={tip_dialogue} "
-                            f"tip_paint={paint_n}"
+                            f"tip_lines={paint_n} want={want}"
                         )
-                        if want is None or tip_dialogue >= want or seek_pos == 0:
+                        if want is None or paint_n >= want or seek_pos == 0:
                             break
 
                     # -t N = N TUI paint lines
@@ -3379,17 +3374,10 @@ Type anything else to send a message to the agent.
                         f"raw_lines={raw_line_n} want={want}"
                     )
                     t_label = f"-t{want}" if want else "tip"
-                    n_tools = max(0, replay_count - dialogue_dispatched)
-                    if n_tools:
-                        msg = (
-                            f"Replay ({t_label}): {dialogue_dispatched} dialogue"
-                            f" + {n_tools} tools from {hist_kind}"
-                        )
-                    else:
-                        msg = (
-                            f"Replay ({t_label}): {dialogue_dispatched} dialogue"
-                            f" from {hist_kind} (tools via live tail / PageUp)"
-                        )
+                    msg = (
+                        f"Replay ({t_label}): {replay_count} history lines"
+                        f" from {hist_kind}"
+                    )
                     self.call_from_thread(lambda m=msg: self.notify(m, severity="information"))
                     time.sleep(1)
                     self.call_from_thread(self._force_scroll_bottom)
@@ -4864,7 +4852,7 @@ def main():
     )
     parser.add_argument(
         "--tail", "-t", type=int, default=None,
-        help="Catch-up last N dialogue lines (+ collapsed tools in span). "
+        help="Catch-up last N history lines (speech + tools collapsed). "
              "PageUp loads older. Default 50 primary / 25 secondary."
     )
     parser.add_argument(

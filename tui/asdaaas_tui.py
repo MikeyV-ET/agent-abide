@@ -3445,16 +3445,20 @@ Type anything else to send a message to the agent.
             except Exception:
                 pass
 
-            # Multi-agent: only the focused tab needs a hot tail; others poll slowly
-            # so scrolling Astro does not fight Trip-G's 200MB hot reader.
+            # Wake: inotify on hot.jsonl (shared hub, 1 fd / process) with timeout
+            # safety net. Inactive tabs use longer timeout so they burn less CPU.
             try:
+                from hot_inotify import wait_hot_change
                 active = getattr(self, "_active_agent", None)
-                if active is not None and agent_name != active:
-                    time.sleep(1.0)
+                inactive = active is not None and agent_name != active
+                timeout = 2.0 if inactive else 1.0
+                path = state.get("updates_path")
+                if path and Path(path).exists():
+                    wait_hot_change(path, timeout_s=timeout)
                 else:
-                    time.sleep(0.3)
+                    time.sleep(timeout)
             except Exception:
-                time.sleep(0.3)
+                time.sleep(0.5)
 
     def _tail_via_api(self, agent_name: str) -> None:
         """Background thread: tail agent messages via WebSocket API.

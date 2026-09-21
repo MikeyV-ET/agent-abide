@@ -206,6 +206,177 @@ def read_park_state(agent_dir: Path) -> Optional[dict]:
         return None
 
 
+
+def should_hold_park(agent_dir: Path, *, now: Optional[float] = None) -> bool:
+    """True while session_limit.json says we are still before reset.
+
+    During hold: delay loops must NOT interrupt on doorbell/adapter message
+    (those queue; sending into a hard limit is the bug Astro measured).
+    Shutdown still wins at the caller.
+    """
+    now = now if now is not None else time.time()
+    park = read_park_state(agent_dir)
+    if not park or park.get("status") != "session_limited":
+        return False
+    reset_u = park.get("reset_unix")
+    if reset_u is None:
+        # Unknown reset: hold until file cleared (wake/retry path clears it).
+        return True
+    try:
+        return float(reset_u) > now
+    except (TypeError, ValueError):
+        return True
+
+
+def park_remaining_s(agent_dir: Path, *, now: Optional[float] = None) -> Optional[float]:
+    now = now if now is not None else time.time()
+    park = read_park_state(agent_dir)
+    if not park:
+        return None
+    reset_u = park.get("reset_unix")
+    if reset_u is None:
+        return None
+    try:
+        return max(0.0, float(reset_u) - now)
+    except (TypeError, ValueError):
+        return None
+
+
+def count_queued_inputs(agent_dir: Path) -> dict:
+    """Best-effort count of human/ops input waiting while parked (not continues)."""
+    adir = Path(agent_dir)
+    n_bells = 0
+    n_continue = 0
+    bell_dir = adir / "doorbells"
+    if bell_dir.is_dir():
+        for f in bell_dir.glob("*.json"):
+            name = f.name
+            if name.startswith("cont_"):
+                n_continue += 1
+            else:
+                n_bells += 1
+    n_adapter = 0
+    adapters = adir / "adapters"
+    if adapters.is_dir():
+        for inbox in adapters.glob("*/inbox"):
+            if inbox.is_dir():
+                n_adapter += sum(1 for p in inbox.iterdir() if p.is_file())
+        # localmail payloads sometimes live under adapters/localmail/
+        for pat in ("**/inbox/*.json", "**/payloads/*.json"):
+            pass
+    return {
+        "doorbells": n_bells,
+        "continues": n_continue,
+        "adapter_files": n_adapter,
+        "total": n_bells + n_adapter,
+    }
+
+
+def format_wake_notice(park: dict, *, queued: Optional[dict] = None,
+                       now: Optional[float] = None) -> str:
+    """Agent-facing wake text: T1→T2, reset clock, queue depth, memory nudge."""
+    now = now if now is not None else time.time()
+    queued = queued or {}
+    t1 = park.get("parked_at_iso") or park.get("parked_at")
+    t2 = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
+    reset_iso = park.get("reset_iso")
+    reset_u = park.get("reset_unix")
+    if not reset_iso and reset_u:
+        try:
+            reset_iso = datetime.fromtimestamp(float(reset_u), tz=timezone.utc).isoformat()
+        except (TypeError, ValueError):
+            reset_iso = None
+    # local-ish wall clock string if we have reset_unix
+    reset_local = None
+    if reset_u:
+        try:
+            reset_local = datetime.fromtimestamp(float(reset_u)).astimezone().strftime(
+                "%a %b %d %I:%M%p %Z"
+            )
+        except (TypeError, ValueError, OSError):
+            reset_local = None
+    n = int(queued.get("total") or 0)
+    n_b = int(queued.get("doorbells") or 0)
+    n_a = int(queued.get("adapter_files") or 0)
+    lines = [
+        "[aa.control] session_limit cleared — back online.",
+        f"Parked T1={t1} → wake T2={t2}.",
+    ]
+    if reset_iso or reset_local:
+        lines.append(
+            f"Parsed reset was {reset_local or reset_iso}"
+            + (f" (utc {reset_iso})." if reset_local and reset_iso else ".")
+        )
+    else:
+        lines.append("Parsed reset was unknown (retry/wake path).")
+    lines.append(
+        f"Queued while parked: {n} item(s) "
+        f"(doorbells={n_b}, adapter_inbox_files={n_a}) — process them before new work."
+    )
+    lines.append(
+        "Memory: call memory_query (or memory_recall) on your conversation record "
+        "to recover what was said during the park window and any decisions you missed; "
+        "the control line is not a full transcript."
+    )
+    return "\n".join(lines)
+
+
+def emit_wake_notice(agent_name: str, park: dict, *, env=None) -> str:
+    """Write wake control to conversation + a high-priority doorbell for the agent.
+
+    Returns the notice text. Caller clears park state after.
+    """
+    from asdaaas import agent_dir, write_conversation, queue_continue_doorbell
+
+    adir = agent_dir(agent_name, env=env)
+    queued = count_queued_inputs(adir)
+    text = format_wake_notice(park, queued=queued)
+    try:
+        write_conversation(
+            agent_name, "system", text, env=env, kind="control",
+        )
+    except Exception as e:
+        print(f"[session_limit] wake conversation write failed: {e}")
+    # Dedicated wake doorbell (not a plain continue) so the model sees it as input
+    try:
+        bell_dir = adir / "doorbells"
+        bell_dir.mkdir(parents=True, exist_ok=True)
+        import os, tempfile
+        bell = {
+            "adapter": "session_limit",
+            "priority": 3,
+            "text": text,
+            "source": "session_limit_wake",
+            "ts": time.time(),
+        }
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(bell_dir), suffix=".tmp", prefix="wake_sesslim_"
+        )
+        with os.fdopen(fd, "w") as f:
+            json.dump(bell, f)
+        os.rename(tmp_path, tmp_path.replace(".tmp", ".json"))
+    except Exception as e:
+        print(f"[session_limit] wake doorbell failed: {e}")
+        try:
+            queue_continue_doorbell(agent_name, text=text, env=env)
+        except Exception:
+            pass
+    return text
+
+
+def clear_park_with_wake(agent_name: str, *, env=None) -> Optional[str]:
+    """If park file present, emit wake notice and clear. Returns notice or None."""
+    from asdaaas import agent_dir
+
+    adir = agent_dir(agent_name, env=env)
+    park = read_park_state(adir)
+    if not park:
+        return None
+    notice = emit_wake_notice(agent_name, park, env=env)
+    clear_park_state(adir)
+    return notice
+
+
 def seconds_until_reset(info: SessionLimitInfo, *, now: Optional[float] = None) -> Optional[float]:
     now = now if now is not None else time.time()
     if info.reset_unix is None:

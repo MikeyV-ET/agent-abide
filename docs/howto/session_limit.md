@@ -37,3 +37,18 @@ Claude Code may report when a model's prompt cache has gone cold. For
 subscription-based agents we may want a **cache warmer** (periodic cheap
 touch) so cold-start latency does not stack with session-limit wake.
 Not implemented yet — track separately from session_limit park/wake.
+
+## Park hold + wake notice (2026-09-21)
+
+**A — stop sending while parked:** `run_delay_loop` ignores doorbell/adapter
+interrupts while `session_limit.json` is active and `reset_unix` is still in
+the future (`should_hold_park`). Input stays queued. Shutdown still interrupts.
+
+**C — tell the agent it is back:** `clear_park_with_wake` / delay expiry emits
+a control line + `wake_sesslim_*` doorbell with:
+- Parked T1 → wake T2
+- Parsed reset wall-clock (so real wake ≠ blind hourly retry)
+- Queue depth (doorbells + adapter inbox files)
+- Nudge to `memory_query` / `memory_recall` for the park window (Eric: memory is the right embodiment path; control line is not a transcript)
+
+Detection remains CLI/backend signals only — never model speech.

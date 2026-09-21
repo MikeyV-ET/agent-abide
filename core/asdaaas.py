@@ -1059,9 +1059,20 @@ async def run_delay_loop(agent_name, delay_seconds, awareness, poll_interval=DEL
         delay_remaining -= poll_interval
         if _shutdown_requested:
             return True, "shutdown"
+        # Session-limit park: queue input, do not interrupt delay into a send.
+        holding = False
+        try:
+            from session_limit import should_hold_park
+            holding = should_hold_park(agent_dir(agent_name, env=env))
+        except Exception:
+            holding = False
         if has_pending_doorbells(agent_name, env=env):
+            if holding:
+                continue
             return True, "doorbell"
         if has_pending_adapter_messages(agent_name, awareness, env=env):
+            if holding:
+                continue
             return True, "adapter_message"
     return False, "expired"
 
@@ -2451,17 +2462,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     _rt.current_session_id = sid
     try:
         # env is assigned later in main(); agent_dir(None) resolves via config.
-        from session_limit import clear_park_state, read_park_state
-        _adir = agent_dir(agent_name, env=None)
-        _park = read_park_state(_adir)
-        if _park:
-            print("[asdaaas] Clearing session_limit park after start")
-            clear_park_state(_adir)
-            write_conversation(
-                agent_name, "system",
-                "[aa.control] session_limit cleared — back online; check queued messages",
-                env=None, kind="control",
-            )
+        from session_limit import clear_park_with_wake
+        _notice = clear_park_with_wake(agent_name, env=None)
+        if _notice:
+            print("[asdaaas] session_limit wake after start")
     except Exception as _e:
         print("[asdaaas] session_limit park clear: %s" % _e)
     _current_backend_type = config.agent_backend(agent_name) if config else "grok"

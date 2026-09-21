@@ -450,25 +450,19 @@ class TurnEngine:
         # Session / usage limit (Claude Max etc.)
         try:
             result_sr = getattr(result, "stop_reason", "") or ""
+            # Trust backend/CLI signals only — never scan model speech here
+            # (Astro false-parked twice explaining a prior limit).
             limited = (
                 result_sr == "session_limit"
                 or getattr(self.backend, "session_limited", False)
             )
-            if not limited and result.speech:
-                from session_limit import inspect_limit_text
-                limited = inspect_limit_text(result.speech).detected
             if limited:
                 from session_limit import (
-                    inspect_limit_text,
                     handle_session_limit,
                     SessionLimitInfo,
                 )
                 info = getattr(self.backend, "session_limit_info", None)
                 if info is None or not getattr(info, "detected", False):
-                    info = inspect_limit_text(
-                        result.speech or result_sr, source="turn_engine"
-                    )
-                if not info.detected:
                     info = SessionLimitInfo(
                         detected=True, source="stop_reason", reason="session_limit"
                     )
@@ -1172,15 +1166,79 @@ class TurnEngine:
                     pass  # fall through to continue doorbell
                 else:
                     print(f"[asdaaas] Default doorbell: delaying {self.next_turn_delay}s")
+                    _park_before = None
+                    try:
+                        from session_limit import read_park_state
+                        from asdaaas import agent_dir as _ad
+                        _park_before = read_park_state(_ad(agent_name, env=self.env))
+                    except Exception:
+                        _park_before = None
                     interrupted, reason = await run_delay_loop(
                         agent_name, self.next_turn_delay, awareness, env=self.env
                     )
                     self.next_turn_delay = 0
                     self.last_was_foreground = True
                     if interrupted:
-                        print(f"[asdaaas] Delay interrupted by {reason}")
-                        result.delay_interrupted = True
-                        return result
+                        # Park hold should prevent doorbell/adapter interrupts; if a
+                        # race still fires, keep parking when hold is active.
+                        try:
+                            from session_limit import should_hold_park, park_remaining_s
+                            from asdaaas import agent_dir as _ad
+                            _adir = _ad(agent_name, env=self.env)
+                            if should_hold_park(_adir):
+                                print(
+                                    f"[asdaaas] Delay event {reason} ignored — "
+                                    f"session_limit park still active (input queued)"
+                                )
+                                result.delay_interrupted = False
+                                rem = park_remaining_s(_adir)
+                                if rem is not None and rem > 0:
+                                    self.next_turn_delay = max(60.0, rem)
+                                    self.delay_text = "session_limit park"
+                                else:
+                                    self.next_turn_delay = max(60.0, self.next_turn_delay or 3600.0)
+                                    self.delay_text = "session_limit park"
+                                # Return before collection window — else pending
+                                # adapter mail would start a turn into the wall.
+                                result.action = "continue"
+                                return result
+                            else:
+                                print(f"[asdaaas] Delay interrupted by {reason}")
+                                result.delay_interrupted = True
+                                return result
+                        except Exception:
+                            print(f"[asdaaas] Delay interrupted by {reason}")
+                            result.delay_interrupted = True
+                            return result
+                    elif _park_before and _park_before.get("status") == "session_limited":
+                        try:
+                            from session_limit import clear_park_with_wake
+                            notice = clear_park_with_wake(agent_name, env=self.env)
+                            if notice:
+                                print(
+                                    "[asdaaas] session_limit park delay expired — "
+                                    "wake notice emitted"
+                                )
+                        except Exception as e:
+                            print(f"[asdaaas] session_limit wake on expiry failed: {e}")
+
+            # Still parked? Do not open a collection window into a model turn.
+            try:
+                from session_limit import should_hold_park, park_remaining_s
+                from asdaaas import agent_dir as _ad
+                _adir = _ad(agent_name, env=self.env)
+                if should_hold_park(_adir):
+                    rem = park_remaining_s(_adir)
+                    self.next_turn_delay = max(60.0, rem if rem is not None else 3600.0)
+                    self.delay_text = "session_limit park"
+                    print(
+                        f"[asdaaas] session_limit park hold — "
+                        f"re-delay {self.next_turn_delay:.0f}s (input stays queued)"
+                    )
+                    result.action = "continue"
+                    return result
+            except Exception:
+                pass
 
             # Collection window: wait briefly for late-arriving messages
             obs_cw = self.read_observer_state()

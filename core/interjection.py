@@ -88,18 +88,18 @@ def format_message_for_interjection(msg: dict) -> str:
 
 
 async def interjection_watcher(agent_name: str, poll_fn, poll_interval: float = 2.0,
-                               env=None):
-    """Poll for incoming messages during BUSY turns and route to interjection queue.
+                               env=None, inject_fn=None):
+    """Poll for incoming messages during BUSY turns.
+
+    Primary (Claude): inject_fn(text) writes to binary stdin mid-turn
+    (held until tool returns — Astro probe ddb0e7e).
+    Fallback / Grok: queue_interjection → BASH_ENV hook on next bash -c.
+
+    If inject_fn succeeds, skip disk queue to avoid double delivery.
+    If inject_fn fails or is None, queue for BASH_ENV.
 
     Args:
-        agent_name: Agent to queue interjections for.
-        poll_fn: Callable that returns list of message dicts (destructive poll).
-                 In asdaaas this is: lambda: poll_adapter_inboxes(agent_name, awareness)
-        poll_interval: Seconds between polls.
-        env: Optional AsdaaasEnv for path resolution.
-
-    Runs as an asyncio.Task alongside collect_response(). Caller cancels
-    when the turn completes.
+        inject_fn: optional async callable(text) -> bool
     """
     import asyncio
 
@@ -110,7 +110,17 @@ async def interjection_watcher(agent_name: str, poll_fn, poll_interval: float = 
                 msgs = poll_fn()
                 for msg in msgs:
                     text = format_message_for_interjection(msg)
-                    queue_interjection(agent_name, text, env=env)
+                    injected = False
+                    if inject_fn is not None:
+                        try:
+                            result = inject_fn(text)
+                            if asyncio.iscoroutine(result):
+                                result = await result
+                            injected = bool(result)
+                        except Exception as e:
+                            print(f"[interjection] inject_fn failed: {e}")
+                    if not injected:
+                        queue_interjection(agent_name, text, env=env)
                     # V1: log interjection when human text arrives mid-turn
                     try:
                         from asdaaas import write_conversation

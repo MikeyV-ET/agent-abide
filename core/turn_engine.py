@@ -366,14 +366,23 @@ class TurnEngine:
             session_id=self._conv_session_id(),
         )
 
-        # Interjection watcher
+        # Interjection watcher (Claude: stdin inject; else BASH_ENV queue)
         _ij_watcher = None
         if interjection_enabled:
             from interjection import interjection_watcher
+            inject_fn = None
+            if hasattr(self.backend, "inject_user_message"):
+                async def _inject(text, _b=self.backend):
+                    return await _b.inject_user_message(text)
+                inject_fn = _inject
             _ij_watcher = asyncio.create_task(
-                interjection_watcher(agent_name,
-                                     lambda: poll_adapter_inboxes(agent_name, self.awareness, env=self.env),
-                                     poll_interval=2.0))
+                interjection_watcher(
+                    agent_name,
+                    lambda: poll_adapter_inboxes(agent_name, self.awareness, env=self.env),
+                    poll_interval=2.0,
+                    env=self.env,
+                    inject_fn=inject_fn,
+                ))
 
         result = await self.backend.collect_response(
             msg_handle, on_meta=on_streaming_meta,

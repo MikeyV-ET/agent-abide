@@ -62,6 +62,7 @@ class ClaudeBackend(AgentBackend):
         self._session_id: Optional[str] = None
         self._model_id: str = "unknown"
         self._total_tokens: int = 0
+        self._injected_texts: list = []
         self._context_window: int = 1000000  # Opus-class default; modelUsage overrides
         self._claude_path: Optional[str] = None
         self._api_key: Optional[str] = api_key
@@ -89,6 +90,13 @@ class ClaudeBackend(AgentBackend):
             "--output-format", "stream-json",
             "--verbose",
         ]
+        # Mid-turn stdin inject (Astro probe ddb0e7e): echo user msgs back on
+        # stdout so asdaaas/TUI can record them. Safe with flag off of inject.
+        # Gate: interjection_enabled (agents.json) or explicit claude_stdin_interject.
+        # Default OFF unless interjections are on — matches dogfood "flag off" spirit
+        # while turning on automatically with Eric's interjection_enabled flip.
+        if kwargs.get("interjection_enabled") or kwargs.get("claude_stdin_interject", False):
+            cmd.append("--replay-user-messages")
         if yolo:
             cmd.append("--dangerously-skip-permissions")
         if model:
@@ -263,6 +271,43 @@ class ClaudeBackend(AgentBackend):
             )
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+
+    async def inject_user_message(self, text: str) -> bool:
+        """Write a user message to stdin mid-turn (Claude Code holds until tool ends).
+
+        Requires --replay-user-messages at launch. Returns True if written.
+        Exact text is recorded in _injected_texts so replayed type:user frames
+        can be recognized as interjections (not the original prompt).
+        """
+        if not text or not str(text).strip():
+            return False
+        if not self._proc or not self._proc.stdin:
+            return False
+        if self._proc.returncode is not None:
+            return False
+        try:
+            msg = json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": text},
+            }) + "\n"
+            self._proc.stdin.write(msg.encode("utf-8"))
+            await self._proc.stdin.drain()
+            self._injected_texts.append(text)
+            # cap list
+            if len(self._injected_texts) > 50:
+                self._injected_texts = self._injected_texts[-30:]
+            return True
+        except Exception as e:
+            print(f"[claude_backend] inject_user_message failed: {e}")
+            return False
+
+    def was_injected(self, text: str) -> bool:
+        """True if text matches a recent stdin interject (exact)."""
+        if not text:
+            return False
+        texts = getattr(self, "_injected_texts", None) or []
+        return any(text == t or text.strip() == t.strip() for t in texts)
 
     async def send_prompt(self, text: str) -> Any:
         if not self._proc or not self._proc.stdin:

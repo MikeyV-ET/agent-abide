@@ -204,3 +204,19 @@ def test_no_bash_env_without_an_agent_name():
     be = ClaudeBackend()
     env = be._build_child_env("/tmp/agent", agent_name=None, interjection_enabled=True)
     assert "BASH_ENV" not in env
+
+
+def test_build_cmd_includes_replay_when_interject():
+    """--replay-user-messages gated on interjection_enabled (or explicit flag)."""
+    def want(kwargs):
+        return bool(kwargs.get("interjection_enabled") or kwargs.get("claude_stdin_interject", False))
+    assert want({"interjection_enabled": True}) is True
+    assert want({"interjection_enabled": False}) is False
+    assert want({"claude_stdin_interject": True}) is True
+
+
+def test_was_injected_tracks_exact_text():
+    be = ClaudeBackend()
+    be._injected_texts = ["[eric (via tui)] hello"]
+    assert be.was_injected("[eric (via tui)] hello")
+    assert not be.was_injected("other")

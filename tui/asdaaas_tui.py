@@ -3245,9 +3245,20 @@ Type anything else to send a message to the agent.
                 file_size = updates_path.stat().st_size
                 state["updates_offset"] = file_size
                 state["earliest_offset"] = file_size  # Allow loading history backwards
-                ctrl = self._scan_updates_for_latest_aa_control(updates_path)
-                if ctrl:
-                    self.call_from_thread(self._mount_aa_control_from_catchup, ctrl)
+                info = self._scan_updates_for_latest_aa_control(updates_path)
+                if info:
+                    content = info.get("content") if isinstance(info, dict) else info
+                    speech_after = (
+                        bool(info.get("speech_after"))
+                        if isinstance(info, dict)
+                        else False
+                    )
+                    if content and speech_after:
+                        self.call_from_thread(self._apply_delay_header, content)
+                    elif content:
+                        self.call_from_thread(
+                            self._mount_aa_control_from_catchup, content
+                        )
             except Exception:
                 state["updates_offset"] = 0
 
@@ -3389,11 +3400,25 @@ Type anything else to send a message to the agent.
             state["replay_done"] = True
             self._replay_done = True
 
-            # Reload-safe: last delay may be outside -t N window (prod parity)
+            # Reload-safe delay chrome. If speech came *after* the delay in
+            # hot (normal: delay tool then final agent text), only update the
+            # header — do NOT append [aa.control] at the scroll bottom or the
+            # tip looks like delay happened after the turn finished.
             try:
-                ctrl = self._scan_updates_for_latest_aa_control(updates_path)
-                if ctrl:
-                    self.call_from_thread(self._mount_aa_control_from_catchup, ctrl)
+                info = self._scan_updates_for_latest_aa_control(updates_path)
+                if info:
+                    content = info.get("content") if isinstance(info, dict) else info
+                    speech_after = (
+                        bool(info.get("speech_after"))
+                        if isinstance(info, dict)
+                        else False
+                    )
+                    if content and speech_after:
+                        self.call_from_thread(self._apply_delay_header, content)
+                    elif content:
+                        self.call_from_thread(
+                            self._mount_aa_control_from_catchup, content
+                        )
             except Exception as _e:
                 self._debug(f"aa_control catch-up mount: {_e}")
 
@@ -3887,7 +3912,15 @@ Type anything else to send a message to the agent.
         return "\n".join(parts)
 
     def _scan_updates_for_latest_aa_control(self, updates_path, max_bytes: int = 2_000_000):
-        """Catch-up: most recent delay tool_call in updates.jsonl or hot.jsonl."""
+        """Catch-up: most recent delay tool_call in updates.jsonl or hot.jsonl.
+
+        Returns dict ``{content, speech_after}`` or None.
+        ``speech_after``: real dialogue exists *after* that delay in the scanned
+        tail. When true, catch-up must NOT re-mount the control line at the
+        bottom of the scroll (that made delay look like it happened *after*
+        the agent finished speaking — Squiggy 09:52 delay then text; Eric).
+        Header chrome can still show the delay.
+        """
         try:
             path = Path(updates_path)
             if not path.exists():
@@ -3898,43 +3931,100 @@ Type anything else to send a message to the agent.
                 if f.tell() > 0:
                     f.readline()
                 data = f.read().decode("utf-8", errors="replace")
+            lines = data.splitlines()
             latest = None
-            for line in data.splitlines():
-                if "delay" not in line or ("tool_call" not in line and "tool_use" not in line):
+            latest_i = -1
+            for i, line in enumerate(lines):
+                if "delay" not in line or (
+                    "tool_call" not in line and "tool_use" not in line
+                ):
                     continue
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                # Grok-shaped (updates or hot pass-through)
+                ctrl = None
                 update = (event.get("params") or {}).get("update") or {}
                 et = update.get("sessionUpdate", "")
                 if et in ("tool_call", "tool_call_update"):
-                    ctrl = self._delay_control_from_tool_blob(self._tool_update_blob(update))
-                    if ctrl:
-                        latest = ctrl
-                    continue
-                # aa.stream body tool_call (Claude hot without pass-through)
-                body = event.get("body") or {}
-                if body.get("kind") in ("tool_call", "tool_result"):
-                    blob = "\n".join(
-                        str(x)
-                        for x in (
-                            body.get("name"),
-                            body.get("args"),
-                            body.get("input"),
-                            body.get("content"),
-                            body.get("text"),
-                        )
-                        if x is not None
+                    ctrl = self._delay_control_from_tool_blob(
+                        self._tool_update_blob(update)
                     )
-                    ctrl = self._delay_control_from_tool_blob(blob)
-                    if ctrl:
-                        latest = ctrl
-            return latest
+                else:
+                    body = event.get("body") or {}
+                    if body.get("kind") in ("tool_call", "tool_result"):
+                        blob = "\n".join(
+                            str(x)
+                            for x in (
+                                body.get("name"),
+                                body.get("args"),
+                                body.get("input"),
+                                body.get("content"),
+                                body.get("text"),
+                            )
+                            if x is not None
+                        )
+                        ctrl = self._delay_control_from_tool_blob(blob)
+                if ctrl:
+                    latest = ctrl
+                    latest_i = i
+            if not latest:
+                return None
+            speech_after = False
+            for line in lines[latest_i + 1 :]:
+                if self._line_looks_like_dialogue_speech(line):
+                    speech_after = True
+                    break
+            return {"content": latest, "speech_after": speech_after}
         except Exception as e:
             self._debug(f"aa_control catch-up scan failed: {e}")
             return None
+
+    @staticmethod
+    def _line_looks_like_dialogue_speech(line: str) -> bool:
+        """Cheap hot/updates line check: non-chrome user/agent text."""
+        if not line or "delay" in line[:80] and "tool" in line[:120]:
+            pass
+        try:
+            core = str(Path(__file__).resolve().parent.parent / "core")
+            import sys as _sys
+            if core not in _sys.path:
+                _sys.path.insert(0, core)
+            from tui_history import (
+                line_to_tui_event,
+                is_dialogue_speech,
+                cheap_hot_line_speech,
+                is_chrome_speech,
+            )
+        except Exception:
+            return False
+        # Prefer full path when possible
+        try:
+            ev = line_to_tui_event(line, "hot")
+            if ev is not None and is_dialogue_speech(ev):
+                return True
+        except Exception:
+            pass
+        try:
+            hit = cheap_hot_line_speech(line)
+            if hit is None:
+                return False
+            return not is_chrome_speech(hit[1])
+        except Exception:
+            return False
+
+    def _apply_delay_header(self, content: str) -> None:
+        """Header delay chrome only — no chat line."""
+        try:
+            import re
+            header = self.query_one(AgentHeader)
+            sm = re.search(r"delay:\s*([0-9.]+)s", content or "")
+            if sm:
+                header.delay_pattern = f"d:{sm.group(1)}s"
+            elif content and "until_event" in content:
+                header.delay_pattern = "d:until_event"
+        except Exception as e:
+            self._debug(f"aa_control header update failed: {e}")
 
     def _mount_aa_control_line(self, content: str) -> None:
         """Show agent AA control (delay) in the chat scroll."""
@@ -3956,17 +4046,9 @@ Type anything else to send a message to the agent.
     def _mount_aa_control_from_catchup(self, content: str) -> None:
         """Mount control after history catch-up; refresh header delay chrome."""
         self._mount_aa_control_line(content)
-        try:
-            import re
-            header = self.query_one(AgentHeader)
-            sm = re.search(r"delay:\s*([0-9.]+)s", content or "")
-            if sm:
-                header.delay_pattern = f"d:{sm.group(1)}s"
-            elif content and "until_event" in content:
-                header.delay_pattern = "d:until_event"
-        except Exception as e:
-            self._debug(f"aa_control header update failed: {e}")
+        self._apply_delay_header(content)
 
+    
     def _delay_control_from_tool_blob(self, text: str):
         """Derive [aa.control] delay line from tool_call payload text."""
         import re

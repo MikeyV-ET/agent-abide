@@ -3037,7 +3037,11 @@ Type anything else to send a message to the agent.
             return
 
         is_primary = (agent_name == self._agents[0])
-        tail_count = self._tail_count if is_primary else 30
+        # Secondary tabs used to hardcode 30 — with -t50 primary + add Astro,
+        # Astro started in the dense evening band and scroll-up froze. Inherit -t.
+        tail_count = self._tail_count if self._tail_count else (50 if is_primary else 80)
+        if not is_primary and self._tail_count:
+            tail_count = max(int(self._tail_count), 80)  # secondary: at least 80 speech
         should_replay = (is_primary and self._replay_mode) or (not is_primary)
 
         offset = 0
@@ -3218,9 +3222,12 @@ Type anything else to send a message to the agent.
 
         # Determine replay behavior
         is_primary = (agent_name == self._agents[0])
-        # Non-primary agents always replay last 30 events for context
+        # Non-primary agents always replay; inherit CLI -t (min 80 speech)
         should_replay = (is_primary and self._replay_mode) or (not is_primary)
-        tail_count = self._tail_count if is_primary else 30
+        if self._tail_count:
+            tail_count = int(self._tail_count) if is_primary else max(int(self._tail_count), 80)
+        else:
+            tail_count = 50 if is_primary else 80
 
         if not should_replay:
             try:
@@ -3472,7 +3479,11 @@ Type anything else to send a message to the agent.
 
         # --- Phase 1: Replay via REST if requested ---
         if should_replay:
-            tail_n = self._tail_count if is_primary else 30
+            tail_n = (
+                int(self._tail_count) if is_primary and self._tail_count
+                else max(int(self._tail_count or 80), 80) if not is_primary
+                else 50
+            )
             try:
                 import urllib.request
                 rest_url = f"{api_url}/agents/{agent_name}/messages?last={tail_n}"

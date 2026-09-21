@@ -827,30 +827,42 @@ def is_tip_paint_event(event: dict) -> bool:
 
 
 
+def tip_max_tools(n_dialogue: int) -> int:
+    """Independent tool budget for catch-up — NOT 1:1 with dialogue.
+
+    ``-t50`` is fifty chat lines. A hard cap of 50 tools made the hover read
+    "50 dialogue + 50 tools" whenever the span was tool-dense, which looks like
+    false parity and drowns the tip in panels (Eric 2026-09-21). Keep a *small*
+    handful of recent tools for context; PageUp lazy-load owns the rest.
+    """
+    if n_dialogue <= 0:
+        return 0
+    # ~1 tool per 6 dialogue, floor 3, ceiling 8
+    return max(3, min(8, n_dialogue // 6))
+
+
 def select_tip_paint_lines(
     events: list[dict[str, Any]],
     n_lines: int,
+    *,
+    max_tools: int | None = None,
 ) -> list[dict[str, Any]]:
     """Catch-up tip for ``-t N``.
 
-    Product (Eric, 2026-09-21):
-      - ``-t50`` should feel like ~50 lines of *conversation* on screen, not a
-        wall of tool panels that push chat out of the tip.
-      - Tool storms must not expand to hundreds of events (collapse per id).
-      - Chrome / session meta never mount on the tip.
+    ``-t N`` = last **N dialogue** lines (user/agent/thought, non-chrome).
+    Tools in that span are optional garnish: collapsed to one line per
+    toolCallId and capped by :func:`tip_max_tools` (small, independent of N —
+    not N tools for N dialogue). Chrome / session meta never mount.
 
-    Algorithm:
-      1. Walk backward and take the last **N dialogue** speeches
-         (user/agent/thought, non-chrome).
-      2. Keep events in that span that are tip-paint worthy.
-      3. Collapse tool_call/update → one line per toolCallId (latest state).
-      4. Cap tool lines at N so paint ≤ ~2N (dialogue + tools). If over cap,
-         drop *oldest* tools first (keep tools nearest the tip).
+    Trailing in-progress tools after the last dialogue are limited further so
+    the tip does not "die" on a tool wall when chat is what you came for.
     """
     if not events or not n_lines or n_lines <= 0:
         return []
 
-    # --- 1. find start index of last N dialogue ---
+    tool_cap = tip_max_tools(n_lines) if max_tools is None else max(0, int(max_tools))
+
+    # --- 1. last N dialogue define the span ---
     dialogue_hits = 0
     start = len(events)
     for i in range(len(events) - 1, -1, -1):
@@ -861,7 +873,7 @@ def select_tip_paint_lines(
                 break
     span = events[start:]
 
-    # --- 2–3. filter + collapse tools (forward, last state wins) ---
+    # --- 2–3. dialogue always; tools collapsed (last state wins) ---
     out: list[dict[str, Any]] = []
     tool_idx: dict[str, int] = {}
     for ev in span:
@@ -869,6 +881,8 @@ def select_tip_paint_lines(
             continue
         et = _event_session_update(ev)
         if et in ("tool_call", "tool_call_update"):
+            if tool_cap <= 0:
+                continue
             tid = _event_tool_id(ev) or f"anon:{id(ev)}"
             if tid in tool_idx:
                 out[tool_idx[tid]] = ev
@@ -878,14 +892,34 @@ def select_tip_paint_lines(
             continue
         out.append(ev)
 
-    # --- 4. cap tools at n_lines (drop oldest tool lines) ---
-    tool_positions = [
-        i for i, ev in enumerate(out)
-        if _event_session_update(ev) in ("tool_call", "tool_call_update")
-    ]
-    if len(tool_positions) > n_lines:
-        drop = set(tool_positions[: len(tool_positions) - n_lines])  # oldest
+    # --- 4. hard tool cap (drop oldest first — keep tools nearest tip) ---
+    def _tool_positions(rows: list) -> list[int]:
+        return [
+            i
+            for i, ev in enumerate(rows)
+            if _event_session_update(ev) in ("tool_call", "tool_call_update")
+        ]
+
+    tool_positions = _tool_positions(out)
+    if len(tool_positions) > tool_cap:
+        drop = set(tool_positions[: len(tool_positions) - tool_cap])
         out = [ev for i, ev in enumerate(out) if i not in drop]
+
+    # --- 5. don't end the tip on a tool pile ---
+    # Keep at most 2 tools after the last dialogue line (live in-progress only).
+    last_dlg = -1
+    for i, ev in enumerate(out):
+        if is_dialogue_speech(ev):
+            last_dlg = i
+    if last_dlg >= 0:
+        trailing_tools = [
+            i
+            for i in range(last_dlg + 1, len(out))
+            if _event_session_update(out[i]) in ("tool_call", "tool_call_update")
+        ]
+        if len(trailing_tools) > 2:
+            drop = set(trailing_tools[:-2])  # keep last 2 only
+            out = [ev for i, ev in enumerate(out) if i not in drop]
 
     return out
 

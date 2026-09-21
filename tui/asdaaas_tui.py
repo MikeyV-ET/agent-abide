@@ -3368,10 +3368,10 @@ Type anything else to send a message to the agent.
                         f"raw_lines={raw_line_n} want={want}"
                     )
                     t_label = f"-t{want}" if want else "tip"
-                    n_tools = replay_count - dialogue_dispatched
+                    n_tools = max(0, replay_count - dialogue_dispatched)
                     msg = (
                         f"Replay ({t_label}): {dialogue_dispatched} dialogue"
-                        f" + {max(0, n_tools)} tools = {replay_count} lines"
+                        f", {n_tools} recent tools"
                         f" from {hist_kind}"
                     )
                     self.call_from_thread(lambda m=msg: self.notify(m, severity="information"))

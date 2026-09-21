@@ -12,6 +12,10 @@ from typing import Any, Iterator, Optional
 
 from aa_stream_parser import is_aa_stream_path, parse_aa_stream
 
+# History paint must stay responsive; pre-elision hot lines can be >1MB.
+MAX_TUI_LINE_BYTES = 128 * 1024
+MAX_NATIVE_PASSTHROUGH_BYTES = 64 * 1024
+
 
 def agent_history_dir(agent_home: Path) -> Path:
     return Path(agent_home) / "asdaaas" / "history"
@@ -181,22 +185,40 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
 
     native = (ev.get("native") or {}).get("event")
     backend = (ev.get("backend") or "").lower()
-    # Prefer native grok session/update — preserves tool content + interjections
-    if isinstance(native, dict):
-        upd = (native.get("params") or {}).get("update")
-        if isinstance(upd, dict) and upd.get("sessionUpdate"):
-            out = {
-                "timestamp": native.get("timestamp", ev.get("ts")),
-                "method": native.get("method", "session/update"),
-                "params": {"update": dict(upd)},
-                "_aa_stream": True,
-                "_aa_class": ev.get("class"),
-                "_aa_seq": ev.get("stream_seq"),
-                "_aa_backend": backend or "grok",
-            }
-            return out
-
     body = ev.get("body") or {}
+    body_kind = (body.get("kind") if isinstance(body, dict) else None) or ""
+
+    # Body-first paint when body already has display content (avoids re-hydrating
+    # multi-MB native base64 / tool blobs just to show a line of text).
+    paint_kinds = {
+        "text", "text_delta", "thinking", "thinking_delta",
+        "interjection", "tool_call", "tool_result",
+    }
+    if isinstance(body, dict) and body_kind in paint_kinds:
+        # fall through to body mapping below (skip native pass-through)
+        pass
+    elif isinstance(native, dict):
+        # Prefer native grok session/update only when small enough
+        try:
+            import json as _json
+            native_size = len(_json.dumps(native, ensure_ascii=False))
+        except Exception:
+            native_size = MAX_NATIVE_PASSTHROUGH_BYTES + 1
+        if native_size <= MAX_NATIVE_PASSTHROUGH_BYTES:
+            upd = (native.get("params") or {}).get("update")
+            if isinstance(upd, dict) and upd.get("sessionUpdate"):
+                out = {
+                    "timestamp": native.get("timestamp", ev.get("ts")),
+                    "method": native.get("method", "session/update"),
+                    "params": {"update": dict(upd)},
+                    "_aa_stream": True,
+                    "_aa_class": ev.get("class"),
+                    "_aa_seq": ev.get("stream_seq"),
+                    "_aa_backend": backend or "grok",
+                }
+                return out
+        # else: fall through to body mapping
+
     kind = body.get("kind") or ""
     role = (ev.get("role") or "").lower()
     text = body.get("text") if isinstance(body.get("text"), str) else ""
@@ -329,6 +351,11 @@ def is_speech_tui_event(event: dict[str, Any]) -> bool:
 def line_to_tui_event(line: str, hist_kind: str = "updates") -> Optional[dict[str, Any]]:
     """Parse one jsonl line from hot or updates into a TUI dispatch event."""
     import json as _json
+    if line is None:
+        return None
+    # Cheap length gate BEFORE json.loads (1.4MB base64 lines freeze the TUI)
+    if len(line) > MAX_TUI_LINE_BYTES:
+        return None
     try:
         obj = _json.loads(line)
     except Exception:

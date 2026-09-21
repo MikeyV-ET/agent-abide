@@ -3400,6 +3400,9 @@ Type anything else to send a message to the agent.
                     for line in lines:
                         if not line.strip():
                             continue
+                        if len(line) > 128 * 1024:
+                            skip_count += 1
+                            continue
                         try:
                             obj = json.loads(line)
                         except json.JSONDecodeError:
@@ -4195,7 +4198,7 @@ Type anything else to send a message to the agent.
         # "last 25 lines of 500KB" can jump days (Sep 3 -> Aug 28). Walk further
         # back until we have enough speech events (user/assistant/thought).
         speech_target = 40
-        max_bytes = 8 * 1024 * 1024  # 8 MiB ceiling per PageUp
+        max_bytes = 4 * 1024 * 1024  # 4 MiB ceiling per PageUp (fat hot lines)
         max_tool_panels = 8
 
         try:
@@ -4241,6 +4244,9 @@ Type anything else to send a message to the agent.
                     if not l.strip():
                         continue
                     if line_start >= state["earliest_offset"]:
+                        continue
+                    # Skip multi-MB hot lines (pre-elision base64) — freeze the UI
+                    if len(l) > 128 * 1024:
                         continue
                     batch.append((line_start, l))
                 # Newest -> oldest within chunk

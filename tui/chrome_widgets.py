@@ -86,7 +86,7 @@ class ContentScroll(VerticalScroll):
             now = _time.monotonic()
             if now < getattr(self, "_history_load_cooldown", 0.0):
                 return
-            self._history_load_cooldown = now + 0.6
+            self._history_load_cooldown = now + 1.5
             try:
                 self.app._load_older_history()
             except Exception:

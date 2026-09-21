@@ -59,7 +59,34 @@ DOORBELL_DIR = AGENTS_DIR  # legacy alias for test monkeypatching
 ADAPTER_NAME = "remind"
 POLL_INTERVAL = 0.25  # check for new commands 4x/sec
 
-ALL_AGENTS = ["Sr", "Jr", "Trip", "Q", "Cinco"]
+def _discover_agents() -> list:
+    """All agent names from agents.json (not a stale hardcoded five)."""
+    try:
+        from asdaaas_config import config as _cfg
+        path = _cfg.agents_json if hasattr(_cfg, "agents_json") else None
+        if path is None:
+            # common locations
+            from pathlib import Path as _P
+            for cand in (
+                _P.home() / "agents" / "config" / "agents.json",
+                _P.home() / "agents" / "agents.json",
+                _cfg.hub_dir / "agents.json",
+            ):
+                if cand.is_file():
+                    path = cand
+                    break
+        if path and Path(path).is_file():
+            import json
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            agents = data.get("agents") or data
+            if isinstance(agents, dict):
+                return sorted(agents.keys())
+    except Exception as e:
+        tprint(f"[remind] discover failed: {e}")
+    return ["Sr", "Jr", "Trip", "Trip-G", "Q", "Cinco", "Squiggy", "Astro"]
+
+
+ALL_AGENTS = None  # resolved at run; prefer discover
 
 
 # ============================================================================
@@ -257,7 +284,7 @@ def main():
     if args.agents:
         agents = [a.strip() for a in args.agents.split(",")]
     else:
-        agents = list(ALL_AGENTS)
+        agents = _discover_agents()
 
     try:
         run_adapter(agents)

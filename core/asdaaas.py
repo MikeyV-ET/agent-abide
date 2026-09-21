@@ -2039,6 +2039,111 @@ def request_shutdown_from_command(agent_name):
     _shutdown_requested = True
 
 
+
+# Host services agents may ensure without touching the model binary's stdout
+_HOST_SERVICES = {
+    "localmail": "scripts/launch_localmail.sh",
+    "remind": "scripts/launch_remind.sh",
+    "heartbeat": "scripts/launch_heartbeat.sh",
+}
+
+
+def ensure_host_service(name: str, *, action: str = "ensure") -> dict:
+    """Start/stop/status a host adapter OUTSIDE the model binary.
+
+    Agents must not `bash launch_*.sh` via tools — that stdout lands in
+    updates.jsonl / session logs. This runs from asdaaas (host process),
+    fully detached, logs to /tmp only.
+    """
+    import subprocess
+    from pathlib import Path as _P
+
+    name = (name or "").strip().lower()
+    action = (action or "ensure").strip().lower()
+    if name not in _HOST_SERVICES:
+        return {
+            "status": "error",
+            "error": f"unknown service {name!r}; known={sorted(_HOST_SERVICES)}",
+        }
+
+    root = _P(__file__).resolve().parent.parent
+    script = root / _HOST_SERVICES[name]
+    if not script.is_file():
+        return {"status": "error", "error": f"missing script {script}"}
+
+    log = _P(f"/tmp/asdaaas_ensure_{name}.log")
+
+    if action in ("status", "check"):
+        # Best-effort process presence
+        patterns = {
+            "localmail": "localmail.py",
+            "remind": "remind_adapter.py",
+            "heartbeat": "heartbeat",
+        }
+        pat = patterns.get(name, name)
+        try:
+            r = subprocess.run(
+                ["pgrep", "-af", pat],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            running = bool(r.stdout.strip())
+            return {
+                "status": "ok",
+                "service": name,
+                "running": running,
+                "pgrep": (r.stdout or "")[:500],
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    if action in ("stop", "kill"):
+        # Launch scripts already pkill; we only stop
+        try:
+            subprocess.Popen(
+                ["bash", "-c", f"bash {script} 2>/dev/null; true"],
+                # don't run full launch — just pkill patterns from script head
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+        # Direct pkill
+        pats = {
+            "localmail": ["localmail.py", "localmail_service.py"],
+            "remind": ["remind_adapter.py"],
+            "heartbeat": ["heartbeat"],
+        }
+        for pat in pats.get(name, [name]):
+            subprocess.run(["pkill", "-f", pat], capture_output=True)
+        return {"status": "ok", "service": name, "action": "stop"}
+
+    # ensure / start / restart — detach completely
+    bash = (
+        f"bash {script} >> {log} 2>&1; "
+        f"echo [ensure] $(date -Is) service={name} exit=$? >> {log}"
+    )
+    try:
+        subprocess.Popen(
+            ["bash", "-c", bash],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(root),
+        )
+        print(f"[asdaaas] ensure_service: scheduled {name} via {script.name} (log {log})")
+        return {
+            "status": "ok",
+            "service": name,
+            "action": "ensure",
+            "log": str(log),
+            "script": str(script),
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
 def schedule_self_restart(agent_name: str, *, reason: str = "", delay_s: float = 2.0) -> bool:
     """Detach restart_agent.sh so this process can exit and come back.
 
@@ -2640,6 +2745,24 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     request_shutdown_from_command(agent_name)
                     # Flag is set; loop will break at top of next iteration
                     # (current turn is already between turns, so exit is immediate)
+
+                elif action in ("ensure_service", "ensure_adapter", "service"):
+                    # Host adapters (localmail, remind, …) — NOT via model bash tool
+                    svc = cmd.get("service") or cmd.get("name") or cmd.get("adapter") or ""
+                    act = cmd.get("op") or cmd.get("ensure_action") or "ensure"
+                    result = ensure_host_service(str(svc), action=str(act))
+                    print(f"[asdaaas] ensure_service {svc!r} → {result}")
+                    try:
+                        write_conversation(
+                            agent_name,
+                            "system",
+                            f"[aa.control] ensure_service {svc}: {result.get('status')} "
+                            f"{result.get('error') or result.get('log') or ''}",
+                            env=env,
+                            kind="control",
+                        )
+                    except Exception:
+                        pass
 
                 elif action == "restart":
                     # Agent self-restart: schedule restart_agent.sh, then graceful exit.

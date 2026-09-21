@@ -2450,15 +2450,17 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     _current_session_id = sid
     _rt.current_session_id = sid
     try:
+        # env is assigned later in main(); agent_dir(None) resolves via config.
         from session_limit import clear_park_state, read_park_state
-        _park = read_park_state(agent_dir(agent_name, env=env))
+        _adir = agent_dir(agent_name, env=None)
+        _park = read_park_state(_adir)
         if _park:
             print("[asdaaas] Clearing session_limit park after start")
-            clear_park_state(agent_dir(agent_name, env=env))
+            clear_park_state(_adir)
             write_conversation(
                 agent_name, "system",
                 "[aa.control] session_limit cleared — back online; check queued messages",
-                env=env, kind="control",
+                env=None, kind="control",
             )
     except Exception as _e:
         print("[asdaaas] session_limit park clear: %s" % _e)

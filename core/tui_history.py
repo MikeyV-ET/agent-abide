@@ -13,8 +13,8 @@ from typing import Any, Iterator, Optional
 from aa_stream_parser import is_aa_stream_path, parse_aa_stream
 
 # History paint must stay responsive; pre-elision hot lines can be >1MB.
-MAX_TUI_LINE_BYTES = 128 * 1024
-MAX_NATIVE_PASSTHROUGH_BYTES = 64 * 1024
+MAX_TUI_LINE_BYTES = 32 * 1024
+MAX_NATIVE_PASSTHROUGH_BYTES = 16 * 1024
 
 
 def agent_history_dir(agent_home: Path) -> Path:
@@ -264,6 +264,9 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
     if kind in ("text_delta", "text"):
         if not text:
             return None
+        # Cap paint size — history scroll must not mount multi-10k Rich docs
+        if len(text) > 8000:
+            text = text[:8000] + "\n… [truncated for TUI]"
         if role in ("user", "human"):
             return _frame("user_message_chunk", {"content": {"text": text}})
         return _frame("agent_message_chunk", {"content": {"text": text}})

@@ -3400,7 +3400,7 @@ Type anything else to send a message to the agent.
                     for line in lines:
                         if not line.strip():
                             continue
-                        if len(line) > 128 * 1024:
+                        if len(line) > 32 * 1024:
                             skip_count += 1
                             continue
                         try:
@@ -4197,9 +4197,9 @@ Type anything else to send a message to the agent.
         # updates.jsonl is ground truth. Huge single-line tool_call events mean
         # "last 25 lines of 500KB" can jump days (Sep 3 -> Aug 28). Walk further
         # back until we have enough speech events (user/assistant/thought).
-        speech_target = 40
-        max_bytes = 4 * 1024 * 1024  # 4 MiB ceiling per PageUp (fat hot lines)
-        max_tool_panels = 8
+        speech_target = 25
+        max_bytes = 2 * 1024 * 1024  # 2 MiB ceiling per PageUp
+        max_tool_panels = 4
 
         try:
             content = self._content_scroll(agent_name)
@@ -4222,7 +4222,7 @@ Type anything else to send a message to the agent.
                 line_to_tui_event = None  # type: ignore
 
             while cursor > 0 and speech_n < speech_target and bytes_read < max_bytes:
-                read_size = min(cursor, 1024 * 1024)  # 1 MiB steps
+                read_size = min(cursor, 512 * 1024)  # 512 KiB steps (cheap)
                 seek_pos = cursor - read_size
                 with open(updates_path, "rb") as f:
                     f.seek(seek_pos)
@@ -4230,23 +4230,25 @@ Type anything else to send a message to the agent.
                         f.readline()  # skip partial line
                     data_start = f.tell()
                     raw = f.read(cursor - data_start)
-                chunk = raw.decode("utf-8", errors="replace")
                 bytes_read += len(raw)
-                # Pair each complete line with its absolute *byte* offset
+                # Stay binary until size gate — avoid decode+re-encode of fat lines
                 batch = []
                 pos = data_start
-                parts = chunk.split("\n")
-                for i, l in enumerate(parts):
+                parts = raw.split(b"\n")
+                for i, lb in enumerate(parts):
                     line_start = pos
-                    # byte length of line + newline (except possibly last partial)
-                    blen = len(l.encode("utf-8")) + (1 if i < len(parts) - 1 else 0)
+                    blen = len(lb) + (1 if i < len(parts) - 1 else 0)
                     pos += blen
-                    if not l.strip():
+                    if not lb.strip():
                         continue
                     if line_start >= state["earliest_offset"]:
                         continue
-                    # Skip multi-MB hot lines (pre-elision base64) — freeze the UI
-                    if len(l) > 128 * 1024:
+                    # 32 KiB hard cap (Trip-G hot has hundreds of 32k+ lines)
+                    if len(lb) > 32 * 1024:
+                        continue
+                    try:
+                        l = lb.decode("utf-8", errors="replace")
+                    except Exception:
                         continue
                     batch.append((line_start, l))
                 # Newest -> oldest within chunk
@@ -4313,6 +4315,8 @@ Type anything else to send a message to the agent.
                                             viewer.push(agent_name, eph)
                                     except NoMatches:
                                         pass
+                                if len(text) > 8000:
+                                    text = text[:8000] + "\n… [truncated for TUI]"
                                 msg = AgentMessage()
                                 msg._text = text
                                 msg._chunks = [text]
@@ -4371,7 +4375,11 @@ Type anything else to send a message to the agent.
                                 pass
                             else:
                                 if clean.strip():
-                                    panel.tool_output = clean
+                                    # Cap tool output paint size
+                                    panel.tool_output = (
+                                        clean if len(clean) <= 4000
+                                        else clean[:4000] + "\n… [truncated]"
+                                    )
                                 widgets_to_prepend.append(panel)
                         elif event_type == "hook_annotation":
                             message = update.get("message", "")

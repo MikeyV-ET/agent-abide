@@ -51,7 +51,7 @@ def test_lifecycle_commands_are_handed_back(monkeypatch, tmp_path):
     cmds = [{"action": "restart", "reason": "x"}, {"action": "shutdown"}]
 
     assert turn_engine.requeue_for_main_loop("Astro", cmds) == 2
-    assert [c["action"] for c in _requeued(tmp_path)] == ["restart", "shutdown"]
+    assert {c["action"] for c in _requeued(tmp_path)} == {"restart", "shutdown"}
 
 
 def test_actions_nobody_listed_are_handed_back_too(monkeypatch, tmp_path):

@@ -227,7 +227,7 @@ class ToolCallPanel(Static):
 
         def _prepend_command(body: Text) -> None:
             if self.tool_command:
-                body.append(f"$ {self.tool_command}\n", style=f"bold {Theme.BR_AQUA}")
+                body.append(f"$ {self.tool_command}\n", style=Theme.DARK4)
 
         if self._collapsed:
             self.styles.border = ("round", color)

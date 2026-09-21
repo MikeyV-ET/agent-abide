@@ -2949,6 +2949,23 @@ Type anything else to send a message to the agent.
                         self.call_from_thread(
                             setattr, header, "delay_pattern", delay_str
                         )
+                        # Surface AA control registration in chat (not just header chrome)
+                        try:
+                            cs = asdaaas_dir / "control_state.json"
+                            if cs.exists() and delay_str:
+                                st = cs.stat()
+                                key = (active, st.st_mtime_ns, st.st_size)
+                                prev = getattr(self, "_control_state_key", None)
+                                if key != prev:
+                                    self._control_state_key = key
+                                    import json as _json
+                                    data = _json.loads(cs.read_text())
+                                    content = data.get("content") or f"[aa.control] delay: {delay_str}"
+                                    self.call_from_thread(
+                                        self._mount_aa_control_line, content
+                                    )
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
@@ -2975,6 +2992,11 @@ Type anything else to send a message to the agent.
             session_update = "agent_message_chunk"
         elif role == "user":
             session_update = "user_message_chunk"
+        elif role in ("system", "control") or entry.get("kind") == "control":
+            # AA control registration — render via user_message path + classify
+            session_update = "user_message_chunk"
+            if entry.get("kind") == "control" and not str(content).startswith("[aa.control]"):
+                content = f"[aa.control] {content}"
         elif role == "thinking":
             session_update = "agent_thought_chunk"
         else:
@@ -3114,9 +3136,16 @@ Type anything else to send a message to the agent.
         worker = get_current_worker()
         state = self._agent_state[agent_name]
 
-        # Claude-backed agents don't produce updates.jsonl (grok binary artifact).
-        # Skip tailing — the status poller still works via health.json/gaze.json.
+        # Claude-backed agents have no grok updates.jsonl. Prefer hot.jsonl
+        # (aa.stream) when present; else conversation.jsonl. Never no-op:
+        # that left Astro/Claude tabs empty (2026-09-21).
         if state.get("backend") == "claude":
+            home = Config.agent_home(agent_name)
+            hot = home / "asdaaas" / "history" / "hot.jsonl"
+            if hot.is_file() and hot.stat().st_size > 0:
+                self._tail_hot_jsonl_for_agent(agent_name, hot)
+            else:
+                self._tail_conversation_jsonl(agent_name)
             return
 
         # Find updates file for this agent
@@ -3150,6 +3179,10 @@ Type anything else to send a message to the agent.
                 file_size = updates_path.stat().st_size
                 state["updates_offset"] = file_size
                 state["earliest_offset"] = file_size  # Allow loading history backwards
+                # Even without full replay, surface latest AA delay control from history
+                ctrl = self._scan_updates_for_latest_aa_control(updates_path)
+                if ctrl:
+                    self.call_from_thread(self._mount_aa_control_from_catchup, ctrl)
             except Exception:
                 state["updates_offset"] = 0
 
@@ -3199,6 +3232,13 @@ Type anything else to send a message to the agent.
                     self._debug(f"REPLAY dispatched={replay_count} lines={len(lines)}")
                     time.sleep(1)
                     self.call_from_thread(self._force_scroll_bottom)
+                    # Reload-safe: last delay tool_call may be outside -t N window
+                    try:
+                        ctrl = self._scan_updates_for_latest_aa_control(updates_path)
+                        if ctrl:
+                            self.call_from_thread(self._mount_aa_control_from_catchup, ctrl)
+                    except Exception as _e:
+                        self._debug(f"aa_control catch-up mount: {_e}")
             except Exception:
                 pass
             state["replay_done"] = True
@@ -3529,6 +3569,87 @@ Type anything else to send a message to the agent.
         if self._show_thinking:
             self._scroll_to_bottom()
 
+
+    def _tool_update_blob(self, update: dict) -> str:
+        """Flatten tool_call / tool_call_update fields for delay detection."""
+        parts = [str(update.get("title") or "")]
+        ri = update.get("rawInput")
+        if isinstance(ri, dict):
+            for k, v in ri.items():
+                parts.append(v if isinstance(v, str) else str(v))
+        elif isinstance(ri, str):
+            parts.append(ri)
+        for k in ("command", "arguments", "args", "input", "content", "rawInput"):
+            v = update.get(k)
+            if v is None or k == "rawInput":
+                continue
+            parts.append(v if isinstance(v, str) else str(v))
+        return "\n".join(parts)
+
+    def _scan_updates_for_latest_aa_control(self, updates_path, max_bytes: int = 2_000_000):
+        """Catch-up: find most recent delay tool_call in updates.jsonl (reload-safe)."""
+        try:
+            path = Path(updates_path)
+            if not path.exists():
+                return None
+            size = path.stat().st_size
+            with open(path, "rb") as f:
+                f.seek(max(0, size - max_bytes))
+                if f.tell() > 0:
+                    f.readline()
+                data = f.read().decode("utf-8", errors="replace")
+            latest = None
+            for line in data.splitlines():
+                if "delay" not in line or "tool_call" not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                update = (event.get("params") or {}).get("update") or {}
+                et = update.get("sessionUpdate", "")
+                if et not in ("tool_call", "tool_call_update"):
+                    continue
+                ctrl = self._delay_control_from_tool_blob(self._tool_update_blob(update))
+                if ctrl:
+                    latest = ctrl
+            return latest
+        except Exception as e:
+            self._debug(f"aa_control catch-up scan failed: {e}")
+            return None
+
+
+    def _mount_aa_control_line(self, content: str) -> None:
+        """Show agent AA control (delay from tool_call history) in the chat scroll."""
+        try:
+            content_scroll = self._content_scroll()
+            ts_str = self._event_ts_str() if hasattr(self, "_event_ts_str") else time.strftime("%H:%M")
+            state = self._agent_state.get(self._active_agent) or {}
+            turn_num = int(state.get("logical_turn") or 0)
+            trigger = classify_turn_trigger(content or "")
+            content_scroll.mount(TurnSeparator(turn_num, trigger, ts_str))
+            content_scroll.mount(SystemAlert(content, severity="info"))
+            if self._following_tail():
+                content_scroll.refresh(layout=True)
+            self._scroll_to_bottom()
+            self._debug(f"AA_CONTROL mounted: {(content or '')[:80]}")
+        except Exception as e:
+            self._debug(f"aa_control mount failed: {e}")
+
+    def _mount_aa_control_from_catchup(self, content: str) -> None:
+        """Mount control after history catch-up; refresh header delay chrome."""
+        self._mount_aa_control_line(content)
+        try:
+            import re
+            header = self.query_one(AgentHeader)
+            sm = re.search(r"delay:\s*([0-9.]+)s", content or "")
+            if sm:
+                header.delay_pattern = f"d:{sm.group(1)}s"
+            elif content and "until_event" in content:
+                header.delay_pattern = "d:until_event"
+        except Exception as e:
+            self._debug(f"aa_control header update failed: {e}")
+
     def _on_tool_call(self, update: dict) -> None:
         """Handle new tool call announcement."""
         tool_id = update.get("toolCallId", "")
@@ -3542,10 +3663,51 @@ Type anything else to send a message to the agent.
         panel = ToolCallPanel(tool_id, title, ts=self._event_ts_str())
         self._tool_panels[tool_id] = panel
         content.mount(panel)
+        # Surface AA delay registration from tool command body (already in updates.jsonl)
+        try:
+            ctrl = self._delay_control_from_tool_blob(self._tool_update_blob(update))
+            if ctrl:
+                self._mount_aa_control_line(ctrl)
+        except Exception as e:
+            self._debug(f"delay-control detect failed: {e}")
         if self._following_tail():
             content.refresh(layout=True)
         self._debug(f"TOOL_CALL id={tool_id[:8]} title={title}")
         self._scroll_to_bottom()
+
+    def _delay_control_from_tool_blob(self, text: str):
+        """Derive [aa.control] delay line from tool_call payload text."""
+        import re
+        if not text or "delay" not in text:
+            return None
+        if not re.search(r"commands/cmd_[^\s\"']*\.json|commands/cmd_\$\{?date|commands/cmd_\$\(", text):
+            return None
+        if not re.search(
+            r'["\']action["\']\s*:\s*["\']delay["\']|"action"\s*:\s*"delay"',
+            text,
+        ):
+            return None
+        sec = None
+        m = re.search(
+            r'["\']?seconds["\']?\s*:\s*["\']?(until_event|\d+(?:\.\d+)?)["\']?',
+            text,
+        )
+        if m:
+            sec = m.group(1)
+        txt = None
+        tm = re.search(r'["\']text["\']\s*:\s*["\']([^"\']{1,120})["\']', text)
+        if tm:
+            txt = tm.group(1)
+        if sec == "until_event":
+            detail = "until_event (standing by)"
+        elif sec is not None:
+            detail = f"{sec}s before next continue"
+        else:
+            detail = "delay registered"
+        if txt:
+            detail += f" — {txt}"
+        return f"[aa.control] delay: {detail}"
+
 
     def _on_tool_call_update(self, update: dict) -> None:
         """Handle tool call status/output updates."""

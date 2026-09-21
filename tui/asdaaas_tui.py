@@ -3438,7 +3438,16 @@ Type anything else to send a message to the agent.
             except Exception:
                 pass
 
-            time.sleep(0.1)
+            # Multi-agent: only the focused tab needs a hot tail; others poll slowly
+            # so scrolling Astro does not fight Trip-G's 200MB hot reader.
+            try:
+                active = getattr(self, "_active_agent", None)
+                if active is not None and agent_name != active:
+                    time.sleep(1.0)
+                else:
+                    time.sleep(0.3)
+            except Exception:
+                time.sleep(0.3)
 
     def _tail_via_api(self, agent_name: str) -> None:
         """Background thread: tail agent messages via WebSocket API.

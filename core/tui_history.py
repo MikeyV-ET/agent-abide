@@ -221,7 +221,7 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
         # Reuse TUI InterjectionBlock path (same as tool stdout extract)
         wrapped = f"<interjection>\n{text}\n</interjection>"
         tid = f"ij-{abs(hash(text)) % 10_000_000}"
-        return _frame(
+        fr = _frame(
             "tool_call_update",
             {
                 "toolCallId": tid,
@@ -236,6 +236,8 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
                 ],
             },
         )
+        fr["params"]["update"]["_aa_interjection"] = True
+        return fr
 
     if kind in ("text_delta", "text"):
         if not text:

@@ -3881,17 +3881,82 @@ Type anything else to send a message to the agent.
 
     def _on_tool_call_update(self, update: dict) -> None:
         """Handle tool call status/output updates."""
-        tool_id = update.get("toolCallId", "")
+        tool_id = update.get("toolCallId", "") or ""
         status = update.get("status", "")
         kind = update.get("kind", "")
-        title = update.get("title", "")
+        title = update.get("title", "") or ""
         content_list = update.get("content", [])
+
+        # Pure stdin/hot interjection carriers (tui_history body.kind=interjection)
+        # must NOT leave an empty ToolCallPanel husk under the 🔔 panel.
+        pure_interjection = bool(
+            update.get("_aa_interjection")
+            or title.lower() == "interjection"
+            or str(tool_id).startswith("ij-")
+        )
+
+        def _gather_texts() -> list:
+            texts = []
+            if isinstance(content_list, list):
+                for item in content_list:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "content":
+                        inner = item.get("content", {})
+                        if isinstance(inner, dict):
+                            tt = inner.get("text", "")
+                            if tt:
+                                texts.append(str(tt))
+                        elif isinstance(inner, str) and inner:
+                            texts.append(inner)
+            elif isinstance(content_list, str) and content_list.strip():
+                texts.append(content_list)
+            raw_out = update.get("rawOutput")
+            if isinstance(raw_out, str) and raw_out.strip():
+                texts.append(raw_out)
+            elif raw_out is not None and not isinstance(raw_out, str):
+                try:
+                    core = str(Path(__file__).resolve().parent.parent / "core")
+                    if core not in sys.path:
+                        sys.path.insert(0, core)
+                    from tui_history import _decode_tool_output
+                    decoded = _decode_tool_output(raw_out)
+                    if decoded:
+                        texts.append(decoded)
+                except Exception:
+                    texts.append(str(raw_out))
+            # dedup
+            seen, ordered = set(), []
+            for tt in texts:
+                if tt in seen:
+                    continue
+                seen.add(tt)
+                ordered.append(tt)
+            return ordered
+
+        ordered = _gather_texts()
+
+        if pure_interjection:
+            content = self._content_scroll()
+            mounted_any = False
+            for text in ordered:
+                _clean, interjections = self._extract_interjections(text)
+                for msg in interjections:
+                    key = interjection_key(msg)
+                    if key in self._seen_interjections:
+                        continue
+                    self._seen_interjections.add(key)
+                    content.mount(InterjectionBlock(msg))
+                    mounted_any = True
+            if mounted_any and self._following_tail():
+                content.refresh(layout=True)
+            self._scroll_to_bottom()
+            return
 
         panel = self._tool_panels.get(tool_id)
 
         if panel is None:
             # Tool call announcement might have been missed (e.g., started before TUI)
-            # Create a panel for it
             display_title = title or f"tool {tool_id[:8]}"
             panel = ToolCallPanel(tool_id, display_title, kind, ts=self._event_ts_str())
             self._tool_panels[tool_id] = panel
@@ -3899,59 +3964,12 @@ Type anything else to send a message to the agent.
             content.mount(panel)
             content.refresh(layout=True)
 
-        # Update kind and title if provided
         if kind:
             panel.tool_kind = kind
         if title:
             panel.tool_title = title
-
-        # Update status
         if status:
             panel.set_status(status)
-
-        # Collect text from content[] and rawOutput (interjections live in stdout)
-        texts = []
-        if isinstance(content_list, list):
-            for item in content_list:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") == "content":
-                    inner = item.get("content", {})
-                    if isinstance(inner, dict):
-                        t = inner.get("text", "")
-                        if t:
-                            texts.append(str(t))
-                    elif isinstance(inner, str) and inner:
-                        texts.append(inner)
-                elif item.get("type") == "diff":
-                    path = item.get("path", "")
-                    panel.set_output(f"[diff] {path}")
-        elif isinstance(content_list, str) and content_list.strip():
-            texts.append(content_list)
-        raw_out = update.get("rawOutput")
-        if isinstance(raw_out, str) and raw_out.strip():
-            texts.append(raw_out)
-        elif raw_out is not None and not isinstance(raw_out, str):
-            # bash wrapper dict / byte array JSON — decode best-effort
-            try:
-                core = str(Path(__file__).resolve().parent.parent / "core")
-                if core not in sys.path:
-                    sys.path.insert(0, core)
-                from tui_history import _decode_tool_output
-                decoded = _decode_tool_output(raw_out)
-                if decoded:
-                    texts.append(decoded)
-            except Exception:
-                texts.append(str(raw_out))
-
-        # Dedup identical consecutive blobs (content + rawOutput often duplicate)
-        seen_txt = set()
-        ordered = []
-        for t in texts:
-            if t in seen_txt:
-                continue
-            seen_txt.add(t)
-            ordered.append(t)
 
         for text in ordered:
             clean_text, interjections = self._extract_interjections(text)
@@ -3960,9 +3978,6 @@ Type anything else to send a message to the agent.
                 mounted_any = False
                 for msg in interjections:
                     key = interjection_key(msg)
-                    # App-level + per-panel dedup: same interjection is
-                    # re-emitted on every tool_call_update as stdout grows,
-                    # and BASH_ENV injects into every concurrent tool stream.
                     if key in self._seen_interjections or msg in panel._mounted_interjections:
                         continue
                     self._seen_interjections.add(key)
@@ -3973,9 +3988,21 @@ Type anything else to send a message to the agent.
                     content.refresh(layout=True)
             if clean_text.strip():
                 panel.set_output(clean_text)
+            elif interjections and not (panel.tool_output or "").strip():
+                # Real tool whose stdout was only interjection chrome (BASH_ENV):
+                # drop the empty husk if we never had real tool output.
+                try:
+                    if panel.tool_status in ("completed", "failed", "done", ""):
+                        # keep panel for real tools with titles that aren't interjection
+                        pass
+                except Exception:
+                    pass
 
         out_len = len(panel.tool_output) if panel.tool_output else 0
-        self._debug(f"TOOL_UPDATE id={tool_id[:8]} status={status} out_len={out_len} collapsed={panel._collapsed}")
+        self._debug(
+            f"TOOL_UPDATE id={tool_id[:8]} status={status} out_len={out_len} "
+            f"collapsed={panel._collapsed}"
+        )
         self._scroll_to_bottom()
 
     def _on_plan(self, update: dict) -> None:
@@ -4306,15 +4333,24 @@ Type anything else to send a message to the agent.
                                 raw_parts.append(raw_out)
                             raw = "\n".join(raw_parts)
                             clean, intj_msgs = self._extract_interjections(raw)
+                            pure_ij = bool(
+                                update.get("_aa_interjection")
+                                or (title or "").lower() == "interjection"
+                                or str(tool_id).startswith("ij-")
+                            )
                             for msg in intj_msgs:
                                 key = interjection_key(msg)
                                 if key in self._seen_interjections:
                                     continue
                                 self._seen_interjections.add(key)
                                 widgets_to_prepend.append(InterjectionBlock(msg))
-                            if clean.strip():
-                                panel.tool_output = clean
-                            widgets_to_prepend.append(panel)
+                            if pure_ij and not clean.strip():
+                                # no empty tool husk under 🔔
+                                pass
+                            else:
+                                if clean.strip():
+                                    panel.tool_output = clean
+                                widgets_to_prepend.append(panel)
                         elif event_type == "hook_annotation":
                             message = update.get("message", "")
                             if message:

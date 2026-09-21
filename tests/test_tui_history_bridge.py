@@ -174,3 +174,4 @@ def test_interjection_kind_becomes_tool_update_for_block():
     blob = u["params"]["update"]["content"][0]["content"]["text"]
     assert "<interjection>" in blob
     assert "hi mid-turn" in blob
+    assert u["params"]["update"].get("_aa_interjection") is True

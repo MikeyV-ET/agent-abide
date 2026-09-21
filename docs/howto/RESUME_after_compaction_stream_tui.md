@@ -93,3 +93,17 @@ Claude path must **not** go through a grok-like intermediate. Both backends → 
 - `history/config.json` `owner=backend` (default); `owner=hook` keeps sidecar
 - Trip-G config set to `owner=backend`
 - ClaudeBackend still needs the same wire-up (adapter exists; configure not yet)
+
+## Viewport-row tip (`-t`) — 2026-09-21
+
+`-t N` means **about N terminal rows** of history at the chat width, not N
+turns or N widgets. Catch-up walks `hot.jsonl` backward, estimates rows per
+event (`estimate_event_rows`), stops when the budget is filled (small overshoot).
+
+Geometry for tests without Eric's glass:
+
+```bash
+python3 scripts/run_with_geom.py 120 40 -- python3 scripts/verify_tui_tip.py --width 120 --rows 40
+```
+
+Isolated tmux also works: `tmux -S /tmp/t new -d -x 120 -y 40 …`

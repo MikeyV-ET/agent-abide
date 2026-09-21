@@ -2093,16 +2093,45 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
-    def _initial_tail_speech_count(self, agent_name: str) -> int:
-        """How many TUI history *lines* to preload (``-t N``).
+    def _terminal_geometry(self) -> tuple[int, int]:
+        """(width, height) for tip row estimates — prefer live size, else env."""
+        w = h = 0
+        try:
+            if self.size.width >= 8 and self.size.height >= 4:
+                w, h = int(self.size.width), int(self.size.height)
+        except Exception:
+            pass
+        if w < 8 or h < 4:
+            try:
+                import shutil
+                ts = shutil.get_terminal_size(fallback=(80, 24))
+                w, h = int(ts.columns), int(ts.lines)
+            except Exception:
+                w, h = 80, 24
+        # chat column is not full width (side panels); fudge
+        chat_w = max(40, w - 4)
+        # header + input + padding
+        chat_h = max(8, h - 6)
+        return chat_w, chat_h
 
-        Lines = paint widgets after collapse (speech + one panel per tool id),
-        not dialogue turns and not a separate tool quota. PageUp loads older.
+    def _initial_tail_row_budget(self, agent_name: str) -> int:
+        """How many *terminal rows* of history to preload (``-t N``).
+
+        ``-t N`` → fill about N rows at current width.
+        No ``-t`` → about one chat viewport (primary) or half (secondary/[+]).
         """
+        _w, chat_h = self._terminal_geometry()
         if self._tail_count:
-            return max(1, int(self._tail_count))
+            return max(4, int(self._tail_count))
         is_primary = bool(self._agents) and agent_name == self._agents[0]
-        return DEFAULT_PRIMARY_TAIL_SPEECH if is_primary else DEFAULT_SECONDARY_TAIL_SPEECH
+        if is_primary:
+            return max(8, chat_h)
+        return max(8, chat_h // 2)
+
+    def _initial_tail_speech_count(self, agent_name: str) -> int:
+        """Back-compat alias: row budget for catch-up."""
+        return self._initial_tail_row_budget(agent_name)
+
 
     def action_add_agent_menu(self) -> None:
 
@@ -3055,7 +3084,8 @@ Type anything else to send a message to the agent.
 
         is_primary = (agent_name == self._agents[0])
         # Tip only: same -t for every tab; no secondary floor. Lazy-load owns depth.
-        tail_count = self._initial_tail_speech_count(agent_name)
+        tail_count = self._initial_tail_row_budget(agent_name)
+        tip_geom = self._terminal_geometry()  # (width, height) closed over by worker
         should_replay = (is_primary and self._replay_mode) or (not is_primary)
 
         offset = 0
@@ -3238,7 +3268,8 @@ Type anything else to send a message to the agent.
         is_primary = (agent_name == self._agents[0])
         # Non-primary always replays a short tip; PageUp lazy-load for older.
         should_replay = (is_primary and self._replay_mode) or (not is_primary)
-        tail_count = self._initial_tail_speech_count(agent_name)
+        tail_count = self._initial_tail_row_budget(agent_name)
+        tip_geom = self._terminal_geometry()  # (width, height) closed over by worker
 
         if not should_replay:
             try:
@@ -3275,17 +3306,19 @@ Type anything else to send a message to the agent.
                         sys.path.insert(0, core)
                     from tui_history import (
                         line_to_tui_event,
-                        thin_tip_events,
-                        select_tip_paint_lines,
-                        is_tip_paint_event,
+                        select_tip_by_rows,
+                        estimate_event_rows,
                         is_speech_tui_event,
                         is_dialogue_speech,
                     )
 
-                    # -t N = N TUI paint lines (widgets), not N dialogue turns
+                    # -t N = ~N terminal rows at chat width (viewport-aware)
                     want = int(tail_count) if tail_count else None
-                    # grow window until thin tip can fill want lines (small first —
-                    # Squiggy hot is 200MB+; do not read 128MiB for 50 lines)
+                    try:
+                        _tg = tip_geom
+                    except NameError:
+                        _tg = (80, 24)
+                    tip_width = int(_tg[0]) if _tg else 80
                     windows = [0.25, 1, 2, 8, 32]
                     if hist_kind != "hot":
                         windows = [0.25, 1, 2, 8]
@@ -3319,26 +3352,29 @@ Type anything else to send a message to the agent.
                             ev = line_to_tui_event(line, hist_kind)
                             if ev is not None:
                                 events.append((off, ev))
-                        # Need enough *history lines* in the window to fill -t N.
                         only_probe = [e for _, e in events]
                         tip_probe = (
-                            select_tip_paint_lines(only_probe, want)
+                            select_tip_by_rows(only_probe, want, width=tip_width)
                             if want
                             else only_probe
                         )
-                        paint_n = len(tip_probe)
+                        est_rows = sum(
+                            estimate_event_rows(e, tip_width) for e in tip_probe
+                        )
                         self._debug(
                             f"REPLAY_WINDOW kind={hist_kind} mib={mib} "
                             f"raw={raw_line_n} events={len(events)} "
-                            f"tip_lines={paint_n} want={want}"
+                            f"tip_widgets={len(tip_probe)} est_rows={est_rows} "
+                            f"want_rows={want} width={tip_width}"
                         )
-                        if want is None or paint_n >= want or seek_pos == 0:
+                        if want is None or est_rows >= want or seek_pos == 0:
                             break
 
-                    # -t N = N TUI paint lines
                     only_ev = [e for _, e in events]
                     if want:
-                        only_ev = select_tip_paint_lines(only_ev, want)
+                        only_ev = select_tip_by_rows(
+                            only_ev, want, width=tip_width
+                        )
                         if only_ev:
                             want_ids = {id(e) for e in only_ev}
                             events = [(o, e) for o, e in events if id(e) in want_ids]
@@ -3373,10 +3409,13 @@ Type anything else to send a message to the agent.
                         f"dialogue={dialogue_dispatched} speech={speech_dispatched} "
                         f"raw_lines={raw_line_n} want={want}"
                     )
-                    t_label = f"-t{want}" if want else "tip"
+                    est = sum(
+                        estimate_event_rows(e, tip_width) for _, e in events
+                    )
+                    t_label = f"-t{want}rows" if want else "tip"
                     msg = (
-                        f"Replay ({t_label}): {replay_count} history lines"
-                        f" from {hist_kind}"
+                        f"Replay ({t_label} @{tip_width}cols): "
+                        f"{replay_count} widgets ~{est} rows from {hist_kind}"
                     )
                     self.call_from_thread(lambda m=msg: self.notify(m, severity="information"))
                     time.sleep(1)
@@ -4852,8 +4891,8 @@ def main():
     )
     parser.add_argument(
         "--tail", "-t", type=int, default=None,
-        help="Catch-up last N history lines (speech + tools collapsed). "
-             "PageUp loads older. Default 50 primary / 25 secondary."
+        help="Catch-up ~N terminal rows of history at current width. "
+             "Default: one chat viewport (primary) / half (secondary). PageUp loads older."
     )
     parser.add_argument(
         "--operator", "-o", default=None,

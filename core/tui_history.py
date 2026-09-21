@@ -828,8 +828,170 @@ def is_tip_paint_event(event: dict) -> bool:
 
 
 
+
+# --- viewport-aware tip (rows on glass, not event counts) -----------------
+
+# Match tui/chat_widgets.ToolCallPanel defaults (keep in sync).
+_TOOL_SNIPPET_MAX_CHARS = 480
+_TOOL_SNIPPET_MAX_VISUAL_ROWS = 6
+_TOOL_BORDER_ROWS = 2  # title/border chrome around body
+_SPEECH_BORDER_ROWS = 1  # message chrome fudge
+_DEFAULT_TIP_WIDTH = 80
+_DEFAULT_TIP_ROWS = 24
+_TIP_MAX_EVENTS = 400  # safety: never mount unbounded widgets
+_TIP_OVERSHOOT_RATIO = 1.15  # allow a bit past target (Eric: simplifies scroll)
+
+
+def wrap_text_rows(text: str, width: int) -> int:
+    """How many terminal rows plain text needs at ``width`` (soft-wrap)."""
+    if width < 8:
+        width = 8
+    if not text:
+        return 1
+    rows = 0
+    for ln in str(text).splitlines() or [""]:
+        # wide glyphs ignored — estimate, overshoot OK
+        n = max(1, (len(ln) + width - 1) // width) if ln else 1
+        rows += n
+    return max(1, rows)
+
+
+def _tool_body_text(event: dict) -> str:
+    update = (event.get("params") or {}).get("update") or {}
+    parts: list[str] = []
+    content = update.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            c = block.get("content")
+            if isinstance(c, dict) and c.get("text"):
+                parts.append(str(c["text"]))
+            elif isinstance(c, str):
+                parts.append(c)
+            t = block.get("text")
+            if t:
+                parts.append(str(t))
+    elif isinstance(content, dict) and content.get("text"):
+        parts.append(str(content["text"]))
+    elif isinstance(content, str):
+        parts.append(content)
+    for k in ("rawOutput", "output", "stdout"):
+        v = update.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(v)
+    title = str(update.get("title") or update.get("tool_name") or "")
+    cmd = ""
+    ri = update.get("rawInput")
+    if isinstance(ri, dict):
+        cmd = str(ri.get("command") or ri.get("cmd") or "")
+    elif isinstance(ri, str):
+        cmd = ri
+    head = (cmd or title).strip()
+    body = "\n".join(parts).strip()
+    if head and body:
+        return head + "\n" + body
+    return body or head
+
+
+def estimate_event_rows(event: dict, width: int = _DEFAULT_TIP_WIDTH) -> int:
+    """Estimate terminal rows a tip widget will occupy (not exact layout).
+
+    Over-estimate slightly rather than under — tip may be a bit tall; PageUp
+    / scroll still work. Under-estimate caused "empty looking" tips.
+    """
+    if width < 8:
+        width = 8
+    if not is_tip_paint_event(event):
+        return 0
+    et = _event_session_update(event)
+    if et in ("tool_call", "tool_call_update"):
+        body = _tool_body_text(event)
+        # same spirit as ToolCallPanel snippet
+        piece = body[:_TOOL_SNIPPET_MAX_CHARS]
+        rows = wrap_text_rows(piece, width)
+        rows = min(rows, _TOOL_SNIPPET_MAX_VISUAL_ROWS)
+        return rows + _TOOL_BORDER_ROWS
+    # speech / plan / annotation
+    update = (event.get("params") or {}).get("update") or {}
+    c = update.get("content") or {}
+    if isinstance(c, dict):
+        text = str(c.get("text") or "")
+    elif isinstance(c, str):
+        text = c
+    else:
+        text = ""
+    # markdown is denser than plain; plain wrap is a lower bound — add small fudge
+    rows = wrap_text_rows(text, max(8, width - 4))
+    return rows + _SPEECH_BORDER_ROWS
+
+
+def collapse_tip_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Chronological tip candidates: meta/chrome dropped, tools 1× per id (latest)."""
+    if not events:
+        return []
+    # forward pass last-wins for tools, skip non-paint
+    out: list[dict[str, Any]] = []
+    tool_idx: dict[str, int] = {}
+    for ev in events:
+        if not is_tip_paint_event(ev):
+            continue
+        et = _event_session_update(ev)
+        if et in ("tool_call", "tool_call_update"):
+            tid = _event_tool_id(ev) or f"anon:{id(ev)}"
+            if tid in tool_idx:
+                out[tool_idx[tid]] = ev
+            else:
+                tool_idx[tid] = len(out)
+                out.append(ev)
+            continue
+        out.append(ev)
+    return out
+
+
+def select_tip_by_rows(
+    events: list[dict[str, Any]],
+    target_rows: int,
+    *,
+    width: int = _DEFAULT_TIP_WIDTH,
+    max_events: int = _TIP_MAX_EVENTS,
+    overshoot: float = _TIP_OVERSHOOT_RATIO,
+) -> list[dict[str, Any]]:
+    """Last history slice whose estimated render rows ≈ ``target_rows``.
+
+    Walk collapsed candidates from the tip backward, summing
+    :func:`estimate_event_rows` until ``target_rows * overshoot`` or
+    ``max_events``. Returns chronological order.
+
+    This is Eric's model: terminal geometry → how much text to fill N rows →
+    load JSON backward until the budget is met (slight overshoot OK).
+    """
+    if not events or not target_rows or target_rows <= 0:
+        return []
+    width = max(8, int(width or _DEFAULT_TIP_WIDTH))
+    budget = max(1, int(target_rows * (overshoot if overshoot >= 1 else 1.0)))
+    max_events = max(1, int(max_events))
+
+    collapsed = collapse_tip_events(events)
+    if not collapsed:
+        return []
+
+    picked_rev: list[dict[str, Any]] = []
+    rows = 0
+    for ev in reversed(collapsed):
+        r = estimate_event_rows(ev, width)
+        if r <= 0:
+            continue
+        picked_rev.append(ev)
+        rows += r
+        if rows >= budget or len(picked_rev) >= max_events:
+            break
+    picked_rev.reverse()
+    return picked_rev
+
+
 def tip_max_tools(n_lines: int) -> int:
-    """Deprecated no-op. ``-t`` is lines of history, not a tool quota."""
+    """Deprecated no-op (tool quotas removed)."""
     _ = n_lines
     return 0
 
@@ -839,28 +1001,27 @@ def select_tip_paint_lines(
     n_lines: int,
     *,
     max_tools: int | None = None,
+    width: int | None = None,
+    row_mode: bool = True,
 ) -> list[dict[str, Any]]:
-    """Catch-up tip: last **N TUI history lines** (``-t N``).
+    """Catch-up tip for ``-t N``.
 
-    Product (Eric): preload *lines of history*, not turns and not an explicit
-    tool count. Walk backward from the tip:
-
-      - each user/agent/thought (non-chrome) = 1 line
-      - each toolCallId (collapsed to latest tool_call/update) = 1 line
-      - drop session meta / chrome
-      - stop when N lines collected
-      - return chronological order
-
-    ``max_tools`` is ignored (kept so old call sites do not break).
+    Default **row_mode**: ``N`` is terminal rows to fill at ``width``
+    (viewport-aware). Set ``row_mode=False`` for legacy “N widgets” counting.
     """
     _ = max_tools
     if not events or not n_lines or n_lines <= 0:
         return []
-
+    if row_mode:
+        return select_tip_by_rows(
+            events,
+            n_lines,
+            width=width or _DEFAULT_TIP_WIDTH,
+        )
+    # legacy: N collapsed paint widgets
     out_rev: list[dict[str, Any]] = []
     seen_tools: set[str] = set()
     paint = 0
-
     for ev in reversed(events):
         if not is_tip_paint_event(ev):
             continue
@@ -868,13 +1029,12 @@ def select_tip_paint_lines(
         if et in ("tool_call", "tool_call_update"):
             tid = _event_tool_id(ev) or f"anon:{id(ev)}"
             if tid in seen_tools:
-                continue  # older frame of same tool; already have newer from tip
+                continue
             seen_tools.add(tid)
         out_rev.append(ev)
         paint += 1
         if paint >= n_lines:
             break
-
     out_rev.reverse()
     return out_rev
 

@@ -351,6 +351,88 @@ def is_speech_tui_event(event: dict[str, Any]) -> bool:
     return bool(str(t).strip())
 
 
+
+def _thin_event_from_fat_line(line: str) -> Optional[dict[str, Any]]:
+    """Paint-able tool update from an oversized hot line without full json.loads.
+
+    Fat run_terminal_command completions embed full stdout + byte-array rawOutput
+    (often 60–200KB). Skipping them left empty ✓ title-only panels.
+    """
+    import re
+
+    if "tool_call" not in line and "tool_result" not in line:
+        return None
+
+    def _s(pat: str, default: str = "") -> str:
+        m = re.search(pat, line)
+        return m.group(1) if m else default
+
+    tool_id = _s(r'"toolCallId"\s*:\s*"([^"]+)"') or _s(
+        r'"id"\s*:\s*"(call-[^"]+)"'
+    )
+    status = _s(
+        r'"status"\s*:\s*"(completed|failed|in_progress|running)"', "completed"
+    )
+    title = _s(r'"title"\s*:\s*"((?:\\.|[^"\\])*)"')
+    if title:
+        title = title.replace("\\n", " ").replace('\\"', '"')[:120]
+
+    text = ""
+    # Prefer content text block (human stdout), not byte arrays
+    m2 = re.search(
+        r'"content"\s*:\s*\{\s*"type"\s*:\s*"text"\s*,\s*"text"\s*:\s*"((?:\\.|[^"\\])*)"',
+        line,
+    )
+    if m2:
+        text = m2.group(1)
+    if not text:
+        m2 = re.search(
+            r'"output_for_prompt"\s*:\s*"((?:\\.|[^"\\]){0,6000})"', line
+        )
+        if m2:
+            text = m2.group(1)
+    if not text:
+        m2 = re.search(
+            r'"body"\s*:\s*\{[^}]{0,200}?"text"\s*:\s*"((?:\\.|[^"\\])*)"', line
+        )
+        if m2:
+            text = m2.group(1)
+    if text:
+        text = (
+            text.replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace('\\"', '"')
+            .replace("\\\\", "\\")
+        )
+        if len(text) > 8000:
+            text = text[:8000] + "\n… [truncated fat tool line]"
+    if not tool_id and not text:
+        return None
+    if not text:
+        text = f"(output elided — line {len(line)} bytes)"
+    return {
+        "timestamp": None,
+        "method": "session/update",
+        "params": {
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": tool_id or "unknown",
+                "status": status,
+                "title": title or "tool",
+                "content": [
+                    {
+                        "type": "content",
+                        "content": {"type": "text", "text": text},
+                    }
+                ],
+                "rawOutput": text[:2000],
+            }
+        },
+        "_aa_stream": True,
+        "_aa_fat_thin": True,
+    }
+
+
 def line_to_tui_event(line: str, hist_kind: str = "updates") -> Optional[dict[str, Any]]:
     """Parse one jsonl line from hot or updates into a TUI dispatch event."""
     import json as _json

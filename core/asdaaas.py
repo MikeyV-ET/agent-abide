@@ -2461,13 +2461,25 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
     _current_session_id = sid
     _rt.current_session_id = sid
     try:
-        # env is assigned later in main(); agent_dir(None) resolves via config.
-        from session_limit import clear_park_with_wake
-        _notice = clear_park_with_wake(agent_name, env=None)
-        if _notice:
-            print("[asdaaas] session_limit wake after start")
+        # env assigned later; agent_dir(..., env=None) uses config.
+        from session_limit import reconcile_session_park
+        _rec = reconcile_session_park(agent_name, env=None)
+        if _rec.get("woke"):
+            print("[asdaaas] session_limit wake after start (expired park cleared)")
+        elif _rec.get("holding"):
+            rem = float(_rec.get("remaining_s") or 0)
+            print(
+                f"[asdaaas] session_limit still holding "
+                f"{rem:.0f}s until reset — re-arming wake restart"
+            )
+            if rem > 0:
+                schedule_self_restart(
+                    agent_name,
+                    reason="session_limit_wake:boot_rearm",
+                    delay_s=max(5.0, rem),
+                )
     except Exception as _e:
-        print("[asdaaas] session_limit park clear: %s" % _e)
+        print("[asdaaas] session_limit park reconcile: %s" % _e)
     _current_backend_type = config.agent_backend(agent_name) if config else "grok"
     _rt.current_backend_type = config.agent_backend(agent_name) if config else "grok"
     print(f"[asdaaas] Model: {_current_model_id}")
@@ -2629,6 +2641,28 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                 print(f"[asdaaas] Shutting down {agent_name} gracefully")
                 write_health(agent_name, "shutdown", "graceful shutdown", total_tokens, context_window)
                 break
+
+            # ---- 0a. Session-limit park reconcile (expired → wake notice + clear)
+            try:
+                from session_limit import reconcile_session_park
+                _pr = reconcile_session_park(agent_name, env=env)
+                if _pr.get("woke"):
+                    print("[asdaaas] session_limit: expired park cleared (reconcile)")
+                    # Prefer processing wake doorbell this iteration
+                    delay_until_event = False
+                    next_turn_delay = 0
+                elif _pr.get("holding") and next_turn_delay <= 0 and not delay_until_event:
+                    rem = float(_pr.get("remaining_s") or 0)
+                    if rem > 0:
+                        # Chunked in-process wait; restart also scheduled at park time
+                        next_turn_delay = min(rem, 600.0)
+                        print(
+                            f"[asdaaas] session_limit holding — "
+                            f"delay chunk {next_turn_delay:.0f}s "
+                            f"(full remaining {rem:.0f}s)"
+                        )
+            except Exception as _pre:
+                print(f"[asdaaas] session_limit reconcile: {_pre}")
 
             # ---- 0. Refresh token count from backend's authoritative source ----
             # Between turns the binary may have compacted or updated tokens.

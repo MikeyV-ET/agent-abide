@@ -1193,13 +1193,11 @@ class TurnEngine:
                                 result.delay_interrupted = False
                                 rem = park_remaining_s(_adir)
                                 if rem is not None and rem > 0:
-                                    self.next_turn_delay = max(60.0, rem)
+                                    self.next_turn_delay = max(30.0, min(float(rem), 600.0))
                                     self.delay_text = "session_limit park"
                                 else:
-                                    self.next_turn_delay = max(60.0, self.next_turn_delay or 3600.0)
+                                    self.next_turn_delay = 60.0
                                     self.delay_text = "session_limit park"
-                                # Return before collection window — else pending
-                                # adapter mail would start a turn into the wall.
                                 result.action = "continue"
                                 return result
                             else:
@@ -1222,14 +1220,24 @@ class TurnEngine:
                         except Exception as e:
                             print(f"[asdaaas] session_limit wake on expiry failed: {e}")
 
-            # Still parked? Do not open a collection window into a model turn.
+            # Still parked? Hold or expire.
             try:
-                from session_limit import should_hold_park, park_remaining_s
+                from session_limit import (
+                    should_hold_park,
+                    park_remaining_s,
+                    reconcile_session_park,
+                    read_park_state,
+                )
                 from asdaaas import agent_dir as _ad
                 _adir = _ad(agent_name, env=self.env)
                 if should_hold_park(_adir):
                     rem = park_remaining_s(_adir)
-                    self.next_turn_delay = max(60.0, rem if rem is not None else 3600.0)
+                    # Chunk delays (max 10m); full wake via self-restart + reconcile
+                    chunk = 600.0
+                    if rem is not None and rem > 0:
+                        self.next_turn_delay = max(30.0, min(float(rem), chunk))
+                    else:
+                        self.next_turn_delay = chunk
                     self.delay_text = "session_limit park"
                     print(
                         f"[asdaaas] session_limit park hold — "
@@ -1237,6 +1245,11 @@ class TurnEngine:
                     )
                     result.action = "continue"
                     return result
+                elif read_park_state(_adir):
+                    # Park file but reset already past — wake now
+                    rec = reconcile_session_park(agent_name, env=self.env)
+                    if rec.get("woke"):
+                        print("[asdaaas] session_limit expired park cleared in handle_idle")
             except Exception:
                 pass
 

@@ -374,7 +374,47 @@ def clear_park_with_wake(agent_name: str, *, env=None) -> Optional[str]:
         return None
     notice = emit_wake_notice(agent_name, park, env=env)
     clear_park_state(adir)
+    # Restore health so TUI is not stuck on session_limited
+    try:
+        from asdaaas import write_health
+        write_health(agent_name, "idle", "session_limit cleared", 0, 0, env=env)
+    except Exception:
+        pass
     return notice
+
+
+def reconcile_session_park(agent_name: str, *, env=None, now: Optional[float] = None) -> dict:
+    """Wake+clear if park exists but hold is no longer required.
+
+    Astro 2026-09-21: real limit 08:48 → reset 11:40; park file still present
+    at 15:39 with no wake notice. Long parks (>2h) skipped self-restart and
+    relied on one in-process delay; process restart or a missed expiry left a
+    stale file. Call this on boot and every idle loop tick.
+    """
+    from asdaaas import agent_dir
+
+    now = now if now is not None else time.time()
+    adir = agent_dir(agent_name, env=env)
+    park = read_park_state(adir)
+    if not park or park.get("status") != "session_limited":
+        return {"parked": False}
+    if should_hold_park(adir, now=now):
+        rem = park_remaining_s(adir, now=now)
+        return {
+            "parked": True,
+            "holding": True,
+            "remaining_s": rem,
+            "reset_unix": park.get("reset_unix"),
+        }
+    # Expired / no longer holding — wake
+    notice = clear_park_with_wake(agent_name, env=env)
+    return {
+        "parked": False,
+        "holding": False,
+        "woke": True,
+        "notice": notice,
+        "stale_park": park,
+    }
 
 
 def seconds_until_reset(info: SessionLimitInfo, *, now: Optional[float] = None) -> Optional[float]:
@@ -438,29 +478,29 @@ def handle_session_limit(
 
     print(f"[session_limit] {agent_name}: parked {detail} path={park}")
 
-    # Schedule wake: self-restart at reset so a fresh binary/session can run
-    # (account-level limits may still block until true reset — restart is still
-    # the right wakeup; agent gets a clear doorbell via post-restart boot).
+    # Always schedule a detached self-restart at reset (no 2h cap).
+    # Astro's 08:48→11:40 park was 10266s; skipping restart left wake solely on
+    # in-process delay, which did not clear the park after reset.
+    # In-process delay (caller) is a second path; restart is the reliable one.
     try:
-        # Cap delay_s for schedule_self_restart sleep — use atime file + main loop
-        # for long waits; for short (<2h) schedule restart directly.
-        if reset_s <= 7200:
-            schedule_self_restart(
-                agent_name,
-                reason=f"session_limit_wake:{info.reason}",
-                delay_s=max(5.0, reset_s),
-            )
-        else:
-            # Long park: write wake_at; main loop / external cron can restart
-            print(
-                f"[session_limit] long park {reset_s:.0f}s — "
-                f"use session_limit.json reset_unix for wake (no auto-restart >2h)"
-            )
+        schedule_self_restart(
+            agent_name,
+            reason=f"session_limit_wake:{info.reason}",
+            delay_s=max(5.0, float(reset_s)),
+        )
+        print(
+            f"[session_limit] wake restart scheduled in {reset_s:.0f}s "
+            f"(reset_unix={info.reset_unix})"
+        )
     except Exception as e:
         print(f"[session_limit] schedule wake failed: {e}")
 
+    # In-process delay chunks (max 10m): each expiry re-checks reset_unix via
+    # reconcile / should_hold. Full wait is owned by schedule_self_restart above.
+    chunk = min(float(reset_s), 600.0)
     return {
-        "delay_s": reset_s,
+        "delay_s": chunk,
+        "delay_s_full": reset_s,
         "reset_unix": info.reset_unix,
         "park_path": str(park),
         "detail": detail,

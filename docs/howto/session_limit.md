@@ -52,3 +52,9 @@ a control line + `wake_sesslim_*` doorbell with:
 - Nudge to `memory_query` / `memory_recall` for the park window (Eric: memory is the right embodiment path; control line is not a transcript)
 
 Detection remains CLI/backend signals only — never model speech.
+
+## Long-park wake (2026-09-21 Astro real limit)
+
+Parks **always** schedule `schedule_self_restart` at `reset_unix` (no 2h skip).
+In-process delay is **chunked ≤10m**; each tick/`reconcile_session_park` re-checks.
+If park file exists but `reset_unix` is past → wake notice + clear (boot + main loop).

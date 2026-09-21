@@ -3963,14 +3963,13 @@ Type anything else to send a message to the agent.
             if tool_id:
                 self._tool_panels[tool_id] = panel
             content.mount(panel)
-            # Seed with command so we never show a blank title-only card
-            seed = self._tool_update_blob(update)
-            if seed and seed.strip():
-                seed_lines = [ln for ln in seed.splitlines() if ln.strip()]
-                preview = "\n".join(seed_lines[:6])
-                if len(preview) > 600:
-                    preview = preview[:600] + "…"
-                panel.set_output(preview)
+            cmd = self._tool_command_from_update(update)
+            if cmd:
+                panel.set_command(cmd)
+            else:
+                seed = self._tool_update_blob(update)
+                if seed and seed.strip():
+                    panel.set_command(seed.strip().splitlines()[0][:240])
 
         try:
             ctrl = self._delay_control_from_tool_blob(self._tool_update_blob(update))

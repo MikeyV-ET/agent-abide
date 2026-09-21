@@ -1317,8 +1317,13 @@ class AsdaaasTUI(App):
         except NoMatches:
             pass
 
-        # Track for double-display prevention
+        # Track for double-display prevention (interjection 🔔 will consume the echo)
         self._last_sent_text = text
+        if not hasattr(self, "_pending_local_echoes") or self._pending_local_echoes is None:
+            self._pending_local_echoes = []
+        self._pending_local_echoes.append(text)
+        if len(self._pending_local_echoes) > 20:
+            self._pending_local_echoes = self._pending_local_echoes[-12:]
 
         # Write to asdaaas TUI adapter inbox
         self._send_to_adapter(text)
@@ -3577,6 +3582,65 @@ Type anything else to send a message to the agent.
             self._debug_log.write(f"{_t.time():.3f} {msg}\n")
             self._debug_log.flush()
 
+
+    def _plain_from_interjection(self, msg: str) -> str:
+        """Best-effort body text from an interjection blob (for local-echo match)."""
+        import re
+        if not msg:
+            return ""
+        # Drop <interjection> wrappers if present
+        m = re.search(r"<interjection>\s*(.*?)\s*</interjection>", msg, re.S | re.I)
+        body = m.group(1) if m else msg
+        # Drop leading [interjection (...)] [op (via tui) (...)] headers
+        body = re.sub(r"^\s*\[interjection[^\]]*\]\s*", "", body, flags=re.I)
+        body = re.sub(
+            r"^\s*\[[^\]]*(via tui)[^\]]*\]\s*",
+            "",
+            body,
+            flags=re.I,
+        )
+        return body.strip()
+
+    def _consume_local_echo_for_interjection(self, msg: str) -> bool:
+        """If this interjection is Eric's pending Enter-echo, remove the ❯ UserMessage.
+
+        Local echo mounts UserMessage(text) immediately; stdin path later paints 🔔.
+        One message, one widget — keep the 🔔 (delivered mid-turn), drop the echo.
+        """
+        plain = self._plain_from_interjection(msg)
+        pending = getattr(self, "_pending_local_echoes", None)
+        if pending is None:
+            pending = []
+            self._pending_local_echoes = pending
+        # Match against pending list (order: oldest first)
+        match_text = None
+        for i, sent in enumerate(list(pending)):
+            if not sent:
+                continue
+            if sent == plain or sent in msg or plain.endswith(sent) or sent in plain:
+                match_text = sent
+                pending.pop(i)
+                break
+        # Fallback: last_sent_text
+        if match_text is None:
+            last = getattr(self, "_last_sent_text", None)
+            if last and (last == plain or last in msg or plain.endswith(last)):
+                match_text = last
+                self._last_sent_text = None
+        if not match_text:
+            return False
+        try:
+            content = self._content_scroll()
+            # Remove the most recent matching UserMessage
+            for child in reversed(list(content.children)):
+                if isinstance(child, UserMessage) and getattr(child, "user_text", None) == match_text:
+                    child.remove()
+                    self._debug(f"local-echo consumed by interjection: {match_text[:40]!r}")
+                    return True
+        except Exception as e:
+            self._debug(f"local-echo consume failed: {e}")
+        return False
+
     @staticmethod
     def _extract_interjections(text: str) -> tuple[str, list[str]]:
         """Extract <interjection> blocks — pure logic in chat_model."""
@@ -3962,6 +4026,7 @@ Type anything else to send a message to the agent.
                     if key in self._seen_interjections:
                         continue
                     self._seen_interjections.add(key)
+                    self._consume_local_echo_for_interjection(msg)
                     content.mount(InterjectionBlock(msg))
                     mounted_any = True
             if mounted_any and self._following_tail():
@@ -3998,6 +4063,7 @@ Type anything else to send a message to the agent.
                         continue
                     self._seen_interjections.add(key)
                     panel._mounted_interjections.add(msg)
+                    self._consume_local_echo_for_interjection(msg)
                     content.mount(InterjectionBlock(msg), before=panel)
                     mounted_any = True
                 if mounted_any and self._following_tail():
@@ -4359,6 +4425,7 @@ Type anything else to send a message to the agent.
                                 if key in self._seen_interjections:
                                     continue
                                 self._seen_interjections.add(key)
+                                # load_older: no local echo to consume
                                 widgets_to_prepend.append(InterjectionBlock(msg))
                             if pure_ij and not clean.strip():
                                 # no empty tool husk under 🔔

@@ -4395,7 +4395,7 @@ Type anything else to send a message to the agent.
             core = str(Path(__file__).resolve().parent.parent / "core")
             if core not in sys.path:
                 sys.path.insert(0, core)
-            from tui_history import line_to_tui_event
+            from tui_history import is_chrome_speech, line_to_tui_event
         except Exception:
             line_to_tui_event = None  # type: ignore
 

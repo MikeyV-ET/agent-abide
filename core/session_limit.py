@@ -43,6 +43,13 @@ RESET_PATTERNS = [
     re.compile(r"try again in\s+(\d+)\s*(hour|hr|minute|min|second|sec)s?", re.I),
     re.compile(r"available again at\s+(\S+)", re.I),
     re.compile(r"retry after\s+(\d+)", re.I),  # seconds
+    # Claude Code's real wording: "resets 8:40pm (America/Los_Angeles)".
+    # No "at", minutes optional, zone given as an IANA name in parentheses.
+    re.compile(
+        r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b"
+        r"(?:\s*\(([A-Za-z_]+(?:/[A-Za-z_+\-]+)+)\))?",
+        re.I,
+    ),
 ]
 
 
@@ -61,6 +68,31 @@ def text_indicates_limit(text: str) -> bool:
     return any(p.search(text) for p in LIMIT_PATTERNS)
 
 
+def _next_wall_clock(hour: int, minute: int, ampm: str, zone: Optional[str],
+                     now: float) -> Optional[float]:
+    """Next occurrence of hour:minute in `zone` (local clock if unknown/absent)."""
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    if ampm == "pm" and hour < 12:
+        hour += 12
+    if ampm == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        return None
+    tz = None
+    if zone:
+        try:
+            tz = ZoneInfo(zone)
+        except (ZoneInfoNotFoundError, ValueError):
+            tz = None
+    base = datetime.fromtimestamp(now, tz) if tz else datetime.fromtimestamp(now).astimezone()
+    candidate = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate.timestamp() <= now:
+        candidate = candidate + timedelta(days=1)
+    return candidate.timestamp()
+
+
 def parse_reset_unix(text: str, *, now: Optional[float] = None) -> Optional[float]:
     """Best-effort parse of reset time from limit message. None if unknown."""
     if not text:
@@ -77,6 +109,15 @@ def parse_reset_unix(text: str, *, now: Optional[float] = None) -> Optional[floa
     m = RESET_PATTERNS[3].search(text)  # retry after N seconds
     if m:
         return now + int(m.group(1))
+
+    m = RESET_PATTERNS[4].search(text)  # resets 8:40pm (America/Los_Angeles)
+    if m:
+        got = _next_wall_clock(
+            int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower(),
+            m.group(4), now,
+        )
+        if got is not None:
+            return got
 
     m = RESET_PATTERNS[0].search(text)  # resets at HH:MM am/pm
     if m:

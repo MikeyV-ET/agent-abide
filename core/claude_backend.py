@@ -233,6 +233,48 @@ class ClaudeBackend(AgentBackend):
             return None
         return str(path) if path else None
 
+    # ---- session limit detection ----
+
+    @staticmethod
+    def _is_cli_authored(frame: dict) -> bool:
+        """True for messages Claude Code itself wrote, never for model speech.
+
+        Real limits arrive as CLI-authored assistant messages: model "<synthetic>",
+        isApiErrorMessage true, error "rate_limit" (e.g. "You've hit your session
+        limit · resets 8:40pm (America/Los_Angeles)"). Model speech can say
+        anything — including quoting that exact sentence — and must never park.
+        """
+        if not isinstance(frame, dict):
+            return False
+        message = frame.get("message") or {}
+        return (
+            message.get("model") == "<synthetic>"
+            or bool(frame.get("isApiErrorMessage"))
+            or bool(frame.get("error"))
+        )
+
+    @staticmethod
+    def _limit_info_from_result(frame: dict):
+        """Limit info from a result frame, or None.
+
+        Only error results count. On a normal turn frame["result"] is the
+        model's final text, so scanning it re-introduces the speech false
+        positive through the back door.
+        """
+        if not isinstance(frame, dict):
+            return None
+        if not (frame.get("is_error") or frame.get("error") or frame.get("errors")):
+            return None
+        from session_limit import inspect_limit_text
+
+        blob = " ".join(
+            str(x)
+            for x in (frame.get("result"), frame.get("error"), frame.get("errors"))
+            if x
+        )
+        info = inspect_limit_text(blob, source="claude_result")
+        return info if info.detected else None
+
     # ---- AA history ingest (mirrors GrokBackend) ----
 
     def configure_aa_history(self, agent_home, agent_name: str, *,
@@ -450,19 +492,8 @@ class ClaudeBackend(AgentBackend):
 
             if frame_type == "result":
                 try:
-                    from session_limit import inspect_limit_text
-                    blob = " ".join(
-                        str(x)
-                        for x in (
-                            frame.get("result"),
-                            frame.get("error"),
-                            frame.get("errors"),
-                            frame.get("stop_reason"),
-                        )
-                        if x
-                    )
-                    info = inspect_limit_text(blob, source="claude_result")
-                    if info.detected:
+                    info = self._limit_info_from_result(frame)
+                    if info is not None:
                         self._session_limited = True
                         self._session_limit_info = info
                         stop_reason = "session_limit"
@@ -539,16 +570,9 @@ class ClaudeBackend(AgentBackend):
 
         if getattr(self, "_session_limited", False):
             stop_reason = "session_limit"
-        try:
-            from session_limit import inspect_limit_text
-            joined = "".join(speech_chunks)
-            info = inspect_limit_text(joined, source="claude_speech")
-            if info.detected:
-                self._session_limited = True
-                self._session_limit_info = info
-                stop_reason = "session_limit"
-        except Exception:
-            pass
+        # No scan of joined speech here: it is the model's own words, and an
+        # agent explaining a limit is not an agent at one. (Parked twice for an
+        # hour on 2026-09-21 for writing "I was parked on a usage limit".)
 
         return ResponseResult(
             speech="".join(speech_chunks),
@@ -574,14 +598,15 @@ class ClaudeBackend(AgentBackend):
                         speech_chunks.append(text)
                         if on_speech_chunk:
                             on_speech_chunk(text)
-                        try:
-                            from session_limit import inspect_limit_text
-                            info = inspect_limit_text(text, source="claude_assistant")
-                            if info.detected:
-                                self._session_limited = True
-                                self._session_limit_info = info
-                        except Exception:
-                            pass
+                        if self._is_cli_authored(frame):
+                            try:
+                                from session_limit import inspect_limit_text
+                                info = inspect_limit_text(text, source="claude_cli")
+                                if info.detected:
+                                    self._session_limited = True
+                                    self._session_limit_info = info
+                            except Exception:
+                                pass
                 elif block_type == "thinking":
                     thought_text = block.get("thinking", "")
                     if thought_text:

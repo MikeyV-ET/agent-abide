@@ -3380,11 +3380,16 @@ Type anything else to send a message to the agent.
                     )
                     t_label = f"-t{want}" if want else "tip"
                     n_tools = max(0, replay_count - dialogue_dispatched)
-                    msg = (
-                        f"Replay ({t_label}): {dialogue_dispatched} dialogue"
-                        f", {n_tools} recent tools"
-                        f" from {hist_kind}"
-                    )
+                    if n_tools:
+                        msg = (
+                            f"Replay ({t_label}): {dialogue_dispatched} dialogue"
+                            f" + {n_tools} tools from {hist_kind}"
+                        )
+                    else:
+                        msg = (
+                            f"Replay ({t_label}): {dialogue_dispatched} dialogue"
+                            f" from {hist_kind} (tools via live tail / PageUp)"
+                        )
                     self.call_from_thread(lambda m=msg: self.notify(m, severity="information"))
                     time.sleep(1)
                     self.call_from_thread(self._force_scroll_bottom)

@@ -828,17 +828,18 @@ def is_tip_paint_event(event: dict) -> bool:
 
 
 def tip_max_tools(n_dialogue: int) -> int:
-    """Independent tool budget for catch-up — NOT 1:1 with dialogue.
+    """Tool panels allowed on initial ``-t`` catch-up.
 
-    ``-t50`` is fifty chat lines. A hard cap of 50 tools made the hover read
-    "50 dialogue + 50 tools" whenever the span was tool-dense, which looks like
-    false parity and drowns the tip in panels (Eric 2026-09-21). Keep a *small*
-    handful of recent tools for context; PageUp lazy-load owns the rest.
+    Product (Eric 2026-09-21, after several tip iterations): catch-up is
+    **dialogue only**. Any positive tool budget (even 8) prefers tools nearest
+    the tip, so the scroll *ends* on a stack of tool panels and looks like the
+    turn finished on tools / delay. Live tail still paints tools as they
+    happen; PageUp lazy-load can bring tools back with speech.
+
+    ``n_dialogue`` retained for call-site compatibility.
     """
-    if n_dialogue <= 0:
-        return 0
-    # ~1 tool per 6 dialogue, floor 3, ceiling 8
-    return max(3, min(8, n_dialogue // 6))
+    _ = n_dialogue
+    return 0
 
 
 def select_tip_paint_lines(
@@ -850,12 +851,8 @@ def select_tip_paint_lines(
     """Catch-up tip for ``-t N``.
 
     ``-t N`` = last **N dialogue** lines (user/agent/thought, non-chrome).
-    Tools in that span are optional garnish: collapsed to one line per
-    toolCallId and capped by :func:`tip_max_tools` (small, independent of N —
-    not N tools for N dialogue). Chrome / session meta never mount.
-
-    Trailing in-progress tools after the last dialogue are limited further so
-    the tip does not "die" on a tool wall when chat is what you came for.
+    Catch-up mounts **dialogue only** (``tip_max_tools`` → 0). Tools are live-tail
+    / lazy-load, not initial tip — otherwise the scroll ends on tool panels.
     """
     if not events or not n_lines or n_lines <= 0:
         return []
@@ -905,21 +902,13 @@ def select_tip_paint_lines(
         drop = set(tool_positions[: len(tool_positions) - tool_cap])
         out = [ev for i, ev in enumerate(out) if i not in drop]
 
-    # --- 5. don't end the tip on a tool pile ---
-    # Keep at most 2 tools after the last dialogue line (live in-progress only).
+    # --- 5. never trail tools after last dialogue on catch-up ---
     last_dlg = -1
     for i, ev in enumerate(out):
         if is_dialogue_speech(ev):
             last_dlg = i
     if last_dlg >= 0:
-        trailing_tools = [
-            i
-            for i in range(last_dlg + 1, len(out))
-            if _event_session_update(out[i]) in ("tool_call", "tool_call_update")
-        ]
-        if len(trailing_tools) > 2:
-            drop = set(trailing_tools[:-2])  # keep last 2 only
-            out = [ev for i, ev in enumerate(out) if i not in drop]
+        out = out[: last_dlg + 1]
 
     return out
 

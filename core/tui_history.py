@@ -356,6 +356,40 @@ def is_speech_tui_event(event: dict[str, Any]) -> bool:
 
 
 
+
+def is_chrome_speech(text: str) -> bool:
+    """System continue / session-limit / context-left — not real dialogue.
+
+    Lazy-load must not spend its speech budget on these or scroll sticks
+    in a multi-MB wall of continues after a usage limit.
+    """
+    if not text or not isinstance(text, str):
+        return True
+    s = text.strip()
+    low = s.lower()
+    if low.startswith("[continue"):
+        return True
+    if "your turn ended" in low and "stand by" in low:
+        return True
+    if "session limit" in low or "you've hit your session limit" in low:
+        return True
+    if low.startswith("[context left") or "| compaction" in low:
+        return True
+    if low.startswith("[aa.control]"):
+        return True
+    return False
+
+
+def is_dialogue_speech(event: dict) -> bool:
+    """Speech worth counting toward lazy-load / -t N targets."""
+    if not is_speech_tui_event(event):
+        return False
+    update = (event.get("params") or {}).get("update") or {}
+    c = update.get("content") or {}
+    text = c.get("text", "") if isinstance(c, dict) else (c if isinstance(c, str) else "")
+    return not is_chrome_speech(str(text))
+
+
 def _thin_event_from_fat_line(line: str) -> Optional[dict[str, Any]]:
     """Paint-able tool update from an oversized hot line without full json.loads.
 
@@ -486,7 +520,7 @@ def select_tail_events(
     start = len(events)
     for i in range(len(events) - 1, -1, -1):
         start = i
-        if is_speech_tui_event(events[i]):
+        if is_dialogue_speech(events[i]):
             speech += 1
             if speech >= n:
                 break

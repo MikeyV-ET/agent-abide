@@ -4457,9 +4457,13 @@ Type anything else to send a message to the agent.
                     text = c.get("text", "") if isinstance(c, dict) else ""
                     if not str(text).strip():
                         continue
+                    # Keep chrome for display, but don't spend speech budget on it
+                    # (session-limit walls are almost only continues + limit lines).
                     collected.append((line_start, event))
+                    new_earliest = line_start  # walking newest→oldest
+                    if is_chrome_speech(str(text)):
+                        continue
                     speech_n += 1
-                    new_earliest = line_start
                     if speech_n >= speech_target:
                         break
                 elif et in ("tool_call", "tool_call_update") and tool_n < max_tool_panels:

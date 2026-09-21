@@ -557,6 +557,184 @@ def line_to_tui_event(line: str, hist_kind: str = "updates") -> Optional[dict[st
     return None
 
 
+
+def _line_start_before(data: bytes, end: int) -> int:
+    """Start offset of the line that ends at end (end is exclusive, at newline or EOF)."""
+    if end <= 0:
+        return 0
+    # end points at first byte of NEXT line (or EOF). Previous byte should be \n
+    # or we are mid-file after a forced jump.
+    nl = data.rfind(b"\n", 0, end - 1 if end > 0 else 0)
+    if nl < 0:
+        return 0
+    return nl + 1
+
+
+def scan_older_history_events(
+    path_str: str,
+    earliest_offset: int,
+    hist_kind: str = "hot",
+    *,
+    speech_target: int = 25,
+    max_bytes: int = 12 * 1024 * 1024,
+    window: int = 512 * 1024,
+    max_tool_panels: int = 4,
+    max_line_skip: int = 8 * 1024 * 1024,
+) -> dict:
+    """Walk hot/updates backward from earliest_offset; return plain event dicts.
+
+    Critical: lines longer than ``window`` must not stall the cursor. A naive
+    seek+readline alignment lands on the same newline forever when a fat tool
+    line spans the whole window — CPU spins, loading_history sticks, scroll
+    cannot advance past that point (Astro "Confirmed the side effect" wall).
+    """
+    from pathlib import Path as _Path
+
+    updates_path = _Path(path_str)
+    speech_n = 0
+    tool_n = 0
+    chrome_n = 0
+    new_earliest = earliest_offset
+    bytes_read = 0
+    cursor = earliest_offset
+    collected: list[tuple[int, dict]] = []
+    iterations = 0
+    max_iterations = max(64, (earliest_offset // max(1, window)) + 32)
+
+    while (
+        cursor > 0
+        and speech_n < speech_target
+        and bytes_read < max_bytes
+        and iterations < max_iterations
+    ):
+        iterations += 1
+        read_size = min(cursor, window)
+        seek_pos = cursor - read_size
+        with open(updates_path, "rb") as f:
+            f.seek(seek_pos)
+            if seek_pos > 0:
+                f.readline()  # align to next full line
+            data_start = f.tell()
+            # Fat line spans the whole window: readline lands at/after cursor.
+            if data_start >= cursor:
+                # Skip the fat line ending at cursor by finding its start.
+                back = min(cursor, max_line_skip)
+                f.seek(cursor - back)
+                blob = f.read(back)
+                # blob ends at cursor; line before cursor starts after last \n
+                nl = blob.rfind(b"\n", 0, len(blob) - 1 if len(blob) else 0)
+                if nl < 0:
+                    # still inside one giant line — jump back by `back`
+                    line_start = cursor - back
+                else:
+                    line_start = (cursor - back) + nl + 1
+                skipped = cursor - line_start
+                bytes_read += max(skipped, 1)  # ensure max_bytes can fire
+                new_earliest = min(new_earliest, line_start)
+                cursor = line_start
+                if cursor <= 0:
+                    new_earliest = 0
+                    break
+                continue
+
+            raw = f.read(cursor - data_start)
+        bytes_read += len(raw)
+        if not raw:
+            # Empty but data_start < cursor — treat as no progress
+            if seek_pos <= 0:
+                new_earliest = 0
+                break
+            bytes_read += 1
+            cursor = data_start if data_start < cursor else seek_pos
+            continue
+
+        batch: list[tuple[int, str]] = []
+        pos = data_start
+        parts = raw.split(b"\n")
+        for i, lb in enumerate(parts):
+            line_start = pos
+            blen = len(lb) + (1 if i < len(parts) - 1 else 0)
+            pos += blen
+            if not lb.strip() or line_start >= earliest_offset:
+                continue
+            if len(lb) > 2 * 1024 * 1024:
+                continue
+            try:
+                batch.append((line_start, lb.decode("utf-8", errors="replace")))
+            except Exception:
+                continue
+
+        for line_start, line in reversed(batch):
+            if hist_kind == "hot":
+                hit = cheap_hot_line_speech(line)
+                if hit is not None:
+                    su, text, _role = hit
+                    # Do not mount chrome — it burns UI and confuses scroll walls.
+                    new_earliest = line_start
+                    if is_chrome_speech(text):
+                        chrome_n += 1
+                        continue
+                    event = {
+                        "params": {
+                            "update": {
+                                "sessionUpdate": su,
+                                "content": {"text": text},
+                            }
+                        }
+                    }
+                    collected.append((line_start, event))
+                    speech_n += 1
+                    if speech_n >= speech_target:
+                        break
+                    continue
+
+            # Fallback: tools / updates kind
+            if len(line) > 64 * 1024 and "tool_call" not in line and "tool_result" not in line:
+                continue
+            event = line_to_tui_event(line, hist_kind)
+            if not event:
+                continue
+            update = (event.get("params") or {}).get("update") or {}
+            et = update.get("sessionUpdate", "")
+            if et in (
+                "user_message_chunk",
+                "agent_message_chunk",
+                "agent_thought_chunk",
+            ):
+                c = update.get("content") or {}
+                text = c.get("text", "") if isinstance(c, dict) else ""
+                if not str(text).strip():
+                    continue
+                new_earliest = line_start
+                if is_chrome_speech(str(text)):
+                    chrome_n += 1
+                    continue
+                collected.append((line_start, event))
+                speech_n += 1
+                if speech_n >= speech_target:
+                    break
+            elif et in ("tool_call", "tool_call_update") and tool_n < max_tool_panels:
+                collected.append((line_start, event))
+                tool_n += 1
+                new_earliest = min(new_earliest, line_start)
+
+        cursor = data_start
+        if data_start <= 0:
+            new_earliest = 0
+            break
+
+    collected.sort(key=lambda t: t[0])
+    return {
+        "events": [e for _, e in collected],
+        "new_earliest": max(0, int(new_earliest)),
+        "speech_n": speech_n,
+        "chrome_n": chrome_n,
+        "tool_n": tool_n,
+        "bytes_read": bytes_read,
+        "iterations": iterations,
+    }
+
+
 def select_tail_events(
     events: list[dict[str, Any]],
     n: int,

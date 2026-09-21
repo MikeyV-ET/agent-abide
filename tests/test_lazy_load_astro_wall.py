@@ -1,4 +1,4 @@
-"""Controlled regression: lazy-load past chrome walls without CPU thrash."""
+"""Controlled regression: lazy-load past chrome walls and fat-line stalls."""
 from __future__ import annotations
 
 import json
@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "core"))
 from tui_history import (  # noqa: E402
     cheap_hot_line_speech,
     is_chrome_speech,
-    line_to_tui_event,
+    scan_older_history_events,
 )
 
 
@@ -28,7 +28,8 @@ def _ev(seq: int, role: str, text: str, kind: str = "text") -> dict:
     }
 
 
-def _write_wall_hot(path: Path, *, bloat_native: bool = False) -> int:
+def _write_wall_hot(path: Path, *, bloat_native: bool = False, fat_tool: bool = False) -> int:
+    """Synthetic hot log: early dialogue, chrome wall, optional fat tool, side-effect anchor."""
     lines = []
     seq = 0
     for i in range(30):
@@ -58,16 +59,38 @@ def _write_wall_hot(path: Path, *, bloat_native: bool = False) -> int:
         )
         if bloat_native:
             seq += 1
-            lines.append(
-                {
-                    "format": "aa.stream",
-                    "stream_seq": seq,
-                    "class": "message",
-                    "role": "assistant",
-                    "body": {"kind": "text", "text": f"pad dialogue {i}"},
-                    "native": {"event": {"pad": bloat}},
-                }
-            )
+            # chrome-classified? no — but native-bloated real dialogue is sparse;
+            # only a few pads so speech budget can reach early*
+            if i < 3:
+                lines.append(
+                    {
+                        "format": "aa.stream",
+                        "stream_seq": seq,
+                        "class": "message",
+                        "role": "assistant",
+                        "body": {"kind": "text", "text": f"pad dialogue {i}"},
+                        "native": {"event": {"pad": bloat}},
+                    }
+                )
+    if fat_tool:
+        # One tool_result line LONGER than the 64KB scan window default used in tests (64k)
+        # Production window is 512KB; tests pass window=64*1024 to force the stall path.
+        fat_payload = "X" * (200 * 1024)
+        seq += 1
+        lines.append(
+            {
+                "format": "aa.stream",
+                "stream_seq": seq,
+                "class": "tool",
+                "role": "assistant",
+                "body": {
+                    "kind": "tool_result",
+                    "tool_id": "toolu_fat",
+                    "text": fat_payload,
+                },
+                "native": {"event": {"huge": fat_payload}},
+            }
+        )
     seq += 1
     lines.append(_ev(seq, "assistant", "Confirmed the side effect — writing that up now."))
     for i in range(10):
@@ -82,47 +105,8 @@ def _write_wall_hot(path: Path, *, bloat_native: bool = False) -> int:
     target = b"Confirmed the side effect"
     idx = blob.find(target)
     assert idx > 0
+    # earliest = start of the side-effect line
     return blob.rfind(b"\n", 0, idx) + 1
-
-
-def _scan_from(hot: Path, earliest: int, speech_target: int = 25):
-    data = hot.read_bytes()
-    speech_n = 0
-    cursor = earliest
-    bytes_read = 0
-    max_bytes = 12 * 1024 * 1024
-    new_earliest = earliest
-    dialogue_texts = []
-    while cursor > 0 and speech_n < speech_target and bytes_read < max_bytes:
-        seek = max(0, cursor - 512 * 1024)
-        ds = 0 if seek == 0 else data.find(b"\n", seek) + 1
-        raw = data[ds:cursor]
-        bytes_read += len(raw)
-        pos = ds
-        parts = raw.split(b"\n")
-        batch = []
-        for i, lb in enumerate(parts):
-            ls = pos
-            pos += len(lb) + (1 if i < len(parts) - 1 else 0)
-            if lb.strip() and ls < earliest:
-                batch.append((ls, lb.decode("utf-8", errors="replace")))
-        for ls, line in reversed(batch):
-            hit = cheap_hot_line_speech(line)
-            if hit is None:
-                continue
-            _su, text, _role = hit
-            new_earliest = ls
-            if is_chrome_speech(text):
-                continue
-            speech_n += 1
-            dialogue_texts.append(text)
-            if speech_n >= speech_target:
-                break
-        cursor = ds
-        if ds <= 0:
-            new_earliest = 0
-            break
-    return speech_n, new_earliest, dialogue_texts, bytes_read
 
 
 def test_chrome_classifier():
@@ -145,19 +129,60 @@ def test_cheap_extract_ignores_native_bloat():
 def test_scan_from_side_effect_anchor_reaches_early_dialogue(tmp_path: Path):
     hot = tmp_path / "hot.jsonl"
     anchor_off = _write_wall_hot(hot, bloat_native=False)
-    speech_n, new_earliest, texts, _ = _scan_from(hot, anchor_off)
-    assert speech_n >= 25, speech_n
-    assert new_earliest < anchor_off
-    assert any("early user turn" in t or "early agent reply" in t for t in texts), texts[:5]
+    t0 = time.perf_counter()
+    result = scan_older_history_events(
+        str(hot), anchor_off, "hot", speech_target=25, window=64 * 1024
+    )
+    dt = time.perf_counter() - t0
+    assert result["speech_n"] >= 25, result
+    assert result["new_earliest"] < anchor_off
+    assert dt < 2.0, f"too slow {dt:.2f}s"
+    texts = []
+    for ev in result["events"]:
+        c = (ev.get("params") or {}).get("update", {}).get("content") or {}
+        texts.append(c.get("text", "") if isinstance(c, dict) else "")
+    assert any("early user turn" in t or "early agent reply" in t for t in texts), texts[:8]
 
 
 def test_scan_with_native_bloat_is_fast(tmp_path: Path):
     hot = tmp_path / "hot.jsonl"
     anchor_off = _write_wall_hot(hot, bloat_native=True)
     t0 = time.perf_counter()
-    speech_n, new_earliest, texts, _ = _scan_from(hot, anchor_off)
+    result = scan_older_history_events(
+        str(hot), anchor_off, "hot", speech_target=25, window=64 * 1024
+    )
     dt = time.perf_counter() - t0
-    assert speech_n >= 25, speech_n
-    assert new_earliest < anchor_off
+    assert result["speech_n"] >= 25, result
+    assert result["new_earliest"] < anchor_off
     assert dt < 2.0, f"too slow {dt:.2f}s — would freeze scroll"
-    assert any("early" in t for t in texts), texts[:5]
+    texts = []
+    for ev in result["events"]:
+        c = (ev.get("params") or {}).get("update", {}).get("content") or {}
+        texts.append(c.get("text", "") if isinstance(c, dict) else "")
+    assert any("early" in t for t in texts), texts[:8]
+
+
+def test_fat_line_longer_than_window_does_not_spin(tmp_path: Path):
+    """The Astro wall bug: tool_result line > window pins cursor forever."""
+    hot = tmp_path / "hot.jsonl"
+    anchor_off = _write_wall_hot(hot, fat_tool=True)
+    # tiny window forces the fat tool line to span the entire read window
+    t0 = time.perf_counter()
+    result = scan_older_history_events(
+        str(hot),
+        anchor_off,
+        "hot",
+        speech_target=25,
+        window=64 * 1024,  # fat tool is ~200KB+
+        max_bytes=8 * 1024 * 1024,
+    )
+    dt = time.perf_counter() - t0
+    assert dt < 2.0, f"spin/stuck {dt:.2f}s result={result}"
+    assert result["iterations"] < 500, result
+    assert result["speech_n"] >= 25, result
+    assert result["new_earliest"] < anchor_off
+    texts = []
+    for ev in result["events"]:
+        c = (ev.get("params") or {}).get("update", {}).get("content") or {}
+        texts.append(c.get("text", "") if isinstance(c, dict) else "")
+    assert any("early" in t for t in texts), texts[:8]

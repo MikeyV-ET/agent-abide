@@ -4387,129 +4387,23 @@ Type anything else to send a message to the agent.
     ) -> dict:
         """Worker: walk hot/updates backward; return plain event dicts (no widgets).
 
-        Uses cheap_hot_line_speech for hot text lines so we do not json.loads
-        multi-KB native blobs on every line (CPU spike + stuck loading_history).
+        Delegates to tui_history.scan_older_history_events so fat lines longer
+        than the read window cannot pin the cursor (infinite CPU spin).
         """
-        speech_target = 25
-        max_bytes = 12 * 1024 * 1024  # clear deserts / chrome walls
-        max_tool_panels = 4
-        updates_path = Path(path_str)
-
         try:
             core = str(Path(__file__).resolve().parent.parent / "core")
             if core not in sys.path:
                 sys.path.insert(0, core)
-            from tui_history import (
-                cheap_hot_line_speech,
-                is_chrome_speech,
-                line_to_tui_event,
-            )
-        except Exception:
-            cheap_hot_line_speech = None  # type: ignore
-            is_chrome_speech = lambda text: False  # type: ignore
-            line_to_tui_event = None  # type: ignore
-
-        speech_n = 0
-        tool_n = 0
-        new_earliest = earliest_offset
-        bytes_read = 0
-        cursor = earliest_offset
-        collected = []  # (line_start_offset, event_dict)
-
-        while cursor > 0 and speech_n < speech_target and bytes_read < max_bytes:
-            read_size = min(cursor, 512 * 1024)
-            seek_pos = cursor - read_size
-            with open(updates_path, "rb") as f:
-                f.seek(seek_pos)
-                if seek_pos > 0:
-                    f.readline()
-                data_start = f.tell()
-                raw = f.read(cursor - data_start)
-            bytes_read += len(raw)
-            batch = []
-            pos = data_start
-            parts = raw.split(b"\n")
-            for i, lb in enumerate(parts):
-                line_start = pos
-                blen = len(lb) + (1 if i < len(parts) - 1 else 0)
-                pos += blen
-                if not lb.strip() or line_start >= earliest_offset:
-                    continue
-                if len(lb) > 2 * 1024 * 1024:
-                    continue
-                try:
-                    l = lb.decode("utf-8", errors="replace")
-                except Exception:
-                    continue
-                batch.append((line_start, l))
-
-            for line_start, line in reversed(batch):
-                # HOT fast path: speech without full parse
-                if hist_kind == "hot" and cheap_hot_line_speech is not None:
-                    hit = cheap_hot_line_speech(line)
-                    if hit is not None:
-                        su, text, _role = hit
-                        event = {
-                            "params": {
-                                "update": {
-                                    "sessionUpdate": su,
-                                    "content": {"text": text},
-                                }
-                            }
-                        }
-                        collected.append((line_start, event))
-                        new_earliest = line_start
-                        if is_chrome_speech(text):
-                            continue
-                        speech_n += 1
-                        if speech_n >= speech_target:
-                            break
-                        continue
-
-                # Fallback: full line_to_tui_event (tools, fat thin-extract, updates)
-                if line_to_tui_event is None:
-                    continue
-                # Skip enormous lines unless they look like tool completions
-                if len(line) > 64 * 1024 and "tool_call" not in line and "tool_result" not in line:
-                    continue
-                event = line_to_tui_event(line, hist_kind)
-                if not event:
-                    continue
-                update = (event.get("params") or {}).get("update") or {}
-                et = update.get("sessionUpdate", "")
-                if et in (
-                    "user_message_chunk",
-                    "agent_message_chunk",
-                    "agent_thought_chunk",
-                ):
-                    # already handled by cheap path for hot text; keep for updates kind
-                    c = update.get("content") or {}
-                    text = c.get("text", "") if isinstance(c, dict) else ""
-                    if not str(text).strip():
-                        continue
-                    collected.append((line_start, event))
-                    new_earliest = line_start
-                    if is_chrome_speech(str(text)):
-                        continue
-                    speech_n += 1
-                    if speech_n >= speech_target:
-                        break
-                elif et in ("tool_call", "tool_call_update") and tool_n < max_tool_panels:
-                    collected.append((line_start, event))
-                    tool_n += 1
-                    new_earliest = min(new_earliest, line_start)
-            cursor = data_start
-            if data_start <= 0:
-                new_earliest = 0
-                break
-
-        collected.sort(key=lambda t: t[0])
-        return {
-            "events": [e for _, e in collected],
-            "new_earliest": max(0, int(new_earliest)),
-            "speech_n": speech_n,
-            "bytes_read": bytes_read,
-        }
+            from tui_history import scan_older_history_events
+        except Exception as e:
+            return {
+                "events": [],
+                "new_earliest": max(0, int(earliest_offset)),
+                "speech_n": 0,
+                "bytes_read": 0,
+                "error": str(e),
+            }
+        return scan_older_history_events(path_str, earliest_offset, hist_kind)
 
     def _apply_older_history_mount(
         self, agent_name: str, payload: dict, first_child

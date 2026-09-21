@@ -381,6 +381,14 @@ class ClaudeBackend(AgentBackend):
         texts = getattr(self, "_injected_texts", None) or []
         return any(text == t or text.strip() == t.strip() for t in texts)
 
+    @property
+    def session_limited(self) -> bool:
+        return bool(getattr(self, "_session_limited", False))
+
+    @property
+    def session_limit_info(self):
+        return getattr(self, "_session_limit_info", None)
+
     async def send_prompt(self, text: str) -> Any:
         if not self._proc or not self._proc.stdin:
             raise RuntimeError("Claude backend not started")
@@ -441,6 +449,30 @@ class ClaudeBackend(AgentBackend):
             frame_type = frame.get("type", "")
 
             if frame_type == "result":
+                try:
+                    from session_limit import inspect_limit_text
+                    blob = " ".join(
+                        str(x)
+                        for x in (
+                            frame.get("result"),
+                            frame.get("error"),
+                            frame.get("errors"),
+                            frame.get("stop_reason"),
+                        )
+                        if x
+                    )
+                    info = inspect_limit_text(blob, source="claude_result")
+                    if info.detected:
+                        self._session_limited = True
+                        self._session_limit_info = info
+                        stop_reason = "session_limit"
+                        print(
+                            "[claude_backend] SESSION LIMIT detected (reset=%s)"
+                            % (info.reset_unix,)
+                        )
+                except Exception as e:
+                    print("[claude_backend] session_limit inspect failed: %s" % e)
+
                 usage = frame.get("usage", {})
                 turn_input = usage.get("input_tokens", 0)
                 turn_output = usage.get("output_tokens", 0)
@@ -505,6 +537,19 @@ class ClaudeBackend(AgentBackend):
                 except Exception:
                     pass
 
+        if getattr(self, "_session_limited", False):
+            stop_reason = "session_limit"
+        try:
+            from session_limit import inspect_limit_text
+            joined = "".join(speech_chunks)
+            info = inspect_limit_text(joined, source="claude_speech")
+            if info.detected:
+                self._session_limited = True
+                self._session_limit_info = info
+                stop_reason = "session_limit"
+        except Exception:
+            pass
+
         return ResponseResult(
             speech="".join(speech_chunks),
             thoughts="".join(thought_chunks),
@@ -529,6 +574,14 @@ class ClaudeBackend(AgentBackend):
                         speech_chunks.append(text)
                         if on_speech_chunk:
                             on_speech_chunk(text)
+                        try:
+                            from session_limit import inspect_limit_text
+                            info = inspect_limit_text(text, source="claude_assistant")
+                            if info.detected:
+                                self._session_limited = True
+                                self._session_limit_info = info
+                        except Exception:
+                            pass
                 elif block_type == "thinking":
                     thought_text = block.get("thinking", "")
                     if thought_text:

@@ -447,6 +447,51 @@ class TurnEngine:
         self.total_tokens = self.backend.total_tokens
         self.turns_since_compaction += 1
 
+        # Session / usage limit (Claude Max etc.)
+        try:
+            result_sr = getattr(result, "stop_reason", "") or ""
+            limited = (
+                result_sr == "session_limit"
+                or getattr(self.backend, "session_limited", False)
+            )
+            if not limited and result.speech:
+                from session_limit import inspect_limit_text
+                limited = inspect_limit_text(result.speech).detected
+            if limited:
+                from session_limit import (
+                    inspect_limit_text,
+                    handle_session_limit,
+                    SessionLimitInfo,
+                )
+                info = getattr(self.backend, "session_limit_info", None)
+                if info is None or not getattr(info, "detected", False):
+                    info = inspect_limit_text(
+                        result.speech or result_sr, source="turn_engine"
+                    )
+                if not info.detected:
+                    info = SessionLimitInfo(
+                        detected=True, source="stop_reason", reason="session_limit"
+                    )
+                handle_session_limit(
+                    agent_name,
+                    info,
+                    env=self.env,
+                    total_tokens=self.total_tokens,
+                    context_window=self.context_window,
+                )
+                # Park continues: long delay or until_event
+                from session_limit import seconds_until_reset
+                delay_s = seconds_until_reset(info)
+                if delay_s is None:
+                    delay_s = 3600.0
+                self.next_turn_delay = max(60.0, delay_s)
+                self.delay_text = "session_limit park"
+                print(
+                    f"[asdaaas] session_limit park: next continue in {self.next_turn_delay:.0f}s"
+                )
+        except Exception as e:
+            print(f"[asdaaas] session_limit handle failed: {e}")
+
         dr = DeliverResult()
         dr.speech = result.speech if result.speech else ""
         dr.thoughts = result.thoughts if hasattr(result, 'thoughts') and result.thoughts else ""
@@ -1214,8 +1259,31 @@ class TurnEngine:
                     since = obs.get("since", 0)
                     stuck_dur = time.time() - since if since else 0
                     print(f"[asdaaas] Observer: binary STUCK ({stuck_dur:.0f}s) — skipping continue")
-                    write_health(agent_name, "active", f"observer_stuck ({stuck_dur:.0f}s)",
-                                self.total_tokens, self.context_window, env=self.env)
+                    # If we already parked for session_limit, keep that status visible
+                    try:
+                        from session_limit import read_park_state
+                        from asdaaas import agent_dir as _ad
+                        park = read_park_state(_ad(agent_name, env=self.env))
+                    except Exception:
+                        park = None
+                    if park:
+                        write_health(
+                            agent_name,
+                            "session_limited",
+                            (park.get("detail") or park.get("reason") or "session_limited")[:120],
+                            self.total_tokens,
+                            self.context_window,
+                            env=self.env,
+                        )
+                    else:
+                        write_health(
+                            agent_name,
+                            "active",
+                            f"observer_stuck ({stuck_dur:.0f}s)",
+                            self.total_tokens,
+                            self.context_window,
+                            env=self.env,
+                        )
                     await asyncio.sleep(5.0)
                     return result
 

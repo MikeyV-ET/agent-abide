@@ -2344,6 +2344,19 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
             pass
     _current_session_id = sid
     _rt.current_session_id = sid
+    try:
+        from session_limit import clear_park_state, read_park_state
+        _park = read_park_state(agent_dir(agent_name, env=env))
+        if _park:
+            print("[asdaaas] Clearing session_limit park after start")
+            clear_park_state(agent_dir(agent_name, env=env))
+            write_conversation(
+                agent_name, "system",
+                "[aa.control] session_limit cleared — back online; check queued messages",
+                env=env, kind="control",
+            )
+    except Exception as _e:
+        print("[asdaaas] session_limit park clear: %s" % _e)
     _current_backend_type = config.agent_backend(agent_name) if config else "grok"
     _rt.current_backend_type = config.agent_backend(agent_name) if config else "grok"
     print(f"[asdaaas] Model: {_current_model_id}")

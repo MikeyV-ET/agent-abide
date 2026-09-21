@@ -166,8 +166,25 @@ def park_path(agent_dir: Path) -> Path:
 
 
 def write_park_state(agent_dir: Path, info: SessionLimitInfo) -> Path:
+    """Write/update park file. **Preserves original parked_at** if already parked.
+
+    Astro 2026-09-21: re-park at boot overwrote T1 to "now", so wake notice
+    said away 9s instead of ~7h. T1 must be first park time.
+    """
     path = park_path(agent_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    parked_at = now
+    parked_at_iso = datetime.now(timezone.utc).isoformat()
+    existing = read_park_state(agent_dir)
+    if existing and existing.get("status") == "session_limited":
+        if existing.get("parked_at") is not None:
+            try:
+                parked_at = float(existing["parked_at"])
+            except (TypeError, ValueError):
+                pass
+        if existing.get("parked_at_iso"):
+            parked_at_iso = str(existing["parked_at_iso"])
     data = {
         "status": "session_limited",
         "reason": info.reason,
@@ -179,8 +196,10 @@ def write_park_state(agent_dir: Path, info: SessionLimitInfo) -> Path:
             if info.reset_unix
             else None
         ),
-        "parked_at": time.time(),
-        "parked_at_iso": datetime.now(timezone.utc).isoformat(),
+        "parked_at": parked_at,
+        "parked_at_iso": parked_at_iso,
+        "updated_at": now,
+        "updated_at_iso": datetime.now(timezone.utc).isoformat(),
     }
     tmp = str(path) + ".tmp"
     with open(tmp, "w") as f:
@@ -442,9 +461,29 @@ def handle_session_limit(
     from asdaaas import agent_dir, write_health, write_conversation, schedule_self_restart
 
     adir = agent_dir(agent_name, env=env)
-    park = write_park_state(adir, info)
 
     reset_s = seconds_until_reset(info)
+    if reset_s is not None and reset_s <= 0:
+        # Limit text with reset already past (or clock skew). Do not re-park
+        # with parked_at=now — that produced Astro's bogus T1 at boot.
+        print(
+            f"[session_limit] {agent_name}: limit noted but reset already past "
+            f"(reset_s={reset_s:.0f}) — reconcile instead of re-park"
+        )
+        rec = reconcile_session_park(agent_name, env=env)
+        return {
+            "delay_s": 0.0,
+            "delay_s_full": 0.0,
+            "reset_unix": info.reset_unix,
+            "park_path": str(park_path(adir)),
+            "detail": "session_limit reset already past",
+            "parked": False,
+            "already_expired": True,
+            "reconcile": rec,
+        }
+
+    park = write_park_state(adir, info)
+
     if reset_s is None:
         # Unknown reset: park 1h then retry wake (better than STUCK forever)
         reset_s = 3600.0

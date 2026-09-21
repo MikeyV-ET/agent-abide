@@ -92,3 +92,51 @@ def test_handle_schedules_restart_even_for_long_park(tmp_path: Path, monkeypatch
     assert called.get("delay_s", 0) >= 9000
     assert out["delay_s"] <= 600  # chunked in-process
     assert out.get("delay_s_full", 0) >= 9000
+
+
+def test_write_park_preserves_original_t1(tmp_path: Path):
+    now = time.time()
+    info1 = SessionLimitInfo(
+        detected=True, reason="session_limit", reset_unix=now + 5000,
+        raw_snippet="first",
+    )
+    write_park_state(tmp_path, info1)
+    p1 = read_park_state(tmp_path)
+    t1 = p1["parked_at"]
+    time.sleep(0.05)
+    info2 = SessionLimitInfo(
+        detected=True, reason="session_limit", reset_unix=now + 4000,
+        raw_snippet="re-park",
+    )
+    write_park_state(tmp_path, info2)
+    p2 = read_park_state(tmp_path)
+    assert p2["parked_at"] == t1
+    assert p2["parked_at_iso"] == p1["parked_at_iso"]
+    assert p2["snippet"] == "re-park"
+    assert "updated_at" in p2
+
+
+def test_handle_expired_reset_does_not_repark(tmp_path: Path, monkeypatch):
+    now = time.time()
+    info = SessionLimitInfo(
+        detected=True,
+        reason="session_limit",
+        reset_unix=now - 100,
+        raw_snippet="resets 11:40am",
+    )
+    import asdaaas as aa
+    monkeypatch.setattr(aa, "agent_dir", lambda name, env=None: tmp_path)
+    monkeypatch.setattr(aa, "write_health", lambda *a, **k: None)
+    monkeypatch.setattr(aa, "write_conversation", lambda *a, **k: None)
+    monkeypatch.setattr(aa, "schedule_self_restart", lambda *a, **k: True)
+    # seed old park with real T1
+    old = SessionLimitInfo(
+        detected=True, reason="session_limit", reset_unix=now - 100
+    )
+    write_park_state(tmp_path, old)
+    real_t1 = read_park_state(tmp_path)["parked_at"]
+    out = handle_session_limit("Astro", info, env=None)
+    assert out.get("already_expired") is True
+    assert out.get("parked") is False
+    # should have cleared via reconcile
+    assert read_park_state(tmp_path) is None

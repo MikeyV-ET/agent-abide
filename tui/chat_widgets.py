@@ -85,7 +85,7 @@ class ToolCallPanel(Static):
     MAX_EXPANDED_LINES = 80
     MAX_STORED_CHARS = 65536
     MAX_ACTIVE_LINES = 15
-    COMMAND_MAX_CHARS = 240
+    COMMAND_MAX_CHARS = 320
 
     def __init__(self, tool_id: str, title: str, kind: str = "", ts: str = "", **kwargs):
         super().__init__(**kwargs)
@@ -112,22 +112,20 @@ class ToolCallPanel(Static):
             return
         first = str(command).strip()
         if len(first) > self.COMMAND_MAX_CHARS:
+            # middle ellipsis already applied by compact helper; hard cap
             first = first[: self.COMMAND_MAX_CHARS - 1] + "…"
 
         def _weak(s: str) -> bool:
             low = s.lower().rstrip(" …")
-            return low.startswith("cd ") or low in ("run_terminal_command", "tool", "")
+            return low in ("run_terminal_command", "tool", "") or (
+                low.startswith("cd ") and "&&" not in low and "sed" not in low and "rg" not in low
+            )
 
-        # Don't replace a stronger command with a weaker one
         if self.tool_command:
             if _weak(first) and not _weak(self.tool_command):
                 return
-            if (
-                not _weak(first)
-                and _weak(self.tool_command)
-            ):
-                pass  # upgrade cd → sed
-            elif len(first) < len(self.tool_command) and first.rstrip(" …") in self.tool_command:
+            # Prefer longer/more complete summaries (full script > single line)
+            if len(first) + 10 < len(self.tool_command) and first.split("&&")[0].strip() in self.tool_command:
                 return
         self.tool_command = first
         self.refresh(layout=True)

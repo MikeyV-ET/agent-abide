@@ -3764,95 +3764,82 @@ Type anything else to send a message to the agent.
 
 
     def _tool_command_from_update(self, update: dict) -> str:
-        """Best-effort shell/args string for sticky tool panel command line.
+        """Sticky command line for tool panels.
 
-        Multiline scripts often start with `cd …` then the real work. Prefer a
-        meaningful line (sed/rg/python/…) over a bare cd, and keep description
-        as a short fallback.
+        Prefer a faithful summary of what ran, not a single "interesting" line
+        that can disagree with stdout (e.g. multiline cd+sed+rg where scorer
+        picked rg but body is sed dump).
+
+        Order:
+          1) full command string, compacted (keep multiple steps)
+          2) Execute `…` title body
+          3) description as last resort
         """
-        candidates = []
-
-        def _add(s: str):
-            if isinstance(s, str) and s.strip():
-                candidates.append(s.strip())
+        command = None
+        description = None
 
         ri = update.get("rawInput")
         if isinstance(ri, dict):
-            for k in ("command", "cmd", "query", "path", "pattern"):
+            for k in ("command", "cmd"):
                 v = ri.get(k)
-                if isinstance(v, str):
-                    _add(v)
-            desc = ri.get("description")
-            if isinstance(desc, str):
-                _add(desc)
-        elif isinstance(ri, str):
-            _add(ri)
+                if isinstance(v, str) and v.strip():
+                    command = v.strip()
+                    break
+            d = ri.get("description")
+            if isinstance(d, str) and d.strip():
+                description = d.strip()
+        elif isinstance(ri, str) and ri.strip():
+            command = ri.strip()
 
-        for k in ("command", "arguments", "args", "input"):
-            v = update.get(k)
-            if isinstance(v, str):
-                _add(v)
-            elif isinstance(v, dict):
-                for kk in ("command", "cmd", "description"):
-                    if isinstance(v.get(kk), str):
-                        _add(v[kk])
+        if command is None:
+            for k in ("command", "arguments", "args", "input"):
+                v = update.get(k)
+                if isinstance(v, str) and v.strip():
+                    command = v.strip()
+                    break
+                if isinstance(v, dict):
+                    c = v.get("command") or v.get("cmd")
+                    if isinstance(c, str) and c.strip():
+                        command = c.strip()
+                        break
+                    d = v.get("description")
+                    if isinstance(d, str) and d.strip() and not description:
+                        description = d.strip()
 
         title = (update.get("title") or "").strip()
-        if title.lower().startswith("execute `"):
+        if command is None and title.lower().startswith("execute `"):
             rest = title[9:]
+            # may be multiline until closing `
             if "`" in rest:
-                _add(rest.split("`")[0])
+                command = rest[: rest.rfind("`")].strip()
             else:
-                _add(rest)
+                command = rest.strip()
 
-        if not candidates:
-            return ""
+        if command:
+            return self._compact_shell_command(command)
+        if description:
+            return description[:240]
+        return ""
 
-        # Expand multiline: pick best single-line summary
-        lines = []
-        for c in candidates:
-            for ln in c.splitlines():
-                s = ln.strip()
-                if not s or s.startswith("#"):
-                    continue
-                lines.append(s)
-
-        if not lines:
-            return candidates[0].splitlines()[0][:240]
-
-        def score(ln: str) -> tuple:
-            low = ln.lower()
-            # demote pure cd / export / true
-            if low.startswith("cd ") and "&&" not in low and ";" not in low:
-                return (0, -len(ln))
-            if low in ("true", "false", "pwd"):
-                return (0, -len(ln))
-            # promote real work
-            boost = 0
-            for tok in (
-                "sed", "rg", "grep", "python", "git", "cat", "ls", "curl",
-                "pytest", "npm", "cargo", "make", "ssh", "docker",
-            ):
-                if tok in low:
-                    boost += 5
-            if low.startswith("sudo ") or "<<" in ln:
-                boost += 2
-            return (1 + boost, -abs(len(ln) - 80))  # prefer ~80 col
-
-        lines_sorted = sorted(set(lines), key=score, reverse=True)
-        best = lines_sorted[0]
-        # If best is still cd but we have better later in original order
-        if best.lower().startswith("cd ") and len(lines) > 1:
-            for ln in lines:
-                if not ln.lower().startswith("cd "):
-                    best = ln
-                    break
-        if len(best) > 240:
-            best = best[:237] + "…"
-        # Note multiline
-        if len(lines) > 1 and not best.endswith("…"):
-            best = best + " …"
-        return best
+    @staticmethod
+    def _compact_shell_command(command: str, max_chars: int = 240) -> str:
+        """Collapse multiline script to one sticky line without dropping steps."""
+        parts = []
+        for ln in command.splitlines():
+            s = ln.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts.append(s)
+        if not parts:
+            return command.strip()[:max_chars]
+        # Join steps so cd+sed+rg all visible (truncated as a whole)
+        joined = " && ".join(parts)
+        if len(joined) <= max_chars:
+            return joined
+        # Keep start (context) and end (often the real work)
+        keep_head = max_chars // 2 - 2
+        keep_tail = max_chars - keep_head - 5
+        return joined[:keep_head].rstrip() + " … " + joined[-keep_tail:].lstrip()
 
     def _tool_update_blob(self, update: dict) -> str:
         """Flatten tool_call / tool_call_update fields for delay detection."""

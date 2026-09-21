@@ -3764,37 +3764,95 @@ Type anything else to send a message to the agent.
 
 
     def _tool_command_from_update(self, update: dict) -> str:
-        """Best-effort shell/args string for sticky tool panel command line."""
+        """Best-effort shell/args string for sticky tool panel command line.
+
+        Multiline scripts often start with `cd …` then the real work. Prefer a
+        meaningful line (sed/rg/python/…) over a bare cd, and keep description
+        as a short fallback.
+        """
+        candidates = []
+
+        def _add(s: str):
+            if isinstance(s, str) and s.strip():
+                candidates.append(s.strip())
+
         ri = update.get("rawInput")
         if isinstance(ri, dict):
             for k in ("command", "cmd", "query", "path", "pattern"):
                 v = ri.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-            try:
-                import json as _json
-                return _json.dumps(ri, ensure_ascii=False)[:400]
-            except Exception:
-                return str(ri)[:400]
-        if isinstance(ri, str) and ri.strip():
-            return ri.strip()
+                if isinstance(v, str):
+                    _add(v)
+            desc = ri.get("description")
+            if isinstance(desc, str):
+                _add(desc)
+        elif isinstance(ri, str):
+            _add(ri)
+
         for k in ("command", "arguments", "args", "input"):
             v = update.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-            if isinstance(v, dict):
-                c = v.get("command") or v.get("cmd")
-                if isinstance(c, str) and c.strip():
-                    return c.strip()
+            if isinstance(v, str):
+                _add(v)
+            elif isinstance(v, dict):
+                for kk in ("command", "cmd", "description"):
+                    if isinstance(v.get(kk), str):
+                        _add(v[kk])
+
         title = (update.get("title") or "").strip()
-        if title.lower().startswith("execute `") and title.endswith("`"):
-            return title[9:-1].strip()
         if title.lower().startswith("execute `"):
-            # multiline title
             rest = title[9:]
             if "`" in rest:
-                return rest.split("`")[0].strip()
-        return ""
+                _add(rest.split("`")[0])
+            else:
+                _add(rest)
+
+        if not candidates:
+            return ""
+
+        # Expand multiline: pick best single-line summary
+        lines = []
+        for c in candidates:
+            for ln in c.splitlines():
+                s = ln.strip()
+                if not s or s.startswith("#"):
+                    continue
+                lines.append(s)
+
+        if not lines:
+            return candidates[0].splitlines()[0][:240]
+
+        def score(ln: str) -> tuple:
+            low = ln.lower()
+            # demote pure cd / export / true
+            if low.startswith("cd ") and "&&" not in low and ";" not in low:
+                return (0, -len(ln))
+            if low in ("true", "false", "pwd"):
+                return (0, -len(ln))
+            # promote real work
+            boost = 0
+            for tok in (
+                "sed", "rg", "grep", "python", "git", "cat", "ls", "curl",
+                "pytest", "npm", "cargo", "make", "ssh", "docker",
+            ):
+                if tok in low:
+                    boost += 5
+            if low.startswith("sudo ") or "<<" in ln:
+                boost += 2
+            return (1 + boost, -abs(len(ln) - 80))  # prefer ~80 col
+
+        lines_sorted = sorted(set(lines), key=score, reverse=True)
+        best = lines_sorted[0]
+        # If best is still cd but we have better later in original order
+        if best.lower().startswith("cd ") and len(lines) > 1:
+            for ln in lines:
+                if not ln.lower().startswith("cd "):
+                    best = ln
+                    break
+        if len(best) > 240:
+            best = best[:237] + "…"
+        # Note multiline
+        if len(lines) > 1 and not best.endswith("…"):
+            best = best + " …"
+        return best
 
     def _tool_update_blob(self, update: dict) -> str:
         """Flatten tool_call / tool_call_update fields for delay detection."""

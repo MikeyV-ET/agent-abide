@@ -110,18 +110,25 @@ class ToolCallPanel(Static):
         """Record the invocation (args / shell). Sticky across set_output."""
         if not command or not str(command).strip():
             return
-        cmd = str(command).strip()
-        # Prefer a single-line summary for the header row
-        first = cmd.splitlines()[0].strip()
-        if len(cmd.splitlines()) > 1:
-            first = first + " …"
+        first = str(command).strip()
         if len(first) > self.COMMAND_MAX_CHARS:
             first = first[: self.COMMAND_MAX_CHARS - 1] + "…"
-        # Don't replace a more specific command with a weaker one
-        if self.tool_command and len(first) < len(self.tool_command) and first in self.tool_command:
-            return
-        if self.tool_command and self.tool_command.startswith(first) and len(self.tool_command) > len(first):
-            return
+
+        def _weak(s: str) -> bool:
+            low = s.lower().rstrip(" …")
+            return low.startswith("cd ") or low in ("run_terminal_command", "tool", "")
+
+        # Don't replace a stronger command with a weaker one
+        if self.tool_command:
+            if _weak(first) and not _weak(self.tool_command):
+                return
+            if (
+                not _weak(first)
+                and _weak(self.tool_command)
+            ):
+                pass  # upgrade cd → sed
+            elif len(first) < len(self.tool_command) and first.rstrip(" …") in self.tool_command:
+                return
         self.tool_command = first
         self.refresh(layout=True)
 

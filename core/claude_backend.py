@@ -320,6 +320,19 @@ class ClaudeBackend(AgentBackend):
         """
         if not text or not self._agent_home or not self._agent_name:
             return
+
+        # Catch the hot ingest up to the transcript FIRST. The TUI orders by
+        # stream_seq, and the ingest lags the transcript: without this the
+        # interjection takes the next seq while speech and tool calls that
+        # happened earlier are still unread, so they get ingested afterwards
+        # with higher numbers and the panel draws above things that preceded
+        # it. (Seen live: seq 2168 at 21:20:12 above seq 2170 from 21:20:06.)
+        try:
+            self.sync_hot_stream()
+        except Exception as e:
+            # Worth losing ordering over, not worth losing the record over.
+            print(f"[claude_backend] pre-record hot sync failed: {e}")
+
         from aa_stream import (
             append_hot_events,
             build_event,

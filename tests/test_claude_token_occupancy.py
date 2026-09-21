@@ -288,3 +288,44 @@ def test_record_advances_stream_seq(tmp_path):
 def test_record_is_a_noop_without_history_configured():
     """Hot ingest off -> nothing to write to; must not raise."""
     ClaudeBackend()._record_stdin_interjection("hello")
+
+
+def test_record_catches_the_hot_ingest_up_before_taking_a_seq(tmp_path):
+    """Order in the TUI is stream_seq order, so the interjection must be numbered
+    AFTER everything that happened before it.
+
+    Seen live: the recorder took seq 2168 at 21:20:12 while the hot ingest had only
+    reached 21:20:03, so speech from 21:20:06 and a tool call from 21:20:09 were
+    ingested afterwards as 2169-2171 — and the panel drew above things that
+    preceded it. Syncing the ingest first puts the panel where it happened.
+    """
+    be = _backend_with_history(tmp_path)
+    calls = []
+    be.sync_hot_stream = lambda *a, **k: calls.append("sync") or {"status": "ok"}
+
+    import aa_stream
+    real_append = aa_stream.append_hot_events
+
+    def spy_append(fs_dir, events):
+        calls.append("append")
+        return real_append(fs_dir, events)
+
+    aa_stream.append_hot_events = spy_append
+    try:
+        be._record_stdin_interjection("late arrival")
+    finally:
+        aa_stream.append_hot_events = real_append
+
+    assert calls[:2] == ["sync", "append"], calls
+
+
+def test_record_still_writes_if_the_catch_up_fails(tmp_path):
+    """A failed ingest catch-up costs ordering, not the record itself."""
+    be = _backend_with_history(tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("ingest broke")
+
+    be.sync_hot_stream = boom
+    be._record_stdin_interjection("still recorded")
+    assert _hot_events(tmp_path)[-1]["body"]["text"] == "still recorded"

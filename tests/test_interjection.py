@@ -495,14 +495,19 @@ class TestEnvSetup:
         script.write_text("#!/bin/bash\ntrue\n")
 
         # Run as "bash script.sh" — no -c flag, $- will NOT contain 'c'
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("BASH_ENV", "AGENT_HOME", "AGENT_NAME")
+        }
+        env.update({
+            "BASH_ENV": str(HOOK_SCRIPT),
+            "AGENT_NAME": "TestAgent",
+            "HOME": str(tmp_path),
+            "AGENT_HOME": str(tmp_path / "agents" / "TestAgent"),
+        })
         result = subprocess.run(
             ["/bin/bash", str(script)],
-            env={
-                **os.environ,
-                "BASH_ENV": str(HOOK_SCRIPT),
-                "AGENT_NAME": "TestAgent",
-                "HOME": str(tmp_path),
-            },
+            env=env,
             capture_output=True, text=True, timeout=5,
         )
         assert result.returncode == 0
@@ -517,17 +522,23 @@ class TestEnvSetup:
         msg_file = intj_dir / "msg_test.txt"
         msg_file.write_text("should be delivered\n")
 
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("BASH_ENV", "AGENT_HOME", "AGENT_NAME")
+        }
+        env.update({
+            "BASH_ENV": str(HOOK_SCRIPT),
+            "AGENT_NAME": "TestAgent",
+            "HOME": str(tmp_path),
+            # Prefer explicit home for nested paths
+            "AGENT_HOME": str(tmp_path / "agents" / "TestAgent"),
+        })
         result = subprocess.run(
             ["/bin/bash", "-c", "echo hello"],
-            env={
-                **os.environ,
-                "BASH_ENV": str(HOOK_SCRIPT),
-                "AGENT_NAME": "TestAgent",
-                "HOME": str(tmp_path),
-            },
+            env=env,
             capture_output=True, text=True, timeout=5,
         )
-        assert result.returncode == 0
+        assert result.returncode == 0, (result.stdout, result.stderr)
         assert "<interjection>" in result.stdout
         assert "should be delivered" in result.stdout
         # File should be consumed

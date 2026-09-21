@@ -194,7 +194,18 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
         "text", "text_delta", "thinking", "thinking_delta",
         "interjection", "tool_call", "tool_result",
     }
-    if isinstance(body, dict) and body_kind in paint_kinds:
+
+    def _body_worth_painting(b: dict, kind: str) -> bool:
+        """Lossy body {kind: tool_call} must not beat native with real content."""
+        if kind in ("text", "text_delta", "thinking", "thinking_delta", "interjection"):
+            return bool(b.get("text"))
+        if kind == "tool_result":
+            return bool(b.get("content") or b.get("text"))
+        if kind == "tool_call":
+            return bool(b.get("args") or b.get("name") or b.get("id") or b.get("tool_id"))
+        return False
+
+    if isinstance(body, dict) and body_kind in paint_kinds and _body_worth_painting(body, body_kind):
         # fall through to body mapping below (skip native pass-through)
         pass
     elif isinstance(native, dict):

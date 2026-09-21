@@ -925,6 +925,11 @@ class PersistenceScreen(ModalScreen[None]):
 # participates in layout. Without a window, multi-day sessions grow to 1000+
 # widgets and hundreds of MB RSS, and the TUI stops responding to input.
 MAX_SCROLLBACK_WIDGETS = 400
+# Initial catch-up speech budget. Secondary tabs used to floor at 80 because
+# lazy-load stalled on chrome walls / fat lines — that is fixed (scan_older +
+# fat-line skip). Tip stays short; PageUp owns the rest.
+DEFAULT_PRIMARY_TAIL_SPEECH = 50
+DEFAULT_SECONDARY_TAIL_SPEECH = 25
 # Prune check cadence (every N mounts/dispatches) to avoid remove thrash.
 _PRUNE_EVERY_N = 8
 
@@ -3037,11 +3042,8 @@ Type anything else to send a message to the agent.
             return
 
         is_primary = (agent_name == self._agents[0])
-        # Secondary tabs used to hardcode 30 — with -t50 primary + add Astro,
-        # Astro started in the dense evening band and scroll-up froze. Inherit -t.
-        tail_count = self._tail_count if self._tail_count else (50 if is_primary else 80)
-        if not is_primary and self._tail_count:
-            tail_count = max(int(self._tail_count), 80)  # secondary: at least 80 speech
+        # Tip only: same -t for every tab; no secondary floor. Lazy-load owns depth.
+        tail_count = self._initial_tail_speech_count(agent_name)
         should_replay = (is_primary and self._replay_mode) or (not is_primary)
 
         offset = 0
@@ -3222,12 +3224,9 @@ Type anything else to send a message to the agent.
 
         # Determine replay behavior
         is_primary = (agent_name == self._agents[0])
-        # Non-primary agents always replay; inherit CLI -t (min 80 speech)
+        # Non-primary always replays a short tip; PageUp lazy-load for older.
         should_replay = (is_primary and self._replay_mode) or (not is_primary)
-        if self._tail_count:
-            tail_count = int(self._tail_count) if is_primary else max(int(self._tail_count), 80)
-        else:
-            tail_count = 50 if is_primary else 80
+        tail_count = self._initial_tail_speech_count(agent_name)
 
         if not should_replay:
             try:
@@ -3481,11 +3480,7 @@ Type anything else to send a message to the agent.
 
         # --- Phase 1: Replay via REST if requested ---
         if should_replay:
-            tail_n = (
-                int(self._tail_count) if is_primary and self._tail_count
-                else max(int(self._tail_count or 80), 80) if not is_primary
-                else 50
-            )
+            tail_n = self._initial_tail_speech_count(agent_name)
             try:
                 import urllib.request
                 rest_url = f"{api_url}/agents/{agent_name}/messages?last={tail_n}"

@@ -222,3 +222,43 @@ def test_native_copy_is_elided_too():
     native_blob = _json.dumps(event.get("native"))
     assert len(native_blob) < 50_000
     assert "A" * 5000 not in native_blob
+
+
+def test_tail_skips_session_echo_of_stdin_inject(tmp_path: Path):
+    """Injected text already in hot as interjection; session user line must not double-paint."""
+    import json
+    from stream_adapters.claude import tail_claude_once
+    from aa_stream import resolve_history_dir, ensure_aa_stream_layout
+
+    home = tmp_path / "Astro"
+    (home / "asdaaas").mkdir(parents=True)
+    fs = ensure_aa_stream_layout(resolve_history_dir(home), "Astro")
+    # side file as recorder writes
+    (fs / "injected_stdin.jsonl").write_text(
+        json.dumps({"ts": 1.0, "text": "eric: stop wrong file"}) + "\n"
+    )
+    src = tmp_path / "sess.jsonl"
+    src.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "eric: stop wrong file"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "unrelated user line"},
+            }
+        )
+        + "\n"
+    )
+    r = tail_claude_once(home, "Astro", source=src, session_id="s")
+    assert r["status"] == "ok"
+    # only the unrelated line should land
+    hot = Path(r["hot"])
+    evs = [json.loads(l) for l in hot.read_text().splitlines() if l.strip()]
+    texts = [(e.get("body") or {}).get("text") for e in evs]
+    assert "eric: stop wrong file" not in texts
+    assert "unrelated user line" in texts

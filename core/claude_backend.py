@@ -352,6 +352,14 @@ class ClaudeBackend(AgentBackend):
         append_hot_events(fs_dir, [event])
         meta["stream_seq_next"] = seq + 1
         write_hot_meta(fs_dir, meta)
+        # Side file so session-jsonl ingest can skip the same text (avoid double TUI paint)
+        try:
+            side = fs_dir / "injected_stdin.jsonl"
+            with open(side, "a", encoding="utf-8") as f:
+                import json as _json, time as _time
+                f.write(_json.dumps({"ts": _time.time(), "text": text}) + "\n")
+        except Exception:
+            pass
 
     def was_injected(self, text: str) -> bool:
         """True if text matches a recent stdin interject (exact)."""

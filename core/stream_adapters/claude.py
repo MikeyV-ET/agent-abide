@@ -29,6 +29,30 @@ from aa_stream import (
 
 NATIVE_CLAUDE = "claude.session_jsonl.v1"
 
+def _recent_injected_texts(history_dir, limit: int = 40) -> set:
+    """Texts recorded by ClaudeBackend._record_stdin_interjection (dedupe session echo)."""
+    from pathlib import Path as _P
+    side = _P(history_dir) / "injected_stdin.jsonl"
+    if not side.is_file():
+        return set()
+    out = set()
+    try:
+        lines = side.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]
+        for ln in lines:
+            if not ln.strip():
+                continue
+            try:
+                o = json.loads(ln)
+                tx = o.get("text")
+                if isinstance(tx, str) and tx.strip():
+                    out.add(tx.strip())
+            except Exception:
+                continue
+    except Exception:
+        return set()
+    return out
+
+
 
 def _dash_encode_cwd(home: str | Path) -> str:
     s = str(home)
@@ -372,6 +396,16 @@ def tail_claude_once(
                 source_path=str(src),
                 offset=line_off,
             )
+            # Skip session echo of stdin-injected text (already hot as interjection)
+            body = ev.get("body") or {}
+            if (
+                ev.get("role") == "user"
+                and body.get("kind") == "text"
+                and isinstance(body.get("text"), str)
+            ):
+                inj = _recent_injected_texts(fs_dir)
+                if body["text"].strip() in inj:
+                    continue
             events.append(ev)
             seq += 1
 

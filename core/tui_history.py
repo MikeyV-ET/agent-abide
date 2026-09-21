@@ -279,14 +279,18 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
     if kind == "tool_call":
         tid = body.get("id") or body.get("tool_id") or ""
         name = body.get("name") or "tool"
+        st = body.get("status") or "started"
+        # Grok mid-tool frames stay kind=tool_call with status=update — treat as update
+        # so we do not re-enter _on_tool_call mount path unnecessarily.
+        su = "tool_call" if st in ("started", "pending", "running", "") else "tool_call_update"
         return _frame(
-            "tool_call",
+            su,
             {
                 "toolCallId": str(tid) if tid is not None else "",
                 "title": name,
                 "name": name,
                 "rawInput": body.get("args") or body.get("input"),
-                "status": body.get("status") or "started",
+                "status": st,
             },
         )
 

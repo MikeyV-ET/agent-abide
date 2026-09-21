@@ -3395,33 +3395,31 @@ Type anything else to send a message to the agent.
                     parsed = []
                     skip_count = 0
                     hist_kind = state.get("history_kind") or kind
-                    aa_bridge = None
-                    if hist_kind == "hot":
-                        try:
-                            core = str(Path(__file__).resolve().parent.parent / "core")
-                            if core not in sys.path:
-                                sys.path.insert(0, core)
-                            from tui_history import aa_event_to_tui_update as aa_bridge
-                        except Exception:
-                            aa_bridge = None
+                    line_bridge = None
+                    try:
+                        core = str(Path(__file__).resolve().parent.parent / "core")
+                        if core not in sys.path:
+                            sys.path.insert(0, core)
+                        from tui_history import line_to_tui_event as line_bridge
+                    except Exception:
+                        line_bridge = None
                     for line in lines:
                         if not line.strip():
                             continue
                         if len(line) > 2 * 1024 * 1024:
                             skip_count += 1
                             continue
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            skip_count += 1
-                            continue
-                        if hist_kind == "hot" and aa_bridge is not None:
-                            ev = aa_bridge(obj)
+                        if hist_kind == "hot" and line_bridge is not None:
+                            ev = line_bridge(line, "hot")
                             if ev is not None:
                                 parsed.append(ev)
-                            # else: meta chrome — skip paint
+                            else:
+                                skip_count += 1
                         else:
-                            parsed.append(obj)
+                            try:
+                                parsed.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                skip_count += 1
                     batch = coalesce_events(parsed) if hist_kind != "hot" else parsed
                     for event in batch:
                         self.call_from_thread(
@@ -3898,19 +3896,45 @@ Type anything else to send a message to the agent.
         return f"[aa.control] delay: {detail}"
 
     def _on_tool_call(self, update: dict) -> None:
-        """Handle new tool call announcement."""
-        tool_id = update.get("toolCallId", "")
-        title = update.get("title", "unknown tool")
+        """Handle new tool call announcement (or refresh existing panel).
 
-        # End current agent message block (tool call is a boundary)
+        Grok emits multiple tool_call frames per id (start + pending update).
+        Always mounting a new panel left empty title-only husks on screen while
+        completions updated a *second* panel.
+        """
+        tool_id = update.get("toolCallId", "") or ""
+        title = update.get("title", "unknown tool")
+        kind = update.get("kind", "") or ""
+
         self._current_agent_msg = None
         self._current_thinking = None
 
         content = self._content_scroll()
-        panel = ToolCallPanel(tool_id, title, ts=self._event_ts_str())
-        self._tool_panels[tool_id] = panel
-        content.mount(panel)
-        # Surface AA delay registration (prod parity)
+        existing = self._tool_panels.get(tool_id) if tool_id else None
+        if existing is not None:
+            if title and title not in ("unknown tool", "tool"):
+                existing.tool_title = title
+            if kind:
+                existing.tool_kind = kind
+            st = update.get("status")
+            if st and st not in ("update", "started", "pending"):
+                existing.set_status(st)
+            existing.refresh(layout=True)
+            panel = existing
+        else:
+            panel = ToolCallPanel(tool_id, title, kind, ts=self._event_ts_str())
+            if tool_id:
+                self._tool_panels[tool_id] = panel
+            content.mount(panel)
+            # Seed with command so we never show a blank title-only card
+            seed = self._tool_update_blob(update)
+            if seed and seed.strip():
+                seed_lines = [ln for ln in seed.splitlines() if ln.strip()]
+                preview = "\n".join(seed_lines[:6])
+                if len(preview) > 600:
+                    preview = preview[:600] + "…"
+                panel.set_output(preview)
+
         try:
             ctrl = self._delay_control_from_tool_blob(self._tool_update_blob(update))
             if ctrl:
@@ -3919,7 +3943,10 @@ Type anything else to send a message to the agent.
             self._debug(f"delay-control detect failed: {e}")
         if self._following_tail():
             content.refresh(layout=True)
-        self._debug(f"TOOL_CALL id={tool_id[:8]} title={title}")
+        self._debug(
+            f"TOOL_CALL id={(tool_id or '')[:12]} title={str(title)[:40]} "
+            f"reuse={existing is not None}"
+        )
         self._scroll_to_bottom()
 
     def _on_tool_call_update(self, update: dict) -> None:

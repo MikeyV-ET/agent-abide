@@ -735,6 +735,72 @@ def scan_older_history_events(
     }
 
 
+
+# Session meta that bloats -t catch-up without helping the operator read the tip.
+_TIP_DROP_SESSION_UPDATES = frozenset({
+    "task_completed",
+    "task_backgrounded",
+    "background_tasks",
+    "turn_completed",
+    "auto_compact_started",
+    "auto_compact_completed",
+    "compaction_checkpoint",
+    "memory_dream_queued",
+    "memory_dream_started",
+    "memory_dream_completed",
+    "hook_execution",
+})
+
+
+def thin_tip_events(
+    events: list[dict[str, Any]],
+    n_speech: int,
+    *,
+    speech_first: bool = True,
+) -> list[dict[str, Any]]:
+    """Catch-up tip: last N *dialogue* speeches + collapsed tools in that span.
+
+    ``-t N`` means N real user/agent lines, not N paint widgets. Keeping every
+    tool_call + tool_call_update + task_* meta inside the speech span turned
+    ``-t50`` into ~60 speech labels and 300+ events. Collapse to one tool panel
+    per toolCallId (last state wins) and drop pure session meta.
+    """
+    if not events:
+        return []
+    if n_speech and n_speech > 0:
+        span = select_tail_events(events, n_speech, speech_first=speech_first)
+    else:
+        span = list(events)
+
+    out: list[dict[str, Any]] = []
+    # toolCallId -> index in out (for in-place replace)
+    tool_idx: dict[str, int] = {}
+
+    def _tool_id(update: dict) -> str:
+        return str(
+            update.get("toolCallId")
+            or update.get("tool_call_id")
+            or update.get("id")
+            or ""
+        )
+
+    for ev in span:
+        update = (ev.get("params") or {}).get("update") or {}
+        et = update.get("sessionUpdate", "") or ""
+        if et in _TIP_DROP_SESSION_UPDATES:
+            continue
+        if et in ("tool_call", "tool_call_update"):
+            tid = _tool_id(update) or f"anon:{id(ev)}"
+            if tid in tool_idx:
+                out[tool_idx[tid]] = ev  # last state wins
+            else:
+                tool_idx[tid] = len(out)
+                out.append(ev)
+            continue
+        out.append(ev)
+    return out
+
+
 def select_tail_events(
     events: list[dict[str, Any]],
     n: int,

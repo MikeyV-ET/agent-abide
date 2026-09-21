@@ -3267,8 +3267,9 @@ Type anything else to send a message to the agent.
                         sys.path.insert(0, core)
                     from tui_history import (
                         line_to_tui_event,
-                        select_tail_events,
+                        thin_tip_events,
                         is_speech_tui_event,
+                        is_dialogue_speech,
                     )
 
                     want = int(tail_count) if tail_count else None
@@ -3314,13 +3315,11 @@ Type anything else to send a message to the agent.
                         if want is None or speech_n >= want or seek_pos == 0:
                             break
 
-                    # select_tail on events only, preserve offsets
+                    # -t N dialogue tip; collapse tools + drop session meta
                     only_ev = [e for _, e in events]
                     if want:
-                        only_ev = select_tail_events(only_ev, want, speech_first=True)
-                        # re-slice paired events to match selected tail span
+                        only_ev = thin_tip_events(only_ev, want, speech_first=True)
                         if only_ev:
-                            # map by id of object — select returns same object refs
                             want_ids = {id(e) for e in only_ev}
                             events = [(o, e) for o, e in events if id(e) in want_ids]
                         else:
@@ -3332,6 +3331,7 @@ Type anything else to send a message to the agent.
 
                     replay_count = 0
                     speech_dispatched = 0
+                    dialogue_dispatched = 0
                     dispatch_errs = 0
                     for _off, event in events:
                         try:
@@ -3341,6 +3341,8 @@ Type anything else to send a message to the agent.
                             replay_count += 1
                             if is_speech_tui_event(event):
                                 speech_dispatched += 1
+                            if is_dialogue_speech(event):
+                                dialogue_dispatched += 1
                         except Exception as de:
                             dispatch_errs += 1
                             self._debug(f"REPLAY_DISPATCH_ERR {de!r}")
@@ -3348,11 +3350,14 @@ Type anything else to send a message to the agent.
                         self._debug(f"REPLAY dispatch_errs={dispatch_errs}")
                     self._debug(
                         f"REPLAY kind={hist_kind} dispatched={replay_count} "
-                        f"speech={speech_dispatched} raw_lines={raw_line_n}"
+                        f"dialogue={dialogue_dispatched} speech={speech_dispatched} "
+                        f"raw_lines={raw_line_n} want={want}"
                     )
-                    # Surface count once UI is up (helps verify -t N)
+                    # Honest -t accounting: dialogue is the budget; events are paint
+                    t_label = f"-t{want}" if want else "tip"
                     msg = (
-                        f"Replay: {speech_dispatched} speech / {replay_count} events"
+                        f"Replay ({t_label}): {dialogue_dispatched} dialogue"
+                        f" / {speech_dispatched} speech / {replay_count} paint"
                         f" from {hist_kind}"
                     )
                     self.call_from_thread(lambda m=msg: self.notify(m, severity="information"))

@@ -78,9 +78,15 @@ class ToolCallPanel(Static):
     Display policy (Eric 2026-08-04): tools are secondary to thinking; Grok-4.5
     tool dumps should not dominate scrollback. Default = small snippet + expand.
     Border shows HH:MM:SS + short id for citation.
+
+    SNIPPET_LINES counts newline-separated logical lines. A single huge JSON
+    line (e.g. memory_query result) has n_lines=1 but soft-wraps across the
+    viewport — _collapsed_snippet also caps chars and ~visual rows.
     """
 
     SNIPPET_LINES = 4
+    SNIPPET_MAX_CHARS = 480
+    SNIPPET_MAX_VISUAL_ROWS = 6  # ~80-col wrap budget
     MAX_EXPANDED_LINES = 80
     MAX_STORED_CHARS = 65536
     MAX_ACTIVE_LINES = 15  # legacy alias
@@ -128,6 +134,27 @@ class ToolCallPanel(Static):
         self._collapsed = not self._collapsed
         self.refresh(layout=True)
 
+    def _collapsed_snippet(self) -> tuple[str, bool]:
+        """(snippet_text, more_hidden) — handles soft-wrapped single lines."""
+        raw = self.tool_output or ""
+        if not raw:
+            return "", False
+        lines = raw.split("\n")
+        piece = "\n".join(lines[: self.SNIPPET_LINES])
+        more = len(lines) > self.SNIPPET_LINES or len(raw) > self.SNIPPET_MAX_CHARS
+        if len(piece) > self.SNIPPET_MAX_CHARS:
+            piece = piece[: self.SNIPPET_MAX_CHARS].rstrip() + "…"
+            more = True
+        approx_rows = 0
+        for ln in piece.split("\n"):
+            approx_rows += max(1, (len(ln) + 79) // 80)
+        if approx_rows > self.SNIPPET_MAX_VISUAL_ROWS:
+            budget = self.SNIPPET_MAX_VISUAL_ROWS * 80
+            if len(piece) > budget:
+                piece = piece[:budget].rstrip() + "…"
+                more = True
+        return piece, more
+
     def _title_line(self, status_icon: str) -> str:
         kind_icons = {
             "read": "📖", "execute": "⚡", "edit": "✏️",
@@ -139,7 +166,6 @@ class ToolCallPanel(Static):
             label = self.tool_kind or "tool"
         ref = short_ref(self.tool_id)
         ts = self.tool_ts or ""
-        # Prefer clock time for citation ("the 15:08 tool")
         if ts and ref:
             return f"{kind_icon} {label} · {ts} · {ref} {status_icon}"
         if ts:
@@ -183,14 +209,20 @@ class ToolCallPanel(Static):
                 empty = f"(no output yet — cite {cite})" if cite else "(no output yet)"
                 body.append(empty, style=f"italic {Theme.DARK4}")
             else:
-                snippet = lines[: self.SNIPPET_LINES]
-                body.append("\n".join(snippet), style=Theme.GRAY)
-                hidden = n_lines - len(snippet)
-                if hidden > 0 or len(self.tool_output) > 200:
-                    body.append(
-                        f"\n  ▸ +{max(hidden, 0)} lines — click to expand",
-                        style=Theme.DARK4,
-                    )
+                snippet, more = self._collapsed_snippet()
+                body.append(snippet, style=Theme.GRAY)
+                if more or n_lines > self.SNIPPET_LINES or len(self.tool_output) > 200:
+                    hidden = max(0, n_lines - self.SNIPPET_LINES)
+                    if hidden > 0:
+                        body.append(
+                            f"\n  ▸ +{hidden} lines — click to expand",
+                            style=Theme.DARK4,
+                        )
+                    else:
+                        body.append(
+                            "\n  ▸ truncated — click to expand",
+                            style=Theme.DARK4,
+                        )
                 else:
                     body.append("\n  ▸ click to expand", style=Theme.DARK4)
             return body

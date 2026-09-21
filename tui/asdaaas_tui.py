@@ -2093,7 +2093,22 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
+    def _initial_tail_speech_count(self, agent_name: str) -> int:
+        """Speech events to mount on first catch-up for this tab.
+
+        Primary and secondary share CLI ``-t N`` when set. Without ``-t``,
+        primary defaults higher only because it is the session you opened on;
+        secondary/[+] tabs stay light. Deeper history is lazy-load (PageUp),
+        not a bigger preload — the old secondary floor of 80 was a workaround
+        for broken reverse scan.
+        """
+        if self._tail_count:
+            return max(1, int(self._tail_count))
+        is_primary = bool(self._agents) and agent_name == self._agents[0]
+        return DEFAULT_PRIMARY_TAIL_SPEECH if is_primary else DEFAULT_SECONDARY_TAIL_SPEECH
+
     def action_add_agent_menu(self) -> None:
+
         """Open picker of agents.json entries not already in the tab bar."""
         open_set = set(self._agents)
         candidates = [n for n in Config.list_catalog_agents() if n not in open_set]

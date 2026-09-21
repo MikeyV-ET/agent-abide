@@ -6,6 +6,8 @@ existing TUI _dispatch_event / ChatState reducers keep working.
 """
 from __future__ import annotations
 
+import re
+
 import os
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -417,22 +419,42 @@ def cheap_hot_line_speech(line: str) -> Optional[tuple[str, str, str]]:
 def is_chrome_speech(text: str) -> bool:
     """System continue / session-limit / context-left — not real dialogue.
 
-    Lazy-load must not spend its speech budget on these or scroll sticks
-    in a multi-MB wall of continues after a usage limit.
+    Lazy-load and ``-t`` tip must not spend budget on pure chrome.
+
+    asdaaas appends a footer to real user turns::
+        [Context left 248k till autocompaction | compaction available | arena | …]
+
+    Never treat ``"| compaction"`` as chrome by itself — that false-positive
+    dropped every Eric TUI message from the tip (2026-09-21), so reload ended
+    on tool panels with user chat "not there."
     """
     if not text or not isinstance(text, str):
         return True
     s = text.strip()
-    low = s.lower()
-    if low.startswith("[continue"):
+    if not s:
         return True
-    if "your turn ended" in low and "stand by" in low:
+
+    # Peel trailing context-left footer(s); classify the body only.
+    body = s
+    footer_re = re.compile(r"\n?\[context left[^\]]*\]\s*$", re.IGNORECASE)
+    while True:
+        nxt = footer_re.sub("", body).rstrip()
+        if nxt == body:
+            break
+        body = nxt
+    if not body:
         return True
-    if "session limit" in low or "you've hit your session limit" in low:
+
+    blow = body.lower()
+    if blow.startswith("[continue"):
         return True
-    if low.startswith("[context left") or "| compaction" in low:
+    if "your turn ended" in blow and "stand by" in blow:
         return True
-    if low.startswith("[aa.control]"):
+    if blow.startswith("[aa.control]"):
+        return True
+    if re.match(r"^you(?:'ve| have) hit your session limit\b", blow):
+        return True
+    if blow.startswith("[context left"):
         return True
     return False
 

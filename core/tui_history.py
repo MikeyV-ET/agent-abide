@@ -215,6 +215,28 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
             "_aa_backend": backend,
         }
 
+    if kind == "interjection":
+        if not text:
+            return None
+        # Reuse TUI InterjectionBlock path (same as tool stdout extract)
+        wrapped = f"<interjection>\n{text}\n</interjection>"
+        tid = f"ij-{abs(hash(text)) % 10_000_000}"
+        return _frame(
+            "tool_call_update",
+            {
+                "toolCallId": tid,
+                "status": "completed",
+                "title": "interjection",
+                "rawOutput": wrapped,
+                "content": [
+                    {
+                        "type": "content",
+                        "content": {"type": "text", "text": wrapped},
+                    }
+                ],
+            },
+        )
+
     if kind in ("text_delta", "text"):
         if not text:
             return None

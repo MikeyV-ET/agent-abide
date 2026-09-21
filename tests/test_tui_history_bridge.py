@@ -159,3 +159,18 @@ def test_tui_content_text_shapes():
     assert tui_content_text({"content": None}) == ""
     assert tui_content_text({"content": [{"type": "text", "text": "x"}, {"content": {"text": "y"}}]}) == "xy"
     assert tui_content_text("nope") == ""
+
+
+def test_interjection_kind_becomes_tool_update_for_block():
+    from tui_history import aa_event_to_tui_update
+    ev = {
+        "format": "aa.stream",
+        "role": "user",
+        "body": {"kind": "interjection", "text": "[eric (via tui)] hi mid-turn"},
+    }
+    u = aa_event_to_tui_update(ev)
+    assert u is not None
+    assert u["params"]["update"]["sessionUpdate"] == "tool_call_update"
+    blob = u["params"]["update"]["content"][0]["content"]["text"]
+    assert "<interjection>" in blob
+    assert "hi mid-turn" in blob

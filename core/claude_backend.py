@@ -297,6 +297,11 @@ class ClaudeBackend(AgentBackend):
             # cap list
             if len(self._injected_texts) > 50:
                 self._injected_texts = self._injected_texts[-30:]
+            # Label for TUI / speech SoR (was_injected was unused — Astro 05148cf review)
+            try:
+                self._record_stdin_interjection(text)
+            except Exception as e:
+                print(f"[claude_backend] interjection record failed: {e}")
             return True
         except Exception as e:
             print(f"[claude_backend] inject_user_message failed: {e}")

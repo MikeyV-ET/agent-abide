@@ -341,6 +341,7 @@ class AgentHeader(Static):
     delay_pattern = reactive("")
     code_version = reactive("")
     code_version_stale = reactive(False)
+    tui_version = reactive("")  # this TUI process's checkout short hash
 
     def render(self) -> Text:
         text = Text()
@@ -433,13 +434,21 @@ class AgentHeader(Static):
             text.append("  ")
             text.append(self.model_name, style=Theme.DARK4)
 
-        # Code version
-        if self.code_version:
+        # Code versions: agent asdaaas tip vs this TUI process (stale viewer catch)
+        if self.code_version or self.tui_version:
             text.append("  ")
-            if self.code_version_stale:
-                text.append(f"⚠ {self.code_version}", style=f"bold {Theme.BR_YELLOW}")
-            else:
-                text.append(self.code_version, style=Theme.DARK4)
+            if self.code_version:
+                text.append("aa:", style=Theme.GRAY)
+                if self.code_version_stale:
+                    text.append(f"⚠{self.code_version}", style=f"bold {Theme.BR_YELLOW}")
+                else:
+                    text.append(self.code_version, style=Theme.DARK4)
+            if self.tui_version:
+                text.append(" tui:", style=Theme.GRAY)
+                if self.code_version and self.tui_version != self.code_version:
+                    text.append(f"⚠{self.tui_version}", style=f"bold {Theme.BR_YELLOW}")
+                else:
+                    text.append(self.tui_version, style=Theme.DARK4)
 
         return text
 
@@ -1923,6 +1932,7 @@ Type anything else to send a message to the agent.
         header.is_generating = tel.is_generating
         header.context_pct = tel.context_pct
         header.code_version = tel.code_version
+        header.tui_version = getattr(self, "_abide_head", "") or ""
         header.code_version_stale = code_version_stale(
             tel.code_version, getattr(self, "_abide_head", "") or ""
         )
@@ -2745,6 +2755,9 @@ Type anything else to send a message to the agent.
             cv = health.get("code_version", "")
             if cv:
                 self.call_from_thread(setattr, header, "code_version", cv)
+                self.call_from_thread(
+                    setattr, header, "tui_version", getattr(self, "_abide_head", "") or ""
+                )
                 stale = bool(self._abide_head and cv != self._abide_head)
                 self.call_from_thread(setattr, header, "code_version_stale", stale)
 
@@ -2785,6 +2798,9 @@ Type anything else to send a message to the agent.
             cv = health.get("code_version", "")
             if cv:
                 self.call_from_thread(setattr, header, "code_version", cv)
+                self.call_from_thread(
+                    setattr, header, "tui_version", getattr(self, "_abide_head", "") or ""
+                )
                 stale = bool(self._abide_head and cv != self._abide_head)
                 self.call_from_thread(setattr, header, "code_version_stale", stale)
         except Exception:

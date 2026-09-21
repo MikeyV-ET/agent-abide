@@ -368,6 +368,52 @@ def is_speech_tui_event(event: dict[str, Any]) -> bool:
 
 
 
+
+def cheap_hot_line_speech(line: str) -> Optional[tuple[str, str, str]]:
+    """Fast path for lazy-load: (sessionUpdate, text, role-ish) without full json.loads.
+
+    Fat aa.stream lines embed huge native{} blobs; json.loads on every line
+    spikes CPU and holds loading_history so scroll cannot advance.
+    Returns None if not dialogue/chrome speech.
+    """
+    import re
+    if not line or "\"body\"" not in line:
+        return None
+    # role
+    rm = re.search(r'"role"\s*:\s*"(user|assistant|human|agent)"', line)
+    if not rm:
+        return None
+    role = rm.group(1)
+    # body.kind text?
+    if '"kind":"text"' not in line and '"kind": "text"' not in line:
+        if '"kind":"text_delta"' not in line and '"kind": "text_delta"' not in line:
+            return None
+    # body text — prefer "body":{... "text":"..."}
+    tm = re.search(
+        r'"body"\s*:\s*\{[^{}]*?"text"\s*:\s*"((?:\\.|[^"\\])*)"',
+        line,
+    )
+    if not tm:
+        # fallback shorter
+        tm = re.search(r'"text"\s*:\s*"((?:\\.|[^"\\]){1,4000})"', line)
+    if not tm:
+        return None
+    text = (
+        tm.group(1)
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace('\\"', '"')
+        .replace("\\\\", "\\")
+    )
+    if not text.strip():
+        return None
+    if role in ("user", "human"):
+        su = "user_message_chunk"
+    else:
+        su = "agent_message_chunk"
+    return su, text, role
+
+
 def is_chrome_speech(text: str) -> bool:
     """System continue / session-limit / context-left — not real dialogue.
 

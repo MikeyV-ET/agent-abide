@@ -4385,9 +4385,13 @@ Type anything else to send a message to the agent.
     def _scan_older_history_events(
         self, path_str: str, earliest_offset: int, hist_kind: str
     ) -> dict:
-        """Worker: walk hot/updates backward; return plain event dicts (no widgets)."""
+        """Worker: walk hot/updates backward; return plain event dicts (no widgets).
+
+        Uses cheap_hot_line_speech for hot text lines so we do not json.loads
+        multi-KB native blobs on every line (CPU spike + stuck loading_history).
+        """
         speech_target = 25
-        max_bytes = 2 * 1024 * 1024
+        max_bytes = 12 * 1024 * 1024  # clear deserts / chrome walls
         max_tool_panels = 4
         updates_path = Path(path_str)
 
@@ -4395,8 +4399,14 @@ Type anything else to send a message to the agent.
             core = str(Path(__file__).resolve().parent.parent / "core")
             if core not in sys.path:
                 sys.path.insert(0, core)
-            from tui_history import is_chrome_speech, line_to_tui_event
+            from tui_history import (
+                cheap_hot_line_speech,
+                is_chrome_speech,
+                line_to_tui_event,
+            )
         except Exception:
+            cheap_hot_line_speech = None  # type: ignore
+            is_chrome_speech = lambda text: False  # type: ignore
             line_to_tui_event = None  # type: ignore
 
         speech_n = 0
@@ -4423,12 +4433,8 @@ Type anything else to send a message to the agent.
                 line_start = pos
                 blen = len(lb) + (1 if i < len(parts) - 1 else 0)
                 pos += blen
-                if not lb.strip():
+                if not lb.strip() or line_start >= earliest_offset:
                     continue
-                if line_start >= earliest_offset:
-                    continue
-                # Fat lines: still decode if under 2MB for thin tool extract;
-                # multi-MB base64 stays skipped.
                 if len(lb) > 2 * 1024 * 1024:
                     continue
                 try:
@@ -4436,14 +4442,37 @@ Type anything else to send a message to the agent.
                 except Exception:
                     continue
                 batch.append((line_start, l))
+
             for line_start, line in reversed(batch):
-                if line_to_tui_event is not None:
-                    event = line_to_tui_event(line, hist_kind)
-                else:
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        event = None
+                # HOT fast path: speech without full parse
+                if hist_kind == "hot" and cheap_hot_line_speech is not None:
+                    hit = cheap_hot_line_speech(line)
+                    if hit is not None:
+                        su, text, _role = hit
+                        event = {
+                            "params": {
+                                "update": {
+                                    "sessionUpdate": su,
+                                    "content": {"text": text},
+                                }
+                            }
+                        }
+                        collected.append((line_start, event))
+                        new_earliest = line_start
+                        if is_chrome_speech(text):
+                            continue
+                        speech_n += 1
+                        if speech_n >= speech_target:
+                            break
+                        continue
+
+                # Fallback: full line_to_tui_event (tools, fat thin-extract, updates)
+                if line_to_tui_event is None:
+                    continue
+                # Skip enormous lines unless they look like tool completions
+                if len(line) > 64 * 1024 and "tool_call" not in line and "tool_result" not in line:
+                    continue
+                event = line_to_tui_event(line, hist_kind)
                 if not event:
                     continue
                 update = (event.get("params") or {}).get("update") or {}
@@ -4453,14 +4482,13 @@ Type anything else to send a message to the agent.
                     "agent_message_chunk",
                     "agent_thought_chunk",
                 ):
+                    # already handled by cheap path for hot text; keep for updates kind
                     c = update.get("content") or {}
                     text = c.get("text", "") if isinstance(c, dict) else ""
                     if not str(text).strip():
                         continue
-                    # Keep chrome for display, but don't spend speech budget on it
-                    # (session-limit walls are almost only continues + limit lines).
                     collected.append((line_start, event))
-                    new_earliest = line_start  # walking newest→oldest
+                    new_earliest = line_start
                     if is_chrome_speech(str(text)):
                         continue
                     speech_n += 1

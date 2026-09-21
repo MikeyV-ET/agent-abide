@@ -220,3 +220,71 @@ def test_was_injected_tracks_exact_text():
     be._injected_texts = ["[eric (via tui)] hello"]
     assert be.was_injected("[eric (via tui)] hello")
     assert not be.was_injected("other")
+
+
+# --- stdin interjection record (the TUI label) -----------------------------
+#
+# e692c20 CALLS self._record_stdin_interjection(text) after a successful stdin
+# inject, but no commit ever defined it. Live, every inject logged
+# "'ClaudeBackend' object has no attribute '_record_stdin_interjection'",
+# delivery worked, and the TUI got no InterjectionBlock — Eric's original
+# "I'm not getting an indication of it", still true. Found by dogfooding.
+
+
+def _backend_with_history(tmp_path):
+    be = ClaudeBackend()
+    be._agent_home = tmp_path
+    be._agent_name = "Astro"
+    be._session_id = "sid-test"
+    return be
+
+
+def _hot_events(tmp_path):
+    import glob
+    paths = glob.glob(str(tmp_path / "**" / "hot.jsonl"), recursive=True)
+    assert paths, "no hot.jsonl written"
+    with open(paths[0]) as f:
+        return [json.loads(ln) for ln in f if ln.strip()]
+
+
+def test_record_method_exists():
+    assert callable(getattr(ClaudeBackend(), "_record_stdin_interjection", None))
+
+
+def test_record_writes_an_interjection_hot_event(tmp_path):
+    be = _backend_with_history(tmp_path)
+    be._record_stdin_interjection("eric: stop, wrong file")
+
+    events = _hot_events(tmp_path)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["format"] == "aa.stream"
+    assert ev["body"]["kind"] == "interjection"
+    assert ev["body"]["text"] == "eric: stop, wrong file"
+
+
+def test_recorded_event_renders_as_an_interjection_block(tmp_path):
+    """End to end against the real consumer, not a guess at its contract."""
+    from tui_history import aa_event_to_tui_update
+
+    be = _backend_with_history(tmp_path)
+    be._record_stdin_interjection("look here")
+    update = aa_event_to_tui_update(_hot_events(tmp_path)[0])
+
+    assert update is not None
+    blob = json.dumps(update)
+    assert "<interjection>" in blob
+    assert "look here" in blob
+
+
+def test_record_advances_stream_seq(tmp_path):
+    be = _backend_with_history(tmp_path)
+    be._record_stdin_interjection("one")
+    be._record_stdin_interjection("two")
+    seqs = [e["stream_seq"] for e in _hot_events(tmp_path)]
+    assert seqs == sorted(seqs) and len(set(seqs)) == 2
+
+
+def test_record_is_a_noop_without_history_configured():
+    """Hot ingest off -> nothing to write to; must not raise."""
+    ClaudeBackend()._record_stdin_interjection("hello")

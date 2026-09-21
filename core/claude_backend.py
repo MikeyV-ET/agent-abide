@@ -307,6 +307,52 @@ class ClaudeBackend(AgentBackend):
             print(f"[claude_backend] inject_user_message failed: {e}")
             return False
 
+    def _record_stdin_interjection(self, text: str) -> None:
+        """Put a stdin-injected message into hot.jsonl as an interjection.
+
+        The TUI renders body.kind == "interjection" as its InterjectionBlock
+        (tui_history.aa_event_to_tui_update), which is how Eric sees that a
+        message arrived while the agent was working rather than as a new turn.
+
+        Same thread as the hot ingest (both run on asdaaas's event loop, and
+        neither awaits between reading and writing stream_seq_next), so the
+        sequence counter cannot interleave.
+        """
+        if not text or not self._agent_home or not self._agent_name:
+            return
+        from aa_stream import (
+            append_hot_events,
+            build_event,
+            default_hot_meta,
+            ensure_aa_stream_layout,
+            read_hot_meta,
+            resolve_history_dir,
+            write_hot_meta,
+        )
+        from stream_adapters.claude import NATIVE_CLAUDE
+
+        fs_dir = ensure_aa_stream_layout(resolve_history_dir(self._agent_home), self._agent_name)
+        meta = read_hot_meta(fs_dir) or default_hot_meta(self._agent_name, fs_dir)
+        seq = int(meta.get("stream_seq_next") or 0)
+        sid = self._session_id if self._session_id not in (None, "pending") else ""
+
+        event = build_event(
+            agent=self._agent_name,
+            backend="claude",
+            session_id=sid,
+            stream_seq=seq,
+            native_schema=NATIVE_CLAUDE,
+            native_event={"type": "asdaaas-stdin-interjection", "text": text},
+            class_="message",
+            phase="full",
+            role="user",
+            body={"kind": "interjection", "text": text},
+            source={"path": "asdaaas:stdin-inject", "offset": 0},
+        )
+        append_hot_events(fs_dir, [event])
+        meta["stream_seq_next"] = seq + 1
+        write_hot_meta(fs_dir, meta)
+
     def was_injected(self, text: str) -> bool:
         """True if text matches a recent stdin interject (exact)."""
         if not text:

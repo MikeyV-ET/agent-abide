@@ -500,7 +500,12 @@ class TurnEngine:
                     self.next_turn_delay = float(dv)
                     self.delay_until_event = False
                 ptr.agent_wrote_delay = True
-            elif pa in ("compact", "gaze", "awareness", "reasoning_effort"):
+            elif pa in ("compact", "gaze", "awareness", "reasoning_effort",
+                        "restart", "shutdown"):
+                # Lifecycle commands are handled by the main loop, not here.
+                # Without requeueing them they are counted as processed and
+                # dropped — and an agent can only ever write them from inside
+                # a turn, so self-restart never fired.
                 requeue.append(pc)
 
         if requeue:

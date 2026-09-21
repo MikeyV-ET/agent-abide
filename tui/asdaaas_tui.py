@@ -4203,7 +4203,13 @@ Type anything else to send a message to the agent.
     # -------------------------------------------------------------------------
 
     def _load_older_history(self, agent_name: str = None) -> None:
-        """Load older events when user scrolls to top."""
+        """Lazy-load older history (scroll-up / PageUp).
+
+        I/O + parse run on a **worker thread** so the UI stays responsive.
+        Widget mount stays on the main thread (Textual requirement).
+        This is the path that froze when multi-tab Astro scrolled the dense
+        evening band — bulk -t N replay already used a worker.
+        """
         agent_name = agent_name or self._active_agent
         state = self._agent_state[agent_name]
 
@@ -4214,234 +4220,286 @@ Type anything else to send a message to the agent.
             return
 
         state["loading_history"] = True
-        # updates.jsonl is ground truth. Huge single-line tool_call events mean
-        # "last 25 lines of 500KB" can jump days (Sep 3 -> Aug 28). Walk further
-        # back until we have enough speech events (user/assistant/thought).
-        speech_target = 25
-        max_bytes = 2 * 1024 * 1024  # 2 MiB ceiling per PageUp
-        max_tool_panels = 4
-
         try:
             content = self._content_scroll(agent_name)
             first_child = content.children[0] if content.children else None
-            widgets_to_prepend = []
-            speech_n = 0
-            tool_n = 0
-            new_earliest = state["earliest_offset"]
-            bytes_read = 0
-            cursor = state["earliest_offset"]
-            collected = []  # (line_start_offset, line_str)
+        except Exception:
+            state["loading_history"] = False
+            return
 
-            hist_kind = state.get("history_kind") or "updates"
+        # Capture scroll anchor + offsets for the worker (no UI objects in thread)
+        earliest = int(state["earliest_offset"])
+        hist_kind = state.get("history_kind") or "updates"
+        path_str = str(updates_path)
+
+        def _work(
+            an=agent_name,
+            path=path_str,
+            earliest_off=earliest,
+            kind=hist_kind,
+            anchor=first_child,
+        ):
             try:
-                core = str(Path(__file__).resolve().parent.parent / "core")
-                if core not in sys.path:
-                    sys.path.insert(0, core)
-                from tui_history import line_to_tui_event
-            except Exception:
-                line_to_tui_event = None  # type: ignore
-
-            while cursor > 0 and speech_n < speech_target and bytes_read < max_bytes:
-                read_size = min(cursor, 512 * 1024)  # 512 KiB steps (cheap)
-                seek_pos = cursor - read_size
-                with open(updates_path, "rb") as f:
-                    f.seek(seek_pos)
-                    if seek_pos > 0:
-                        f.readline()  # skip partial line
-                    data_start = f.tell()
-                    raw = f.read(cursor - data_start)
-                bytes_read += len(raw)
-                # Stay binary until size gate — avoid decode+re-encode of fat lines
-                batch = []
-                pos = data_start
-                parts = raw.split(b"\n")
-                for i, lb in enumerate(parts):
-                    line_start = pos
-                    blen = len(lb) + (1 if i < len(parts) - 1 else 0)
-                    pos += blen
-                    if not lb.strip():
-                        continue
-                    if line_start >= state["earliest_offset"]:
-                        continue
-                    # 32 KiB hard cap (Trip-G hot has hundreds of 32k+ lines)
-                    if len(lb) > 32 * 1024:
-                        continue
+                payload = self._scan_older_history_events(
+                    path, earliest_off, kind
+                )
+                self.call_from_thread(
+                    self._apply_older_history_mount,
+                    an,
+                    payload,
+                    anchor,
+                )
+            except Exception as e:
+                def _fail(err=e, name=an):
                     try:
-                        l = lb.decode("utf-8", errors="replace")
+                        self.notify(f"History error: {err}", severity="error")
                     except Exception:
-                        continue
-                    batch.append((line_start, l))
-                # Newest -> oldest within chunk
-                for line_start, line in reversed(batch):
-                    if line_to_tui_event is not None:
-                        event = line_to_tui_event(line, hist_kind)
-                    else:
-                        try:
-                            event = json.loads(line)
-                        except json.JSONDecodeError:
-                            event = None
-                    if not event:
-                        continue
-                    update = (event.get("params") or {}).get("update") or {}
-                    et = update.get("sessionUpdate", "")
-                    if et in (
-                        "user_message_chunk",
-                        "agent_message_chunk",
-                        "agent_thought_chunk",
-                    ):
-                        c = update.get("content") or {}
-                        text = c.get("text", "") if isinstance(c, dict) else ""
-                        if not str(text).strip():
-                            continue
-                        collected.append((line_start, line))
-                        speech_n += 1
-                        new_earliest = line_start
-                        if speech_n >= speech_target:
-                            break
-                    elif et in ("tool_call", "tool_call_update") and tool_n < max_tool_panels:
-                        collected.append((line_start, line))
-                        tool_n += 1
-                        new_earliest = min(new_earliest, line_start)
-                cursor = data_start
-                if data_start <= 0:
-                    new_earliest = 0
-                    break
-
-            collected.sort(key=lambda t: t[0])  # oldest first for prepend
-            state["earliest_offset"] = max(0, int(new_earliest))
-            lines = [t[1] for t in collected]
-
-            if lines:
-                # Build widgets directly instead of using _dispatch_event
-                for line in lines:
-                    try:
-                        if line_to_tui_event is not None:
-                            event = line_to_tui_event(line, hist_kind)
-                        else:
-                            event = json.loads(line)
-                        if not event:
-                            continue
-                        update = event.get("params", {}).get("update", {})
-                        event_type = update.get("sessionUpdate", "")
-                        
-                        if event_type == "agent_message_chunk":
-                            text = self._update_text(update)
-                            if text:
-                                cleaned, ephacts = extract_ephacts(text)
-                                if ephacts:
-                                    try:
-                                        viewer = self.query_one("#ephact-viewer", EphactViewer)
-                                        for eph in ephacts:
-                                            viewer.push(agent_name, eph)
-                                    except NoMatches:
-                                        pass
-                                if len(text) > 8000:
-                                    text = text[:8000] + "\n… [truncated for TUI]"
-                                msg = AgentMessage()
-                                msg._text = text
-                                msg._chunks = [text]
-                                widgets_to_prepend.append(msg)
-                        elif event_type == "user_message_chunk":
-                            text = self._update_text(update)
-                            if text:
-                                if is_system_reminder(text):
-                                    widgets_to_prepend.append(SystemReminderPanel(text))
-                                else:
-                                    widgets_to_prepend.append(UserMessage(text))
-                        elif event_type in ("tool_call_update", "tool_call"):
-                            title = update.get("title", "tool")
-                            status = update.get("status", "completed" if event_type == "tool_call_update" else "running")
-                            kind = update.get("kind", "")
-                            tool_id = update.get("toolCallId", "")
-                            ts_raw = event.get("timestamp")
-                            try:
-                                ts_str = datetime.datetime.fromtimestamp(float(ts_raw)).strftime("%H:%M:%S") if ts_raw else ""
-                            except Exception:
-                                ts_str = ""
-                            panel = ToolCallPanel(tool_id, title, kind, ts=ts_str)
-                            panel.tool_status = status
-                            panel._collapsed = True
-                            # Collect raw text from content[] and rawOutput (interjections live here)
-                            raw_parts = []
-                            content_list = update.get("content") or []
-                            if isinstance(content_list, list):
-                                for item in content_list:
-                                    if not isinstance(item, dict):
-                                        continue
-                                    if item.get("type") == "content":
-                                        inner = item.get("content", {})
-                                        if isinstance(inner, dict):
-                                            raw_parts.append(inner.get("text") or "")
-                                        elif isinstance(inner, str):
-                                            raw_parts.append(inner)
-                            raw_out = update.get("rawOutput")
-                            if isinstance(raw_out, str) and raw_out:
-                                raw_parts.append(raw_out)
-                            raw = "\n".join(raw_parts)
-                            clean, intj_msgs = self._extract_interjections(raw)
-                            pure_ij = bool(
-                                update.get("_aa_interjection")
-                                or (title or "").lower() == "interjection"
-                                or str(tool_id).startswith("ij-")
-                            )
-                            for msg in intj_msgs:
-                                key = interjection_key(msg)
-                                if key in self._seen_interjections:
-                                    continue
-                                self._seen_interjections.add(key)
-                                widgets_to_prepend.append(InterjectionBlock(msg))
-                            if pure_ij and not clean.strip():
-                                # no empty tool husk under 🔔
-                                pass
-                            else:
-                                if clean.strip():
-                                    # Cap tool output paint size
-                                    panel.tool_output = (
-                                        clean if len(clean) <= 4000
-                                        else clean[:4000] + "\n… [truncated]"
-                                    )
-                                widgets_to_prepend.append(panel)
-                        elif event_type == "hook_annotation":
-                            message = update.get("message", "")
-                            if message:
-                                widgets_to_prepend.append(HookAnnotation(message))
-                    except json.JSONDecodeError:
                         pass
+                    st = self._agent_state.get(name) or {}
+                    st["loading_history"] = False
 
-                # Mount at the top, keeping the previous first widget in view so
-                # the reader does not jump to an earlier timepoint (prepend without
-                # scroll compensation looks like the viewport "rewound").
-                if widgets_to_prepend:
-                    content._follow_tail = False
-                    anchor = first_child
+                try:
+                    self.call_from_thread(_fail)
+                except Exception:
+                    st = self._agent_state.get(an) or {}
+                    st["loading_history"] = False
+
+        self.run_worker(_work, thread=True, name=f"hist_load_{agent_name}")
+
+    def _scan_older_history_events(
+        self, path_str: str, earliest_offset: int, hist_kind: str
+    ) -> dict:
+        """Worker: walk hot/updates backward; return plain event dicts (no widgets)."""
+        speech_target = 25
+        max_bytes = 2 * 1024 * 1024
+        max_tool_panels = 4
+        updates_path = Path(path_str)
+
+        try:
+            core = str(Path(__file__).resolve().parent.parent / "core")
+            if core not in sys.path:
+                sys.path.insert(0, core)
+            from tui_history import line_to_tui_event
+        except Exception:
+            line_to_tui_event = None  # type: ignore
+
+        speech_n = 0
+        tool_n = 0
+        new_earliest = earliest_offset
+        bytes_read = 0
+        cursor = earliest_offset
+        collected = []  # (line_start_offset, event_dict)
+
+        while cursor > 0 and speech_n < speech_target and bytes_read < max_bytes:
+            read_size = min(cursor, 512 * 1024)
+            seek_pos = cursor - read_size
+            with open(updates_path, "rb") as f:
+                f.seek(seek_pos)
+                if seek_pos > 0:
+                    f.readline()
+                data_start = f.tell()
+                raw = f.read(cursor - data_start)
+            bytes_read += len(raw)
+            batch = []
+            pos = data_start
+            parts = raw.split(b"\n")
+            for i, lb in enumerate(parts):
+                line_start = pos
+                blen = len(lb) + (1 if i < len(parts) - 1 else 0)
+                pos += blen
+                if not lb.strip():
+                    continue
+                if line_start >= earliest_offset:
+                    continue
+                if len(lb) > 32 * 1024:
+                    continue
+                try:
+                    l = lb.decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                batch.append((line_start, l))
+            for line_start, line in reversed(batch):
+                if line_to_tui_event is not None:
+                    event = line_to_tui_event(line, hist_kind)
+                else:
                     try:
-                        if first_child is not None:
-                            content.mount(*widgets_to_prepend, before=first_child)
-                        else:
-                            for w in widgets_to_prepend:
-                                content.mount(w)
-                    except Exception as e:
-                        self.notify(f"Mount error: {e}", severity="error")
-                        for w in widgets_to_prepend:
-                            try:
-                                content.mount(w)
-                            except Exception:
-                                pass
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        event = None
+                if not event:
+                    continue
+                update = (event.get("params") or {}).get("update") or {}
+                et = update.get("sessionUpdate", "")
+                if et in (
+                    "user_message_chunk",
+                    "agent_message_chunk",
+                    "agent_thought_chunk",
+                ):
+                    c = update.get("content") or {}
+                    text = c.get("text", "") if isinstance(c, dict) else ""
+                    if not str(text).strip():
+                        continue
+                    collected.append((line_start, event))
+                    speech_n += 1
+                    new_earliest = line_start
+                    if speech_n >= speech_target:
+                        break
+                elif et in ("tool_call", "tool_call_update") and tool_n < max_tool_panels:
+                    collected.append((line_start, event))
+                    tool_n += 1
+                    new_earliest = min(new_earliest, line_start)
+            cursor = data_start
+            if data_start <= 0:
+                new_earliest = 0
+                break
 
-                    def _restore_anchor(a=anchor) -> None:
+        collected.sort(key=lambda t: t[0])
+        return {
+            "events": [e for _, e in collected],
+            "new_earliest": max(0, int(new_earliest)),
+            "speech_n": speech_n,
+            "bytes_read": bytes_read,
+        }
+
+    def _apply_older_history_mount(
+        self, agent_name: str, payload: dict, first_child
+    ) -> None:
+        """Main thread: build widgets from worker payload and prepend."""
+        state = self._agent_state.get(agent_name)
+        if not state:
+            return
+        try:
+            content = self._content_scroll(agent_name)
+            events = payload.get("events") or []
+            state["earliest_offset"] = int(payload.get("new_earliest") or 0)
+            widgets_to_prepend = []
+
+            for event in events:
+                try:
+                    update = event.get("params", {}).get("update", {}) or {}
+                    event_type = update.get("sessionUpdate", "")
+
+                    if event_type == "agent_message_chunk":
+                        text = self._update_text(update)
+                        if text:
+                            cleaned, ephacts = extract_ephacts(text)
+                            if ephacts:
+                                try:
+                                    viewer = self.query_one("#ephact-viewer", EphactViewer)
+                                    for eph in ephacts:
+                                        viewer.push(agent_name, eph)
+                                except NoMatches:
+                                    pass
+                            if len(text) > 8000:
+                                text = text[:8000] + "\n… [truncated for TUI]"
+                            msg = AgentMessage()
+                            msg._text = text
+                            msg._chunks = [text]
+                            widgets_to_prepend.append(msg)
+                    elif event_type == "user_message_chunk":
+                        text = self._update_text(update)
+                        if text:
+                            if is_system_reminder(text):
+                                widgets_to_prepend.append(SystemReminderPanel(text))
+                            else:
+                                widgets_to_prepend.append(UserMessage(text))
+                    elif event_type in ("tool_call_update", "tool_call"):
+                        title = update.get("title", "tool")
+                        status = update.get(
+                            "status",
+                            "completed" if event_type == "tool_call_update" else "running",
+                        )
+                        kind = update.get("kind", "")
+                        tool_id = update.get("toolCallId", "")
+                        ts_raw = event.get("timestamp")
                         try:
-                            if a is not None and a.is_attached:
-                                content.scroll_to_widget(a, animate=False, top=True)
+                            ts_str = (
+                                datetime.datetime.fromtimestamp(float(ts_raw)).strftime(
+                                    "%H:%M:%S"
+                                )
+                                if ts_raw
+                                else ""
+                            )
+                        except Exception:
+                            ts_str = ""
+                        panel = ToolCallPanel(tool_id, title, kind, ts=ts_str)
+                        panel.tool_status = status
+                        panel._collapsed = True
+                        raw_parts = []
+                        content_list = update.get("content") or []
+                        if isinstance(content_list, list):
+                            for item in content_list:
+                                if not isinstance(item, dict):
+                                    continue
+                                if item.get("type") == "content":
+                                    inner = item.get("content", {})
+                                    if isinstance(inner, dict):
+                                        raw_parts.append(inner.get("text") or "")
+                                    elif isinstance(inner, str):
+                                        raw_parts.append(inner)
+                        raw_out = update.get("rawOutput")
+                        if isinstance(raw_out, str) and raw_out:
+                            raw_parts.append(raw_out)
+                        raw = "\n".join(raw_parts)
+                        clean, intj_msgs = self._extract_interjections(raw)
+                        pure_ij = bool(
+                            update.get("_aa_interjection")
+                            or (title or "").lower() == "interjection"
+                            or str(tool_id).startswith("ij-")
+                        )
+                        for msg in intj_msgs:
+                            key = interjection_key(msg)
+                            if key in self._seen_interjections:
+                                continue
+                            self._seen_interjections.add(key)
+                            widgets_to_prepend.append(InterjectionBlock(msg))
+                        if pure_ij and not clean.strip():
+                            pass
+                        else:
+                            if clean.strip():
+                                panel.tool_output = (
+                                    clean
+                                    if len(clean) <= 4000
+                                    else clean[:4000] + "\n… [truncated]"
+                                )
+                            widgets_to_prepend.append(panel)
+                    elif event_type == "hook_annotation":
+                        message = update.get("message", "")
+                        if message:
+                            widgets_to_prepend.append(HookAnnotation(message))
+                except Exception:
+                    continue
+
+            if widgets_to_prepend:
+                content._follow_tail = False
+                anchor = first_child
+                try:
+                    if first_child is not None:
+                        content.mount(*widgets_to_prepend, before=first_child)
+                    else:
+                        for w in widgets_to_prepend:
+                            content.mount(w)
+                except Exception as e:
+                    self.notify(f"Mount error: {e}", severity="error")
+                    for w in widgets_to_prepend:
+                        try:
+                            content.mount(w)
                         except Exception:
                             pass
 
-                    # After layout settles on the new children
-                    self.call_after_refresh(_restore_anchor)
-                    self.set_timer(0.05, _restore_anchor)
-                    self.set_timer(0.2, _restore_anchor)
+                def _restore_anchor(a=anchor) -> None:
+                    try:
+                        if a is not None and a.is_attached:
+                            content.scroll_to_widget(a, animate=False, top=True)
+                    except Exception:
+                        pass
 
-                if state["earliest_offset"] <= 0:
-                    self.notify("Reached beginning of session", severity="information")
+                self.call_after_refresh(_restore_anchor)
+                self.set_timer(0.05, _restore_anchor)
+                self.set_timer(0.2, _restore_anchor)
+
+            if state["earliest_offset"] <= 0:
+                self.notify("Reached beginning of session", severity="information")
         except Exception as e:
             self.notify(f"History error: {e}", severity="error")
         finally:

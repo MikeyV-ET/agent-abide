@@ -10,6 +10,7 @@ Write JSON command files to `~/agents/<Name>/asdaaas/commands/cmd_{timestamp}_{r
 | Ack | `{"action": "ack", "handled": ["id1", "id2"]}` | Clear handled doorbells |
 | Piggyback ack | `{"action": "delay", ..., "ack": ["id1"]}` | Combine delay + ack atomically |
 | Compact | `{"action": "compact"}` | Request self-compaction (executes immediately). Optional `"instructions"` field overrides default compaction instructions for this request. |
+| Restart (self) | `{"action": "restart"}` | Schedule `restart_agent.sh --force <self>` then graceful shutdown. Optional `"reason"` / `"text"`, `"delay_s"` (default 2). Process exits; script brings agent back on **this** tree (dev or prod). |
 | Gaze (channel) | `{"action": "gaze", "adapter": "irc", "room": "#channel"}` | Set output destination |
 | Gaze (PM) | `{"action": "gaze", "adapter": "irc", "pm": "nick"}` | PM a specific nick |
 | Gaze (TUI) | `{"action": "gaze", "adapter": "tui"}` | Output to TUI |

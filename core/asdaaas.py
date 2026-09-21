@@ -2039,6 +2039,54 @@ def request_shutdown_from_command(agent_name):
     _shutdown_requested = True
 
 
+def schedule_self_restart(agent_name: str, *, reason: str = "", delay_s: float = 2.0) -> bool:
+    """Detach restart_agent.sh so this process can exit and come back.
+
+    Uses the scripts/ next to this asdaaas install (dev or prod tree).
+    --force: we are already shutting down; no need for a second graceful stop.
+    Returns True if the scheduler process was spawned.
+    """
+    import shlex
+    import subprocess
+    from pathlib import Path as _P
+
+    script = _P(__file__).resolve().parent.parent / "scripts" / "restart_agent.sh"
+    if not script.is_file():
+        print("[asdaaas] RESTART: script not found: %s" % script)
+        return False
+    log = _P("/tmp/asdaaas_self_restart_%s.log" % agent_name)
+    reason_q = shlex.quote(str(reason)[:200])
+    agent_q = shlex.quote(str(agent_name))
+    script_q = shlex.quote(str(script))
+    log_q = shlex.quote(str(log))
+    delay = float(delay_s)
+    # Build bash without nested double-quote hell in Python source
+    bash = (
+        "sleep %.1f; "
+        "echo [self-restart] $(date -Is) agent=%s reason=%s >> %s; "
+        "bash %s --force %s >> %s 2>&1; "
+        "echo [self-restart] done exit=$? >> %s"
+    ) % (delay, agent_q, reason_q, log_q, script_q, agent_q, log_q, log_q)
+    try:
+        subprocess.Popen(
+            ["bash", "-c", bash],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(script.parent.parent),
+        )
+        print(
+            "[asdaaas] RESTART: scheduled %s --force %s in %.1fs (log %s)"
+            % (script.name, agent_name, delay, log)
+        )
+        return True
+    except Exception as e:
+        print("[asdaaas] RESTART: failed to schedule: %s" % e)
+        return False
+
+
+
 # ============================================================================
 # MAIN LOOP
 # ============================================================================
@@ -2579,6 +2627,38 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     request_shutdown_from_command(agent_name)
                     # Flag is set; loop will break at top of next iteration
                     # (current turn is already between turns, so exit is immediate)
+
+                elif action == "restart":
+                    # Agent self-restart: schedule restart_agent.sh, then graceful exit.
+                    # Same tree as this process (dev checkout vs prod).
+                    reason = cmd.get("reason") or cmd.get("text") or "agent-requested"
+                    delay_s = float(cmd.get("delay_s") or cmd.get("delay") or 2.0)
+                    ok = schedule_self_restart(agent_name, reason=str(reason), delay_s=delay_s)
+                    try:
+                        write_health(
+                            agent_name,
+                            "restarting",
+                            f"self-restart: {reason}"[:120],
+                            total_tokens,
+                            context_window,
+                            env=env,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        write_conversation(
+                            agent_name,
+                            "system",
+                            f"[aa.control] restart scheduled ({reason})",
+                            env=env,
+                            kind="control",
+                        )
+                    except Exception:
+                        pass
+                    if ok:
+                        request_shutdown_from_command(agent_name)
+                    else:
+                        print(f"[asdaaas] RESTART: not shutting down — schedule failed")
 
                 elif action == "gaze":
                     # Set gaze target. Validates and writes gaze.json.

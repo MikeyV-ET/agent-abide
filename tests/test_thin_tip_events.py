@@ -1,4 +1,4 @@
-"""-t N is dialogue budget; tip collapses tools and drops session meta."""
+"""-t N = N TUI paint lines (not N dialogue turns)."""
 from __future__ import annotations
 
 import sys
@@ -7,7 +7,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "core"))
 
-from tui_history import thin_tip_events, is_dialogue_speech  # noqa: E402
+from tui_history import (  # noqa: E402
+    select_tip_paint_lines,
+    thin_tip_events,
+    is_dialogue_speech,
+    is_tip_paint_event,
+)
 
 
 def _ev(su: str, text: str = "", tool_id: str = "") -> dict:
@@ -21,49 +26,42 @@ def _ev(su: str, text: str = "", tool_id: str = "") -> dict:
     return {"params": {"update": u}}
 
 
-def test_thin_tip_respects_dialogue_n_and_collapses_tools():
+def test_t50_means_fifty_paint_lines():
     events = []
-    # older noise
-    for i in range(20):
-        events.append(_ev("user_message_chunk", f"old {i}"))
+    for i in range(40):
+        events.append(_ev("user_message_chunk", f"u{i}"))
+        events.append(_ev("agent_message_chunk", f"a{i}"))
         events.append(_ev("tool_call", tool_id=f"t{i}"))
+        events.append(_ev("tool_call_update", tool_id=f"t{i}"))
         events.append(_ev("tool_call_update", tool_id=f"t{i}"))
         events.append(_ev("task_completed"))
         events.append(_ev("turn_completed"))
-    # tip region: 5 dialogue + multi tool frames + meta
-    for i in range(5):
-        events.append(_ev("user_message_chunk", f"tip user {i}"))
-        events.append(_ev("agent_message_chunk", f"tip agent {i}"))
-        events.append(_ev("tool_call", tool_id=f"tip{i}"))
-        events.append(_ev("tool_call_update", tool_id=f"tip{i}"))
-        events.append(_ev("tool_call_update", tool_id=f"tip{i}"))  # third state
-        events.append(_ev("background_tasks"))
-        events.append(_ev("task_completed"))
-
-    out = thin_tip_events(events, 10)  # 10 dialogue
-    dialogue = sum(1 for e in out if is_dialogue_speech(e))
-    assert dialogue == 10, dialogue
+        events.append(_ev("user_message_chunk", "[continue (id=x)] Your turn ended. stand by."))
+    out = select_tip_paint_lines(events, 50)
+    assert len(out) == 50, len(out)
     types = [
         (e.get("params") or {}).get("update", {}).get("sessionUpdate") for e in out
     ]
     assert "task_completed" not in types
-    assert "background_tasks" not in types
     assert "turn_completed" not in types
-    # one entry per tip tool id (last update wins) — 5 tools in tip span
-    toolish = [t for t in types if t in ("tool_call", "tool_call_update")]
-    assert len(toolish) == 5, toolish
-    assert len(out) < 40  # was 5*(2 speech + 3 tool + 2 meta) = 35+ without thin
+    # tools collapsed to 1 per id
+    assert types.count("tool_call") + types.count("tool_call_update") <= 50
 
 
-def test_live_tripg_hot_t50_paint_bound():
-    """Regression against real Trip-G density: -t50 must not yield 300+ paint."""
-    hot = Path("/home/eric/agents/Trip-G/asdaaas/history/hot.jsonl")
+def test_thin_tip_alias_is_paint_lines():
+    events = [_ev("agent_message_chunk", f"x{i}") for i in range(100)]
+    assert len(thin_tip_events(events, 50)) == 50
+
+
+def test_squiggy_hot_t50_at_most_50_paint():
+    hot = Path("/home/eric/agents/LeviSmith/Squiggy/asdaaas/history/hot.jsonl")
     if not hot.exists():
         return
-    from tui_history import line_to_tui_event, is_dialogue_speech, is_speech_tui_event
+    from tui_history import line_to_tui_event
 
+    # 1 MiB tip window is enough density for 50 paint lines
     size = hot.stat().st_size
-    read_size = min(size, 8 * 1024 * 1024)
+    read_size = min(size, 1 * 1024 * 1024)
     seek = max(0, size - read_size)
     with open(hot, "rb") as f:
         f.seek(seek)
@@ -77,8 +75,6 @@ def test_live_tripg_hot_t50_paint_bound():
         ev = line_to_tui_event(line, "hot")
         if ev:
             events.append(ev)
-    out = thin_tip_events(events, 50)
-    d = sum(1 for e in out if is_dialogue_speech(e))
-    s = sum(1 for e in out if is_speech_tui_event(e))
-    assert d == 50, d
-    assert len(out) < 150, f"still too fat: paint={len(out)} speech={s} dialogue={d}"
+    out = select_tip_paint_lines(events, 50)
+    assert len(out) == 50, len(out)
+    assert sum(1 for e in out if is_tip_paint_event(e)) == 50

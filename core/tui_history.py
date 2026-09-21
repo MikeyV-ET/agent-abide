@@ -736,6 +736,7 @@ def scan_older_history_events(
 
 
 
+
 # Session meta that bloats -t catch-up without helping the operator read the tip.
 _TIP_DROP_SESSION_UPDATES = frozenset({
     "task_completed",
@@ -752,63 +753,108 @@ _TIP_DROP_SESSION_UPDATES = frozenset({
 })
 
 
+def _event_session_update(event: dict) -> str:
+    update = (event.get("params") or {}).get("update") or {}
+    return str(update.get("sessionUpdate", "") or "")
+
+
+def _event_tool_id(event: dict) -> str:
+    update = (event.get("params") or {}).get("update") or {}
+    return str(
+        update.get("toolCallId")
+        or update.get("tool_call_id")
+        or update.get("id")
+        or ""
+    )
+
+
+def _event_is_tip_chrome(event: dict) -> bool:
+    et = _event_session_update(event)
+    if et not in (
+        "user_message_chunk",
+        "agent_message_chunk",
+        "agent_thought_chunk",
+    ):
+        return False
+    update = (event.get("params") or {}).get("update") or {}
+    c = update.get("content") or {}
+    text = c.get("text", "") if isinstance(c, dict) else (c if isinstance(c, str) else "")
+    return is_chrome_speech(str(text))
+
+
+def is_tip_paint_event(event: dict) -> bool:
+    """True if this event should count as one TUI line toward ``-t N``."""
+    if not isinstance(event, dict):
+        return False
+    et = _event_session_update(event)
+    if not et or et in _TIP_DROP_SESSION_UPDATES:
+        return False
+    if _event_is_tip_chrome(event):
+        return False
+    if et in (
+        "user_message_chunk",
+        "agent_message_chunk",
+        "agent_thought_chunk",
+        "tool_call",
+        "tool_call_update",
+        "plan",
+        "hook_annotation",
+    ):
+        return True
+    return False
+
+
+def select_tip_paint_lines(
+    events: list[dict[str, Any]],
+    n_lines: int,
+) -> list[dict[str, Any]]:
+    """Last N *TUI paint lines* for catch-up (the real meaning of ``-t N``).
+
+    Eric: ``-t50`` = ~50 lines in the TUI, not 50 dialogue turns and a pile of
+    tool frames. Walk backward from the tip: drop session meta + chrome,
+    collapse tool_call/update to one line per toolCallId (latest state), stop
+    at N paint lines, return chronological order.
+    """
+    if not events or not n_lines or n_lines <= 0:
+        return []
+
+    out_rev: list[dict[str, Any]] = []
+    seen_tools: set[str] = set()
+    paint = 0
+
+    for ev in reversed(events):
+        if not is_tip_paint_event(ev):
+            continue
+        et = _event_session_update(ev)
+        if et in ("tool_call", "tool_call_update"):
+            tid = _event_tool_id(ev) or f"anon:{id(ev)}"
+            if tid in seen_tools:
+                continue  # older frame of same tool; already have newer
+            seen_tools.add(tid)
+        out_rev.append(ev)
+        paint += 1
+        if paint >= n_lines:
+            break
+
+    out_rev.reverse()
+    return out_rev
+
+
 def thin_tip_events(
     events: list[dict[str, Any]],
     n_speech: int,
     *,
     speech_first: bool = True,
 ) -> list[dict[str, Any]]:
-    """Catch-up tip: last N *dialogue* speeches + collapsed tools in that span.
+    """Backward-compatible name: ``n_speech`` is treated as **TUI paint lines**.
 
-    ``-t N`` means N real user/agent lines, not N paint widgets. Keeping every
-    tool_call + tool_call_update + task_* meta inside the speech span turned
-    ``-t50`` into ~60 speech labels and 300+ events. Collapse to one tool panel
-    per toolCallId (last state wins) and drop pure session meta.
+    Historically this meant dialogue-speech budget; product intent is ``-t N`` =
+    N lines on screen. Delegates to :func:`select_tip_paint_lines`.
     """
-    if not events:
-        return []
-    if n_speech and n_speech > 0:
-        span = select_tail_events(events, n_speech, speech_first=speech_first)
-    else:
-        span = list(events)
+    # speech_first kept for call-site compat; paint-line select is the contract.
+    _ = speech_first
+    return select_tip_paint_lines(events, n_speech)
 
-    out: list[dict[str, Any]] = []
-    # toolCallId -> index in out (for in-place replace)
-    tool_idx: dict[str, int] = {}
-
-    def _tool_id(update: dict) -> str:
-        return str(
-            update.get("toolCallId")
-            or update.get("tool_call_id")
-            or update.get("id")
-            or ""
-        )
-
-    for ev in span:
-        update = (ev.get("params") or {}).get("update") or {}
-        et = update.get("sessionUpdate", "") or ""
-        if et in _TIP_DROP_SESSION_UPDATES:
-            continue
-        # Continues / session-limit / aa.control: not tip dialogue
-        if et in (
-            "user_message_chunk",
-            "agent_message_chunk",
-            "agent_thought_chunk",
-        ):
-            c = update.get("content") or {}
-            text = c.get("text", "") if isinstance(c, dict) else (c if isinstance(c, str) else "")
-            if is_chrome_speech(str(text)):
-                continue
-        if et in ("tool_call", "tool_call_update"):
-            tid = _tool_id(update) or f"anon:{id(ev)}"
-            if tid in tool_idx:
-                out[tool_idx[tid]] = ev  # last state wins
-            else:
-                tool_idx[tid] = len(out)
-                out.append(ev)
-            continue
-        out.append(ev)
-    return out
 
 
 def select_tail_events(

@@ -2094,13 +2094,11 @@ Type anything else to send a message to the agent.
             pass
 
     def _initial_tail_speech_count(self, agent_name: str) -> int:
-        """Speech events to mount on first catch-up for this tab.
+        """TUI paint lines to mount on first catch-up (``-t N``).
 
-        Primary and secondary share CLI ``-t N`` when set. Without ``-t``,
-        primary defaults higher only because it is the session you opened on;
-        secondary/[+] tabs stay light. Deeper history is lazy-load (PageUp),
-        not a bigger preload — the old secondary floor of 80 was a workaround
-        for broken reverse scan.
+        ``-t50`` means about 50 lines on screen, not 50 dialogue turns.
+        Primary and secondary share CLI ``-t N``. Without ``-t``, primary
+        defaults higher; secondary/[+] stay light. PageUp lazy-load owns depth.
         """
         if self._tail_count:
             return max(1, int(self._tail_count))
@@ -3268,20 +3266,24 @@ Type anything else to send a message to the agent.
                     from tui_history import (
                         line_to_tui_event,
                         thin_tip_events,
+                        select_tip_paint_lines,
+                        is_tip_paint_event,
                         is_speech_tui_event,
                         is_dialogue_speech,
                     )
 
+                    # -t N = N TUI paint lines (widgets), not N dialogue turns
                     want = int(tail_count) if tail_count else None
-                    # grow window: 2→8→32 MiB until speech count met or file start
-                    windows = [2, 8, 32, 128]
+                    # grow window until thin tip can fill want lines (small first —
+                    # Squiggy hot is 200MB+; do not read 128MiB for 50 lines)
+                    windows = [0.25, 1, 2, 8, 32]
                     if hist_kind != "hot":
-                        windows = [1, 2, 8]  # MiB; updates denser
+                        windows = [0.25, 1, 2, 8]
                     events: list = []
                     data_start = 0
                     raw_line_n = 0
                     for mib in windows:
-                        read_size = min(current_size, mib * 1024 * 1024)
+                        read_size = min(current_size, int(mib * 1024 * 1024))
                         seek_pos = max(0, current_size - read_size)
                         with open(updates_path, "rb") as f:
                             f.seek(seek_pos)
@@ -3307,18 +3309,27 @@ Type anything else to send a message to the agent.
                             ev = line_to_tui_event(line, hist_kind)
                             if ev is not None:
                                 events.append((off, ev))
-                        speech_n = sum(1 for _, e in events if is_speech_tui_event(e))
+                        # How many TUI lines would -t get from this window?
+                        only_probe = [e for _, e in events]
+                        tip_probe = (
+                            select_tip_paint_lines(only_probe, want)
+                            if want
+                            else only_probe
+                        )
+                        paint_n = len(tip_probe)
+                        speech_n = sum(1 for e in tip_probe if is_speech_tui_event(e))
                         self._debug(
                             f"REPLAY_WINDOW kind={hist_kind} mib={mib} "
-                            f"raw={raw_line_n} paint={len(events)} speech={speech_n}"
+                            f"raw={raw_line_n} events={len(events)} "
+                            f"tip_paint={paint_n} tip_speech={speech_n}"
                         )
-                        if want is None or speech_n >= want or seek_pos == 0:
+                        if want is None or paint_n >= want or seek_pos == 0:
                             break
 
-                    # -t N dialogue tip; collapse tools + drop session meta
+                    # -t N = N TUI paint lines
                     only_ev = [e for _, e in events]
                     if want:
-                        only_ev = thin_tip_events(only_ev, want, speech_first=True)
+                        only_ev = select_tip_paint_lines(only_ev, want)
                         if only_ev:
                             want_ids = {id(e) for e in only_ev}
                             events = [(o, e) for o, e in events if id(e) in want_ids]
@@ -3353,11 +3364,11 @@ Type anything else to send a message to the agent.
                         f"dialogue={dialogue_dispatched} speech={speech_dispatched} "
                         f"raw_lines={raw_line_n} want={want}"
                     )
-                    # Honest -t accounting: dialogue is the budget; events are paint
+                    # -t N = paint lines mounted (TUI lines)
                     t_label = f"-t{want}" if want else "tip"
                     msg = (
-                        f"Replay ({t_label}): {dialogue_dispatched} dialogue"
-                        f" / {speech_dispatched} speech / {replay_count} paint"
+                        f"Replay ({t_label}): {replay_count} TUI lines"
+                        f" ({dialogue_dispatched} dialogue / {speech_dispatched} speech)"
                         f" from {hist_kind}"
                     )
                     self.call_from_thread(lambda m=msg: self.notify(m, severity="information"))
@@ -4763,7 +4774,8 @@ def main():
     )
     parser.add_argument(
         "--tail", "-t", type=int, default=None,
-        help="Only replay the last N events (use with --replay for fast startup)"
+        help="Catch-up ~N TUI lines (speech+tools collapsed). PageUp loads older. "
+             "Default 50 primary / 25 secondary."
     )
     parser.add_argument(
         "--operator", "-o", default=None,

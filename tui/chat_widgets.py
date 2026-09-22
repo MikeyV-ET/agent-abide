@@ -81,8 +81,7 @@ class ToolCallPanel(Static):
     """
 
     SNIPPET_LINES = 4
-    # Soft-wrap: one rg line can be 50k chars (whole conversation.jsonl row).
-    # Cap visual height, not only newline count (Eric 2026-09-21 oversized panel).
+    # Soft-wrap: one rg line can be tens of KB (whole conversation.jsonl row).
     SNIPPET_MAX_CHARS = 480
     SNIPPET_MAX_VISUAL_ROWS = 6
     MAX_EXPANDED_LINES = 80
@@ -116,9 +115,92 @@ class ToolCallPanel(Static):
     def set_output(self, content: str):
         self.tool_output = self._cap_output(content)
         if self._collapsed:
+            self.refresh()
+        else:
+            self.refresh(layout=True)
+
+    def append_output(self, content: str):
+        self.tool_output = self._cap_output(self.tool_output + content)
+        if self._collapsed:
+            self.refresh()
+        else:
+            self.refresh(layout=True)
+
+    def on_click(self, event) -> None:
+        """Toggle snippet vs full body."""
+        self._collapsed = not self._collapsed
+        self.refresh(layout=True)
+
+    def _title_line(self, status_icon: str) -> str:
+        kind_icons = {
+            "read": "📖", "execute": "⚡", "edit": "✏️",
+            "search": "🔍", "think": "💭", "other": "📋",
+        }
+        kind_icon = kind_icons.get(self.tool_kind, "🔧")
+        label = (self.tool_title or "").strip() or (self.tool_kind or "tool")
+        if label.lower() in ("tool", "unknown tool", "unknown"):
+            label = self.tool_kind or "tool"
+        ref = short_ref(self.tool_id)
+        ts = self.tool_ts or ""
+        # Prefer clock time for citation ("the 15:08 tool")
+        if ts and ref:
+            return f"{kind_icon} {label} · {ts} · {ref} {status_icon}"
+        if ts:
+            return f"{kind_icon} {label} · {ts} {status_icon}"
+        if ref:
+            return f"{kind_icon} {label} · {ref} {status_icon}"
+        return f"{kind_icon} {label} {status_icon}"
+
+    def _collapsed_snippet(self) -> tuple[str, bool]:
+        """Snippet text + whether more is hidden (char and soft-wrap row aware)."""
+        raw = self.tool_output or ""
+        if not raw:
+            return "", False
+        lines = raw.split("\n")
+        piece = "\n".join(lines[: self.SNIPPET_LINES])
+        more = len(lines) > self.SNIPPET_LINES or len(raw) > self.SNIPPET_MAX_CHARS
+        if len(piece) > self.SNIPPET_MAX_CHARS:
+            piece = piece[: self.SNIPPET_MAX_CHARS].rstrip() + "…"
+            more = True
+        approx_rows = 0
+        for ln in piece.split("\n"):
+            approx_rows += max(1, (len(ln) + 79) // 80)
+        if approx_rows > self.SNIPPET_MAX_VISUAL_ROWS:
+            budget = self.SNIPPET_MAX_VISUAL_ROWS * 80
+            if len(piece) > budget:
+                piece = piece[:budget].rstrip() + "…"
+                more = True
+        return piece, more
+
+    def render(self):
+        if self.tool_status == "completed":
+            status_icon = "✓"
+            border_style = Theme.BR_GREEN
+        elif self.tool_status == "failed":
+            status_icon = "✗"
+            border_style = Theme.BR_RED
+        elif self.tool_status == "in_progress":
+            status_icon = "⟳"
+            border_style = Theme.BR_YELLOW
+        else:
+            status_icon = "…"
+            border_style = Theme.BR_BLUE
+
+        title = self._title_line(status_icon)
+
+        from textual.color import Color as TextualColor
+        try:
+            color = TextualColor.parse(border_style)
+        except Exception:
+            color = TextualColor.parse("blue")
+
+        lines = self.tool_output.split("\n") if self.tool_output else []
+        n_lines = len(lines) if self.tool_output else 0
+
+        if self._collapsed:
             self.styles.border = ("round", color)
             self.styles.padding = (0, 1)
-            self.border_title = title.replace("[", "\[")
+            self.border_title = title.replace("[", "\\[")
             body = Text()
             if not self.tool_output:
                 cite = self.tool_ts or short_ref(self.tool_id)
@@ -128,7 +210,6 @@ class ToolCallPanel(Static):
                 piece, more = self._collapsed_snippet()
                 body.append(piece, style=Theme.GRAY)
                 if more:
-                    # rough leftover: newlines + char overflow
                     hidden = max(0, n_lines - self.SNIPPET_LINES)
                     body.append(
                         f"\n  ▸ +{hidden} lines — click to expand",
@@ -149,7 +230,6 @@ class ToolCallPanel(Static):
                 )
             else:
                 display = self.tool_output
-            # Soft-wrap bomb even expanded: cap total chars shown
             max_exp_chars = self.MAX_EXPANDED_LINES * 120
             if len(display) > max_exp_chars:
                 display = (

@@ -548,6 +548,19 @@ class GrokBackend(AgentBackend):
                               " (previous turn was still in progress)")
                     self._pending_tool_calls.clear()  # new turn — prior tools done
                     self._delivery_confirmed = True
+                    # Push user turn into hot NOW so aa-dev TUI (hot-only) sees
+                    # the submitted turn without waiting for first agent frames
+                    # (prod tails updates and looks "immediate"; Eric 15s lag).
+                    try:
+                        self.sync_hot_stream()
+                    except Exception as e:
+                        print(f"[grok_backend] sync_hot on receipt: {e}")
+                    w = getattr(self, "_updates_hot_watcher", None)
+                    if w is not None:
+                        try:
+                            w.kick()
+                        except Exception:
+                            pass
                     return  # Receipt confirmed
 
                 # Track tool calls from prior turn still visible in updates
@@ -891,6 +904,12 @@ class GrokBackend(AgentBackend):
         if self._hot_frames_since_sync >= every:
             self._hot_frames_since_sync = 0
             self.sync_hot_stream()
+            w = getattr(self, "_updates_hot_watcher", None)
+            if w is not None:
+                try:
+                    w.kick()
+                except Exception:
+                    pass
 
     def refresh_tokens(self) -> int:
         """Read latest from updates.jsonl to get current token count.

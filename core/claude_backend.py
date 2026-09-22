@@ -465,6 +465,18 @@ class ClaudeBackend(AgentBackend):
         }) + "\n"
         self._proc.stdin.write(msg.encode("utf-8"))
         await self._proc.stdin.drain()
+        # Catch hot up so TUI (hot-only) sees the user turn without waiting
+        # for the first assistant frames.
+        try:
+            self.sync_hot_stream()
+        except Exception as e:
+            print(f"[claude_backend] sync_hot after send_prompt: {e}")
+        w = getattr(self, "_updates_hot_watcher", None)
+        if w is not None:
+            try:
+                w.kick()
+            except Exception:
+                pass
         return None  # NDJSON doesn't use request IDs
 
     async def collect_response(

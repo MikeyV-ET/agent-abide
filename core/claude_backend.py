@@ -29,6 +29,9 @@ STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 
 # How far back in the transcript to look for the last usage-bearing line.
 SEED_SCAN_BYTES = 2 * 1024 * 1024
+# A compact_boundary lands near the tail right after compaction, but the
+# post-compaction turn can push it back quickly; scan wider than the seed.
+COMPACT_SCAN_BYTES = 8 * 1024 * 1024
 
 
 def _occupancy_from_usage(usage) -> int:
@@ -76,6 +79,8 @@ class ClaudeBackend(AgentBackend):
         self._hot_ingest: bool = False
         # --- binary state observation (ClaudeInProcessObserver) ---
         self._observer = None
+        # --- compaction: uuid of the last compact_boundary already reported ---
+        self._last_compaction_uuid: Optional[str] = None
 
     async def start(self, agent_cwd: str, model: Optional[str] = None,
                     session_id: Optional[str] = None, yolo: bool = True,
@@ -709,6 +714,81 @@ class ClaudeBackend(AgentBackend):
             except Exception:
                 pass
         return self._total_tokens
+
+    #: Measured live: a manual /compact of an 878k context took durationMs
+    #: 115040. The 30s default would have declared it failed while it worked.
+    compaction_poll_seconds: int = 240
+
+    def _latest_compact_boundary(self) -> Optional[dict]:
+        """Newest `compact_boundary` record in the session transcript, or None.
+
+        Claude Code writes one of these every time it compacts, auto or manual:
+
+            {"type": "system", "subtype": "compact_boundary",
+             "compactMetadata": {"trigger": "manual", "preTokens": 878559,
+                                 "postTokens": 9961, "durationMs": 115040, ...}}
+
+        preTokens/postTokens are exact, which is why this is preferred over the
+        usage-based estimate in _seed_tokens_from_session.
+        """
+        path = self.session_file
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            with open(path, "rb") as f:
+                size = f.seek(0, os.SEEK_END)
+                f.seek(max(0, size - COMPACT_SCAN_BYTES))
+                chunk = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+
+        for line in reversed(chunk.split("\n")):
+            line = line.strip()
+            if not line or "compact_boundary" not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # truncated head of the scan window, or a partial write
+            if obj.get("subtype") == "compact_boundary" and obj.get("compactMetadata"):
+                return obj
+        return None
+
+    def pop_compaction_event(self) -> tuple[bool, Optional[int], int]:
+        """(landed, tokens_after, tokens_before) for a not-yet-reported compaction.
+
+        Claude's answer to GrokBackend's auto_compact_completed frame. Without
+        this the base class returns (False, None, 0), and turn_engine's
+
+            tokens_before = event_tb or tokens_before
+            self.total_tokens = event_ta or self.total_tokens
+
+        silently keeps the PRE-compaction numbers. Live on 2026-09-22 that told
+        me "Context reduced from 878095 to 878095 tokens" with a context_left
+        tag of "0.0k till autocompaction", on a context that had just fallen to
+        9,961 -- the numbers were on disk the whole time.
+
+        Each boundary is reported once (deduped by uuid), so the poll loop can
+        call this repeatedly while it waits. Also lowers _total_tokens, which is
+        otherwise stale until the next assistant frame carries fresh usage.
+        """
+        boundary = self._latest_compact_boundary()
+        if not boundary:
+            return False, None, 0
+
+        uuid = boundary.get("uuid")
+        if uuid and uuid == self._last_compaction_uuid:
+            return False, None, 0  # already reported this one
+
+        meta = boundary.get("compactMetadata") or {}
+        post = meta.get("postTokens")
+        pre = meta.get("preTokens")
+        if not isinstance(post, int) or not isinstance(pre, int):
+            return False, None, 0
+
+        self._last_compaction_uuid = uuid
+        self._total_tokens = post
+        return True, post, pre
 
     async def drain_stale(self) -> tuple[int, str]:
         drained = 0

@@ -160,6 +160,11 @@ class AgentBackend(ABC):
         """
         return {"status": "skipped", "reason": "backend does not ingest hot"}
 
+    #: Seconds handle_compact_command will wait for an async compaction to land.
+    #: Backends whose compaction is slow raise this; grok's default stays 30s so
+    #: raising it for Claude (observed durationMs 115040) cannot delay grok.
+    compaction_poll_seconds: int = 30
+
     def pop_compaction_event(self) -> tuple[bool, 'Optional[int]', int]:
         """Return (True, tokens_after, tokens_before) if compaction was detected.
 

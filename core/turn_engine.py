@@ -921,28 +921,36 @@ class TurnEngine:
                 print(f"[asdaaas] Compact pending: {tokens_before} -> {self.total_tokens} "
                       "(polling for async completion)")
                 compaction_landed = False
-                for _poll in range(15):
+                event_ta, event_tb = None, 0
+                # The backend's own compaction record is the real signal; the
+                # 0.6x token heuristic is the fallback for backends that have
+                # none. Poll budget is per-backend: Claude's compaction of an
+                # 878k context measured 115s, well past the 30s grok needs.
+                budget = getattr(self.backend, "compaction_poll_seconds", 30)
+                deadline = time.monotonic() + budget
+                while time.monotonic() < deadline:
                     await asyncio.sleep(2)
                     self.total_tokens = self.backend.refresh_tokens()
+                    landed, ev_ta, ev_tb = self.backend.pop_compaction_event()
+                    if landed:
+                        compaction_landed = True
+                        event_ta, event_tb = ev_ta, ev_tb
+                        break
                     if self.total_tokens < tokens_before * 0.6:
                         compaction_landed = True
                         break
+                if not compaction_landed:
+                    print(f"[asdaaas] Compact still pending after {budget}s poll — queueing doorbell anyway")
+                if event_ta is None:
+                    # Heuristic exit, or no event: take whatever the backend has.
+                    _, event_ta, event_tb = self.backend.pop_compaction_event()
+                tokens_before = event_tb or tokens_before
+                self.total_tokens = event_ta or self.total_tokens
                 if compaction_landed:
-                    _, event_ta, event_tb = self.backend.pop_compaction_event()
-                    tokens_before = event_tb or tokens_before
-                    self.total_tokens = event_ta or self.total_tokens
                     print(f"[asdaaas] Compact completed (async): {tokens_before} -> {self.total_tokens}")
-                    self._prev_tokens = self.total_tokens
-                    self.turns_since_compaction = 0
-                    _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens, env=self.env)
-                else:
-                    _, event_ta, event_tb = self.backend.pop_compaction_event()
-                    tokens_before = event_tb or tokens_before
-                    self.total_tokens = event_ta or self.total_tokens
-                    print(f"[asdaaas] Compact still pending after 30s poll — queueing doorbell anyway")
-                    _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens, env=self.env)
-                    self.turns_since_compaction = 0
-                    self._prev_tokens = self.total_tokens
+                _queue_post_compaction_doorbell(agent_name, tokens_before, self.total_tokens, env=self.env)
+                self.turns_since_compaction = 0
+                self._prev_tokens = self.total_tokens
             else:
                 _, event_ta, event_tb = self.backend.pop_compaction_event()
                 tokens_before = event_tb or tokens_before

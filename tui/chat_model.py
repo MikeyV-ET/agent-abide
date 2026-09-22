@@ -92,6 +92,8 @@ def classify_turn_trigger(text: str) -> str:
     """Mirror asdaaas_tui.classify_turn_trigger for pure tests."""
     t = text or ""
     low = t.lower()
+    if "[aa.control]" in low[:40]:
+        return "aa-control"
     if "localmail" in low[:60] or "[FROM:" in t[:30]:
         return "localmail"
     if "continue" in low[:80] and "your turn" in low:
@@ -233,7 +235,10 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
             snap = update.get("task_snapshot") or {}
             msg = f"Task completed: {snap.get('command', '?')} exit={snap.get('exit_code', '?')}"
         elif su == "retry_state":
-            msg = f"Retry: {update.get('reason', '')}"
+            attempt = update.get("attempt", "?")
+            mx = update.get("max_retries", "?")
+            reason = update.get("reason", "")
+            msg = update.get("message") or f"Retry {attempt}/{mx}: {reason}"
         elif su == "doom_loop_detected":
             msg = "Doom loop detected"
         elif su == "auto_compact_started":

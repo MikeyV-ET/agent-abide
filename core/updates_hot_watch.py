@@ -239,8 +239,15 @@ class UpdatesHotWatcher:
         self._run_sync()
         while not self._stop.is_set():
             if self._poll_only or self._fd is None:
-                # Slow poll fallback
-                if self._stop.wait(self.idle_poll_s):
+                # Slow poll fallback — also honor kick()/dirty
+                if self._dirty.wait(self.idle_poll_s):
+                    if self._stop.is_set():
+                        break
+                    self._dirty.clear()
+                    time.sleep(self.debounce_s)
+                    self._run_sync()
+                    continue
+                if self._stop.is_set():
                     break
                 self._run_sync()
                 continue

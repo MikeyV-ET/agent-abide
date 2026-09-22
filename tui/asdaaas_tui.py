@@ -3543,6 +3543,9 @@ Type anything else to send a message to the agent.
                         self.call_from_thread(
                             self._dispatch_event_for_agent, event, agent_name
                         )
+                    # After every batch: layout-flush open speech + scroll if following
+                    if batch:
+                        self.call_from_thread(self._flush_agent_paint, agent_name)
                     self._debug(
                         f"TAIL_POLL kind={hist_kind} read={len(new_data)} lines={len(lines)} "
                         f"parsed={len(parsed)} coalesced={len(batch)} "
@@ -3816,6 +3819,36 @@ Type anything else to send a message to the agent.
         # Bound DOM growth for long-lived sessions (7d+ must stay responsive).
         self._maybe_prune_after_mount()
 
+    def _flush_agent_paint(self, agent_name: str) -> None:
+        """Main-thread: layout open speech + pin to bottom if following tail."""
+        saved = self._active_agent
+        try:
+            self._active_agent = agent_name
+            msg = self._current_agent_msg
+            if msg is not None:
+                try:
+                    msg.refresh(layout=True)
+                except Exception:
+                    pass
+            think = self._current_thinking
+            if think is not None:
+                try:
+                    think.refresh(layout=True)
+                except Exception:
+                    pass
+            try:
+                content = self._content_scroll(agent_name)
+                content.refresh(layout=True)
+            except Exception:
+                pass
+            if self._following_tail():
+                try:
+                    self._scroll_to_bottom()
+                except Exception:
+                    pass
+        finally:
+            self._active_agent = saved
+
     def _close_open_agent_streams(self, *, layout: bool = True) -> None:
         """Flush layout on open speech/thinking, then clear streaming refs.
 
@@ -3843,6 +3876,16 @@ Type anything else to send a message to the agent.
                     pass
         self._current_agent_msg = None
         self._current_thinking = None
+        try:
+            content = self._content_scroll()
+            content.refresh(layout=True)
+        except Exception:
+            pass
+        if self._following_tail():
+            try:
+                self._scroll_to_bottom()
+            except Exception:
+                pass
 
     def _on_agent_message_chunk(self, update: dict) -> None:
         """Handle streaming agent message text."""

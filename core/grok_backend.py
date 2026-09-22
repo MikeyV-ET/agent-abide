@@ -659,6 +659,16 @@ class GrokBackend(AgentBackend):
                         updates, speech_chunks, thought_chunks,
                         pending_tool_calls, on_speech_chunk, on_tool_call, on_meta,
                     )
+                    # Second drain: speech/turn_completed sometimes land after
+                    # turn_ended (Squiggy hot stuck on open tool_call).
+                    await asyncio.sleep(POST_TURN_DRAIN_DELAY_S)
+                    more, _ = self._file_source.read_new_lines()
+                    if more:
+                        self._process_update_frames(
+                            more, speech_chunks, thought_chunks,
+                            pending_tool_calls, on_speech_chunk, on_tool_call, on_meta,
+                        )
+                    self._final_hot_sync()
                     return ResponseResult(
                         speech="".join(speech_chunks),
                         thoughts="".join(thought_chunks),
@@ -682,6 +692,7 @@ class GrokBackend(AgentBackend):
 
             await asyncio.sleep(0.05)
 
+        self._final_hot_sync()
         return ResponseResult(
             speech="".join(speech_chunks),
             thoughts="".join(thought_chunks),
@@ -910,6 +921,26 @@ class GrokBackend(AgentBackend):
                     w.kick()
                 except Exception:
                     pass
+
+    def _final_hot_sync(self) -> None:
+        """End-of-collect / quiet-path catch-up for hot.jsonl.
+
+        Frame-driven sync can miss the last tool_result + speech + turn_completed
+        when those land just as collect exits, or while asdaaas is between turns.
+        Always push checkpoint→hot here; watcher kick covers the idle case.
+        """
+        if not getattr(self, "_hot_ingest", False):
+            return
+        try:
+            self.sync_hot_stream()
+        except Exception as e:
+            print(f"[grok_backend] final hot sync: {e}")
+        w = getattr(self, "_updates_hot_watcher", None)
+        if w is not None:
+            try:
+                w.kick()
+            except Exception:
+                pass
 
     def refresh_tokens(self) -> int:
         """Read latest from updates.jsonl to get current token count.

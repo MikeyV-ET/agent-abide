@@ -41,14 +41,18 @@ def test_sync_hot_stream_from_backend(tmp_path: Path):
     b._session_id = "sid-test"
     b._session_dir = sess
     b.configure_aa_history(home, "TripG", enabled=True)
-
+    w = getattr(b, "_updates_hot_watcher", None)
+    if w is not None:
+        w.stop()
+        b._updates_hot_watcher = None
+    # Watcher may have already ingested on start — re-sync is fine; assert hot content
     r = b.sync_hot_stream()
     assert r.get("status") == "ok", r
-    assert r.get("lines_ingested") == 2
     hot = home / "asdaaas" / "history" / "hot.jsonl"
     assert hot.exists()
     evs = [json.loads(l) for l in hot.read_text().splitlines() if l.strip()]
-    assert len(evs) == 2
+    # Exactly the two source lines (no double-append via shared checkpoint)
+    assert len(evs) == 2, [(e.get("body") or {}).get("text") for e in evs]
     assert evs[0]["backend"] == "grok"
     assert evs[0]["format"] == "aa.stream"
     assert evs[0]["body"]["text"] == "hello"

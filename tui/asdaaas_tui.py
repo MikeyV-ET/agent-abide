@@ -3291,8 +3291,12 @@ Type anything else to send a message to the agent.
                     from paint_mount import mount_items
                     from chat_model import ChatState
 
-                    # Catch-up: fold hot lines → paint units until enough FULL speech
-                    # (+ total units). Screen policy lives on paint units, not raw bytes.
+                    # Catch-up: take a *suffix* of the tip file window so we mount
+                    # only ~one glass of paint, and set earliest_offset to the
+                    # first line of that suffix. Mounting an entire multi-MB fold
+                    # then pruning to 400 dropped older tools while earliest still
+                    # pointed at window start — PageUp never refilled the gap
+                    # (tools before "Still up: localmail…" vanished; Eric 2026-09-22).
                     want = int(tail_count) if tail_count else None
                     try:
                         _tg = tip_geom
@@ -3301,13 +3305,12 @@ Type anything else to send a message to the agent.
                     tip_width = int(_tg[0]) if _tg else 80
                     tip_height = int(_tg[1]) if _tg and len(_tg) > 1 else 24
                     min_full = max(8, (want or tip_height) // 3)
-                    min_total = max(15, min_full + 5)
+                    min_total = max(20, min_full + 8)
 
-                    windows = [0.5, 2, 8, 32]
-                    cs = ChatState()
-                    earliest_off = current_size
-                    last_data_start = 0
-                    chosen_lines: list[str] = []
+                    # Need enough *file* to include tools before recent speech
+                    windows = [2, 8, 32]
+                    pairs: list[tuple[int, str]] = []  # (byte_offset, line)
+                    data_start = 0
 
                     for mib in windows:
                         read_size = min(current_size, int(mib * 1024 * 1024))
@@ -3319,37 +3322,82 @@ Type anything else to send a message to the agent.
                             data_start = f.tell()
                             raw = f.read()
                             state["updates_offset"] = f.tell()
-                        last_data_start = data_start
                         text_data = raw.decode("utf-8", errors="replace")
-                        lines = [ln for ln in text_data.split("\n") if ln.strip()]
-                        # Fold full window each time (idempotent rebuild)
-                        cs = ChatState()
-                        fold_hot_lines(cs, lines)
-                        # earliest = first kept line offset approx data_start
-                        earliest_off = data_start
-                        # refine: first line start among paired that contributed
-                        # (byte-accurate: first non-empty line at data_start)
-                        c = count_meaningful_paint(cs)
+                        pairs = []
+                        pos = data_start
+                        for ln in text_data.split("\n"):
+                            if ln.strip():
+                                pairs.append((pos, ln))
+                            pos += len(ln.encode("utf-8", errors="replace")) + 1
+                        # probe fold of full window — enough raw material?
+                        probe = ChatState()
+                        fold_hot_lines(probe, [ln for _, ln in pairs])
+                        c = count_meaningful_paint(probe)
                         self._debug(
-                            f"REPLAY_FOLD mib={mib} lines={len(lines)} "
-                            f"paint={c} min_full={min_full} min_total={min_total}"
+                            f"REPLAY_FOLD mib={mib} lines={len(pairs)} paint={c}"
                         )
-                        if enough_for_tip(cs, min_full=min_full, min_total=min_total) or seek_pos == 0:
-                            chosen_lines = lines
+                        if enough_for_tip(
+                            probe, min_full=min_full, min_total=min_total
+                        ) or seek_pos == 0:
                             break
 
-                    state["earliest_offset"] = int(earliest_off)
-                    state["chat_state"] = cs
+                    # Smallest suffix of pairs that still satisfies tip budget
+                    cs = ChatState()
+                    chosen_pairs = pairs
+                    if pairs:
+                        step = max(10, len(pairs) // 40)
+                        n_best = len(pairs)
+                        for n in range(step, len(pairs) + 1, step):
+                            trial = ChatState()
+                            fold_hot_lines(trial, [ln for _, ln in pairs[-n:]])
+                            if enough_for_tip(
+                                trial, min_full=min_full, min_total=min_total
+                            ):
+                                n_best = n
+                                cs = trial
+                                break
+                        else:
+                            cs = ChatState()
+                            fold_hot_lines(cs, [ln for _, ln in pairs])
+                            n_best = len(pairs)
+                        # shrink
+                        for n in range(n_best, max(15, min_total) - 1, -max(5, step // 2)):
+                            trial = ChatState()
+                            fold_hot_lines(trial, [ln for _, ln in pairs[-n:]])
+                            if enough_for_tip(
+                                trial, min_full=min_full, min_total=min_total
+                            ):
+                                cs = trial
+                                n_best = n
+                            else:
+                                break
+                        chosen_pairs = pairs[-n_best:]
 
-                    def _mount_tip(an=agent_name, items=list(cs.items)):
+                    earliest_off = (
+                        int(chosen_pairs[0][0]) if chosen_pairs else int(data_start)
+                    )
+                    state["earliest_offset"] = earliest_off
+                    state["chat_state"] = cs
+                    items = list(cs.items)
+                    c = count_meaningful_paint(cs)
+                    self._debug(
+                        f"TIP_SUFFIX lines={len(chosen_pairs)} paint={c} "
+                        f"earliest={earliest_off}"
+                    )
+
+                    def _mount_tip(an=agent_name, items=items, turn=cs.logical_turn):
                         try:
                             content = self._content_scroll(an)
-                            # clear any empty placeholder? mount append
                             n = mount_items(content, items)
                             st = self._agent_state.get(an) or {}
-                            if cs.logical_turn:
-                                st["logical_turn"] = cs.logical_turn
-                            self._debug(f"TIP_MOUNT agent={an} widgets={n} items={len(items)}")
+                            if turn:
+                                st["logical_turn"] = turn
+                            # Do not prune away tip immediately
+                            st["loading_history"] = False
+                            self._debug(
+                                f"TIP_MOUNT agent={an} widgets={n} "
+                                f"tools={sum(1 for it in items if getattr(it, 'tool_id', None) or type(it).__name__=='ToolItem')}"
+                            )
                             return n
                         except Exception as e:
                             self._debug(f"TIP_MOUNT err {e!r}")
@@ -3359,9 +3407,8 @@ Type anything else to send a message to the agent.
                         replay_count = self.call_from_thread(_mount_tip) or 0
                     except Exception as e:
                         self._debug(f"TIP_MOUNT call err {e!r}")
-                        # Fallback: dispatch events so something shows
                         replay_count = 0
-                        for line in chosen_lines[-200:]:
+                        for _off, line in chosen_pairs[-200:]:
                             ev = line_to_tui_event(line, hist_kind)
                             if not ev:
                                 continue
@@ -3373,16 +3420,15 @@ Type anything else to send a message to the agent.
                             except Exception:
                                 pass
 
-                    c = count_meaningful_paint(cs)
                     t_label = f"-t{want}" if want else "tip"
                     msg = (
                         f"Replay ({t_label}): {c.get('full', 0)} full + "
                         f"{c.get('snippet', 0)} tools + {c.get('system', 0)} sys "
-                        f"= {c.get('total', 0)} paint from {hist_kind}"
+                        f"= {c.get('total', 0)} paint · earliest@{earliest_off}"
                     )
                     try:
                         self.call_from_thread(
-                            lambda m=msg: self.notify(m, severity="information", timeout=3)
+                            lambda m=msg: self.notify(m, severity="information", timeout=4)
                         )
                     except Exception:
                         pass
@@ -3391,15 +3437,6 @@ Type anything else to send a message to the agent.
                         self.call_from_thread(self._force_scroll_bottom)
                     except Exception:
                         pass
-            except Exception as e:
-                self._debug(f"REPLAY error: {e!r}")
-                try:
-                    err = f"Replay error: {e}"
-                    self.call_from_thread(
-                        lambda m=err: self.notify(m, severity="error", timeout=6)
-                    )
-                except Exception:
-                    pass
             state["replay_done"] = True
             self._replay_done = True
 

@@ -3266,17 +3266,8 @@ Type anything else to send a message to the agent.
                 info = self._scan_updates_for_latest_aa_control(updates_path)
                 if info:
                     content = info.get("content") if isinstance(info, dict) else info
-                    speech_after = (
-                        bool(info.get("speech_after"))
-                        if isinstance(info, dict)
-                        else False
-                    )
-                    if content and speech_after:
+                    if content:
                         self.call_from_thread(self._apply_delay_header, content)
-                    elif content:
-                        self.call_from_thread(
-                            self._mount_aa_control_from_catchup, content
-                        )
             except Exception:
                 state["updates_offset"] = 0
 
@@ -3412,27 +3403,18 @@ Type anything else to send a message to the agent.
             state["replay_done"] = True
             self._replay_done = True
 
-            # Reload-safe delay chrome. If speech came *after* the delay in
-            # hot (normal: delay tool then final agent text), only update the
-            # header — do NOT append [aa.control] at the scroll bottom or the
-            # tip looks like delay happened after the turn finished.
+            # Delay chrome after tip: HEADER ONLY. Never append [aa.control] at
+            # the scroll bottom on catch-up — that always looks like the turn
+            # ended on delay (Eric 2026-09-22). Live tool path still mounts
+            # control when a delay is registered mid-session.
             try:
                 info = self._scan_updates_for_latest_aa_control(updates_path)
                 if info:
                     content = info.get("content") if isinstance(info, dict) else info
-                    speech_after = (
-                        bool(info.get("speech_after"))
-                        if isinstance(info, dict)
-                        else False
-                    )
-                    if content and speech_after:
+                    if content:
                         self.call_from_thread(self._apply_delay_header, content)
-                    elif content:
-                        self.call_from_thread(
-                            self._mount_aa_control_from_catchup, content
-                        )
             except Exception as _e:
-                self._debug(f"aa_control catch-up mount: {_e}")
+                self._debug(f"aa_control catch-up header: {_e}")
 
         while not worker.is_cancelled:
             # Exit if tab was closed
@@ -4545,6 +4527,8 @@ Type anything else to send a message to the agent.
             hist_kind,
             target_rows=target_rows,
             width=max(40, int(tip_width or 80)),
+            max_events=300,
+            overshoot=1.25,
         )
 
     def _apply_older_history_mount(
@@ -4591,11 +4575,73 @@ Type anything else to send a message to the agent.
                 self._debug(f"PAGEUP_FOLD err {e!r}")
                 widgets_to_prepend = []
 
+            # Fallback: fold produced no tools but scan had tool events — dispatch
+            # each event so ToolCallPanels still appear when scrolling back.
+            if events and not any(
+                getattr(w, "tool_id", None) for w in widgets_to_prepend
+            ):
+                n_tool_ev = sum(
+                    1
+                    for e in events
+                    if ((e.get("params") or {}).get("update") or {}).get(
+                        "sessionUpdate"
+                    )
+                    in ("tool_call", "tool_call_update")
+                )
+                if n_tool_ev:
+                    self._debug(
+                        f"PAGEUP_FOLD no tool widgets but {n_tool_ev} tool events "
+                        f"— fallback dispatch"
+                    )
+                    # Build via live handlers into a temp list by dispatching with
+                    # active agent switched; collect is hard — mount via fold retry
+                    # with force tool items from events directly
+                    from chat_model import ToolItem as _TI
+                    from paint_mount import widget_for_item as _wfi
+                    for e in events:
+                        u = (e.get("params") or {}).get("update") or {}
+                        et = u.get("sessionUpdate")
+                        if et not in ("tool_call", "tool_call_update"):
+                            continue
+                        tid = str(u.get("toolCallId") or "")
+                        if not tid:
+                            continue
+                        # skip if already have
+                        if any(getattr(w, "tool_id", None) == tid for w in widgets_to_prepend):
+                            continue
+                        title = u.get("title") or "tool"
+                        status = u.get("status") or (
+                            "completed" if et == "tool_call_update" else "running"
+                        )
+                        out = ""
+                        cl = u.get("content") or []
+                        if isinstance(cl, list):
+                            for block in cl:
+                                if isinstance(block, dict):
+                                    inner = block.get("content") or {}
+                                    if isinstance(inner, dict) and inner.get("text"):
+                                        out += str(inner["text"])
+                        ti = _TI(
+                            tool_id=tid,
+                            title=str(title),
+                            status=str(status),
+                            output=out,
+                            collapsed=True,
+                        )
+                        w = _wfi(ti)
+                        if w is not None:
+                            widgets_to_prepend.append(w)
+
             if widgets_to_prepend:
                 content._follow_tail = False
                 anchor = first_child
+                self._debug(
+                    f"PAGEUP_MOUNT n={len(widgets_to_prepend)} "
+                    f"tools={sum(1 for w in widgets_to_prepend if getattr(w, 'tool_id', None))}"
+                )
                 try:
                     if first_child is not None:
+                        # Mount oldest-first before anchor
                         content.mount(*widgets_to_prepend, before=first_child)
                     else:
                         for w in widgets_to_prepend:
@@ -4604,7 +4650,10 @@ Type anything else to send a message to the agent.
                     self.notify(f"Mount error: {e}", severity="error")
                     for w in widgets_to_prepend:
                         try:
-                            content.mount(w)
+                            if first_child is not None:
+                                content.mount(w, before=first_child)
+                            else:
+                                content.mount(w)
                         except Exception:
                             pass
 

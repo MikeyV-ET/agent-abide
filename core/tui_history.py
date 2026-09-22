@@ -41,23 +41,20 @@ def updates_jsonl_candidates(agent_home: Path) -> list[Path]:
 
 
 def resolve_history_source(agent_home: Path, prefer: Optional[str] = None) -> tuple[str, Path]:
-    """Return (kind, path) kind in hot|updates|none.
+    """Return (kind, path). Dev TUI SoR is **hot.jsonl only**.
 
-    prefer: env TUI_HISTORY_SOURCE or arg: hot|updates|auto
+    prefer: env TUI_HISTORY_SOURCE or arg. Default / auto / hot → history/hot.jsonl.
+    ``updates`` is rejected for display resolve (legacy; do not fall back).
+    Agents join aa-dev TUI only after backend writes hot.
     """
-    prefer = (prefer or os.environ.get("TUI_HISTORY_SOURCE") or "auto").lower()
+    prefer = (prefer or os.environ.get("TUI_HISTORY_SOURCE") or "hot").lower()
     hot = hot_jsonl_path(agent_home)
-    if prefer == "hot":
-        return ("hot", hot) if hot.exists() else ("none", hot)
-    if prefer == "updates":
-        ups = updates_jsonl_candidates(agent_home)
-        return ("updates", ups[0]) if ups else ("none", hot)
-    # auto
-    if hot.exists() and hot.stat().st_size > 0:
+    if prefer in ("updates", "update"):
+        # Explicit opt-out removed: hold the line on hot.
+        return ("none", hot)
+    # hot or auto (auto ≡ hot on aa-dev)
+    if hot.exists():  # empty file ok — live tail will fill
         return ("hot", hot)
-    ups = updates_jsonl_candidates(agent_home)
-    if ups:
-        return ("updates", ups[0])
     return ("none", hot)
 
 

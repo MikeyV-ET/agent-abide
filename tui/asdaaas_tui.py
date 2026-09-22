@@ -7,7 +7,7 @@ The human operator should not be able to tell the difference from the real grok 
 
 Architecture:
   Input:  User types in InputBar → written to asdaaas TUI adapter inbox as JSON
-  Output: Tails history/hot.jsonl (aa.stream) when present, else updates.jsonl → real-time
+  Output: Tails history/hot.jsonl (aa.stream) only — no updates.jsonl fallback on aa-dev
   Status: Polls health.json + gaze.json for the status bar
 
 Layout:
@@ -3190,45 +3190,30 @@ Type anything else to send a message to the agent.
         return None
 
     def _resolve_display_history(self, agent_name: str) -> tuple[str, Optional[Path]]:
-        """Prefer asdaaas/history/hot.jsonl; fall back to updates.jsonl.
+        """aa-dev display SoR: asdaaas/history/hot.jsonl only (no updates.jsonl).
 
-        Returns (kind, path) kind in hot|updates|none.
-        Env TUI_HISTORY_SOURCE=hot|updates|auto (default auto).
+        Siblings come onto hot before they join this TUI. Missing hot →
+        ("none", expected_path) so the tab can wait/create rather than
+        silently painting a second history world from updates.jsonl.
         """
         try:
             core = str(Path(__file__).resolve().parent.parent / "core")
             if core not in sys.path:
                 sys.path.insert(0, core)
             from tui_history import resolve_history_source, hot_jsonl_path
-        except Exception:
-            # fallback: updates only
-            if agent_name == self._agents[0]:
-                p = Config.find_updates_file()
-            else:
-                p = self._find_updates_for_agent(agent_name)
-            return ("updates", p) if p else ("none", None)
+        except Exception as e:
+            self._debug(f"resolve_display_history import: {e!r}")
+            home = Config.agent_home(agent_name)
+            hot = home / "asdaaas" / "history" / "hot.jsonl"
+            return ("hot", hot) if hot.exists() else ("none", hot)
 
         home = Config.agent_home(agent_name)
-        prefer = os.environ.get("TUI_HISTORY_SOURCE") or "auto"
-        # Explicit --updates CLI forces updates for primary
-        if agent_name == self._agents[0] and Config.UPDATES_FILE:
-            return ("updates", Path(Config.UPDATES_FILE))
-
-        kind, path = resolve_history_source(home, prefer=prefer)
-        if kind == "hot" and path and path.exists():
+        kind, path = resolve_history_source(home, prefer="hot")
+        if kind == "hot" and path is not None:
+            # Exist or not: always the hot path (tail waits for create)
             return ("hot", path)
-        # updates: try tui_history candidates then grok sessions
-        if kind == "updates" and path and path.exists():
-            return ("updates", path)
-        if agent_name == self._agents[0]:
-            up = Config.find_updates_file()
-        else:
-            up = self._find_updates_for_agent(agent_name)
-        if up:
-            return ("updates", up)
-        # last chance: empty hot path may appear later
         hot = hot_jsonl_path(home)
-        return ("hot" if prefer == "hot" else "none", hot if prefer == "hot" else None)
+        return ("none", hot)
 
     def _tail_updates_for_agent(self, agent_name: str) -> None:
         """Background thread: tail display history (hot.jsonl or updates.jsonl)."""
@@ -4488,7 +4473,7 @@ Type anything else to send a message to the agent.
 
         # Capture scroll anchor + offsets for the worker (no UI objects in thread)
         earliest = int(state["earliest_offset"])
-        hist_kind = state.get("history_kind") or "updates"
+        hist_kind = state.get("history_kind") or "hot"
         path_str = str(updates_path)
         try:
             geom_w, geom_h = self._terminal_geometry()

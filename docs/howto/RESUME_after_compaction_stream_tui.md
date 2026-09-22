@@ -107,3 +107,8 @@ python3 scripts/run_with_geom.py 120 40 -- python3 scripts/verify_tui_tip.py --w
 ```
 
 Isolated tmux also works: `tmux -S /tmp/t new -d -x 120 -y 40 …`
+
+## aa-dev TUI: hot only (2026-09-22)
+
+Display history SoR is `asdaaas/history/hot.jsonl` only. No fallback to
+`updates.jsonl`. Bring each agent onto hot before adding them to aa-dev TUI.

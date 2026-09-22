@@ -3570,7 +3570,7 @@ Type anything else to send a message to the agent.
                 from hot_inotify import wait_hot_change
                 active = getattr(self, "_active_agent", None)
                 inactive = active is not None and agent_name != active
-                timeout = 2.0 if inactive else 1.0
+                timeout = 1.5 if inactive else 0.25
                 path = state.get("updates_path")
                 if path and Path(path).exists():
                     wait_hot_change(path, timeout_s=timeout)

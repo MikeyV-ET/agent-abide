@@ -864,7 +864,7 @@ class GrokBackend(AgentBackend):
             if cand.exists():
                 source = cand
         try:
-            return tail_grok_once(
+            r = tail_grok_once(
                 self._agent_home,
                 self._agent_name,
                 session_id=self._session_id,
@@ -872,6 +872,12 @@ class GrokBackend(AgentBackend):
                 max_lines=max_lines,
                 max_bytes=max_bytes,
             )
+            # Nudge watcher so debounced path doesn't wait idle after we already synced
+            w = getattr(self, "_updates_hot_watcher", None)
+            if w is not None and isinstance(r, dict) and r.get("status") == "ok":
+                # clear dirty - already synced; optional no-op
+                pass
+            return r
         except Exception as e:
             return {"status": "error", "error": str(e)}
 

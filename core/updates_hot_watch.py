@@ -29,9 +29,9 @@ _IN_DELETE_SELF = 0x00000400
 _IN_CREATE = 0x00000100  # if watching dir for file create
 
 # Default debounce: coalesce burst appends mid-tool
-DEFAULT_DEBOUNCE_S = 0.15
+DEFAULT_DEBOUNCE_S = 0.05
 # Safety poll even without events (missed watch / replace)
-DEFAULT_IDLE_POLL_S = 2.0
+DEFAULT_IDLE_POLL_S = 1.0
 
 
 class UpdatesHotWatcher:

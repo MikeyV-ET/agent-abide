@@ -416,9 +416,14 @@ class AgentMessage(Static):
         self._text += text
         if len(self._chunks) > 32:
             self._chunks = [self._text]
-        # Always layout: repaint-only left final lines clipped until the next
-        # user message (Squiggy). Agent speech volume is low vs tool storms.
-        self.refresh(layout=True)
+        # Fast path: repaint only (prod-like latency). Layout every N chunks so
+        # height grows; full layout+scroll on turn/tool boundary via flush.
+        n = getattr(self, "_chunk_n", 0) + 1
+        self._chunk_n = n
+        if n % 12 == 0:
+            self.refresh(layout=True)
+        else:
+            self.refresh()
 
     @property
     def full_text(self) -> str:

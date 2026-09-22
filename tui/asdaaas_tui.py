@@ -3354,7 +3354,7 @@ Type anything else to send a message to the agent.
                 # Even without full replay, surface latest AA delay control from history
                 ctrl = self._scan_updates_for_latest_aa_control(updates_path)
                 if ctrl:
-                    self.call_from_thread(self._mount_aa_control_from_catchup, ctrl)
+                    self.call_from_thread(self._mount_aa_control_from_catchup, ctrl, agent_name)
             except Exception:
                 state["updates_offset"] = 0
 
@@ -3408,7 +3408,7 @@ Type anything else to send a message to the agent.
                     try:
                         ctrl = self._scan_updates_for_latest_aa_control(updates_path)
                         if ctrl:
-                            self.call_from_thread(self._mount_aa_control_from_catchup, ctrl)
+                            self.call_from_thread(self._mount_aa_control_from_catchup, ctrl, agent_name)
                     except Exception as _e:
                         self._debug(f"aa_control catch-up mount: {_e}")
             except Exception:
@@ -3791,26 +3791,36 @@ Type anything else to send a message to the agent.
             return None
 
 
-    def _mount_aa_control_line(self, content: str) -> None:
-        """Show agent AA control (delay from tool_call history) in the chat scroll."""
+    def _mount_aa_control_line(self, content: str, agent_name: str | None = None) -> None:
+        """Show AA delay control on the *owning* agent's scroll (not whatever tab is visible).
+
+        Multi-tab bug (2026-09-21): catch-up called mount without agent_name while
+        Eric viewed Trip-G, so Squiggy's until_event chrome landed on Trip-G's tip.
+        """
         try:
-            content_scroll = self._content_scroll()
+            agent = agent_name or getattr(self, "_dispatching_agent", None) or self._active_agent
+            content_scroll = self._content_scroll(agent)
             ts_str = self._event_ts_str() if hasattr(self, "_event_ts_str") else time.strftime("%H:%M")
-            state = self._agent_state.get(self._active_agent) or {}
+            state = self._agent_state.get(agent) or {}
             turn_num = int(state.get("logical_turn") or 0)
             trigger = classify_turn_trigger(content or "")
             content_scroll.mount(TurnSeparator(turn_num, trigger, ts_str))
             content_scroll.mount(SystemAlert(content, severity="info"))
-            if self._following_tail():
-                content_scroll.refresh(layout=True)
-            self._scroll_to_bottom()
-            self._debug(f"AA_CONTROL mounted: {(content or '')[:80]}")
+            # Only auto-scroll if this is the visible tab
+            if agent == self._active_agent and not getattr(self, "_room_active", False):
+                if self._following_tail():
+                    content_scroll.refresh(layout=True)
+                self._scroll_to_bottom()
+            self._debug(f"AA_CONTROL mounted agent={agent}: {(content or '')[:80]}")
         except Exception as e:
             self._debug(f"aa_control mount failed: {e}")
 
-    def _mount_aa_control_from_catchup(self, content: str) -> None:
-        """Mount control after history catch-up; refresh header delay chrome."""
-        self._mount_aa_control_line(content)
+    def _mount_aa_control_from_catchup(self, content: str, agent_name: str | None = None) -> None:
+        """Mount control after history catch-up; refresh header only if that agent is active."""
+        agent = agent_name or self._active_agent
+        self._mount_aa_control_line(content, agent)
+        if agent != self._active_agent or getattr(self, "_room_active", False):
+            return
         try:
             import re
             header = self.query_one(AgentHeader)
@@ -3823,6 +3833,7 @@ Type anything else to send a message to the agent.
             self._debug(f"aa_control header update failed: {e}")
 
     def _on_tool_call(self, update: dict) -> None:
+
         """Handle new tool call announcement."""
         tool_id = update.get("toolCallId", "")
         title = update.get("title", "unknown tool")
@@ -3848,16 +3859,32 @@ Type anything else to send a message to the agent.
         self._scroll_to_bottom()
 
     def _delay_control_from_tool_blob(self, text: str):
-        """Derive [aa.control] delay line from tool_call payload text."""
+        """Derive [aa.control] delay line from tool_call payload text.
+
+        Requires evidence the tool is *registering* a delay command (write under
+        commands/cmd_*), not merely searching history for delay JSON.
+        """
         import re
         if not text or "delay" not in text:
             return None
-        if not re.search(r"commands/cmd_[^\s\"']*\.json|commands/cmd_\$\{?date|commands/cmd_\$\(", text):
+        if not re.search(
+            r"commands/cmd_[^\s\"']*\.json|commands/cmd_\$\{?date|commands/cmd_\$\(",
+            text,
+        ):
             return None
         if not re.search(
             r'["\']action["\']\s*:\s*["\']delay["\']|"action"\s*:\s*"delay"',
             text,
         ):
+            return None
+        writes = re.search(
+            r"(cat|tee|printf|echo|open\().{0,200}commands/cmd_",
+            text,
+            re.I | re.S,
+        )
+        if re.search(r"\b(rg|grep|ripgrep)\b", text) and not writes:
+            return None
+        if not writes and not re.search(r"(>|>>).{0,40}commands/cmd_", text, re.S):
             return None
         sec = None
         m = re.search(
@@ -3872,14 +3899,13 @@ Type anything else to send a message to the agent.
             txt = tm.group(1)
         if sec == "until_event":
             detail = "until_event (standing by)"
-        elif sec is not None:
+        elif sec:
             detail = f"{sec}s before next continue"
         else:
-            detail = "delay registered"
+            detail = "registered"
         if txt:
-            detail += f" — {txt}"
+            detail = f"{detail} — {txt}"
         return f"[aa.control] delay: {detail}"
-
 
     def _on_tool_call_update(self, update: dict) -> None:
         """Handle tool call status/output updates."""

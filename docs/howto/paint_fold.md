@@ -66,3 +66,16 @@ aa-dev holds the line while the model hardens; SA and thiasai adopt the same con
 | Single painter-only path (no dual mount) | polish — dual path OK for stability |
 
 Restart aa-dev TUI to pick up tip/PageUp fold wiring.
+
+## Launch aa-dev TUI (not prod)
+
+```bash
+# From agent-abide-dev:
+./scripts/launch_tui_dev.sh -a Trip-G -a Astro -t50
+# or:
+python3 tui/asdaaas_tui.py -a Trip-G -t50
+```
+
+Prod path `~/projects/agent-abide/tui/...` does **not** include paint_fold tip toast.
+After tip load you should see a notify like:
+`Replay (tip): N full + M tools + … paint · earliest@…`

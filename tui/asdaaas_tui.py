@@ -3253,12 +3253,13 @@ Type anything else to send a message to the agent.
 
         # Determine replay behavior
         is_primary = (agent_name == self._agents[0])
-        # Non-primary always replays a short tip; PageUp lazy-load for older.
-        should_replay = (is_primary and self._replay_mode) or (not is_primary)
+        # Always catch-up tip from hot (Eric expects tip toast + tools).
+        # -r/-t still steer size; omitting -r no longer skips tip on primary.
+        should_replay = True
         tail_count = self._initial_tail_row_budget(agent_name)
         tip_geom = self._terminal_geometry()  # (width, height) closed over by worker
 
-        if not should_replay:
+        if False:  # kept for structure; tip always runs
             try:
                 file_size = updates_path.stat().st_size
                 state["updates_offset"] = file_size
@@ -3426,12 +3427,28 @@ Type anything else to send a message to the agent.
                         f"{c.get('snippet', 0)} tools + {c.get('system', 0)} sys "
                         f"= {c.get('total', 0)} paint · earliest@{earliest_off}"
                     )
+                    def _tip_notify(m=msg, an=agent_name):
+                        try:
+                            self.notify(m, severity="information", timeout=6)
+                        except Exception:
+                            pass
+                        try:
+                            self._debug(m)
+                        except Exception:
+                            pass
+                        # Also set header subtitle-ish via status if available
+                        try:
+                            st = self._agent_state.get(an) or {}
+                            st["last_tip_msg"] = m
+                        except Exception:
+                            pass
                     try:
-                        self.call_from_thread(
-                            lambda m=msg: self.notify(m, severity="information", timeout=4)
-                        )
+                        self.call_from_thread(_tip_notify)
                     except Exception:
-                        pass
+                        try:
+                            _tip_notify()
+                        except Exception:
+                            pass
                     self._debug(msg)
                     try:
                         self.call_from_thread(self._force_scroll_bottom)

@@ -40,3 +40,9 @@ turn end — otherwise the whole turn dumps at once when deliver finishes.
 
 `ClaudeBackend.collect_response` calls `sync_hot_stream()` after each frame
 and on `refresh_tokens`.
+
+## Display model
+
+TUI/SA/thiasai glass should fold aa.stream via a shared **paint unit** model
+(see `docs/howto/paint_fold.md`) — not product-specific ad hoc parsers for the
+same event kinds.

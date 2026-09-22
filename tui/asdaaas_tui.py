@@ -4502,176 +4502,147 @@ Type anything else to send a message to the agent.
         tip_width: int = 80,
         tip_height: int = 24,
     ) -> dict:
-        """Worker: walk hot/updates backward; return plain event dicts (no widgets).
+        """Worker: raw lines before earliest_offset (same fold path as tip)."""
+        from pathlib import Path as _Path
 
-        Fills ~one viewport of *rows* (speech + tools), not a thin 25-speech /
-        4-tool slice. Fat-line stall handling lives in tui_history.
-        """
+        path = _Path(path_str)
+        if earliest_offset <= 0 or not path.exists():
+            return {"lines": [], "new_earliest": 0, "events": []}
+        batch = min(int(earliest_offset), 2 * 1024 * 1024)
+        seek = max(0, earliest_offset - batch)
         try:
-            core = str(Path(__file__).resolve().parent.parent / "core")
-            if core not in sys.path:
-                sys.path.insert(0, core)
-            from tui_history import scan_older_history_by_rows
-        except Exception as e:
+            with open(path, "rb") as f:
+                f.seek(seek)
+                if seek > 0:
+                    f.readline()
+                data_start = f.tell()
+                raw = f.read(max(0, earliest_offset - data_start))
+        except OSError as e:
             return {
+                "lines": [],
+                "new_earliest": earliest_offset,
                 "events": [],
-                "new_earliest": max(0, int(earliest_offset)),
-                "speech_n": 0,
-                "bytes_read": 0,
                 "error": str(e),
             }
-        target_rows = max(12, int(tip_height or 24))
-        return scan_older_history_by_rows(
-            path_str,
-            earliest_offset,
-            hist_kind,
-            target_rows=target_rows,
-            width=max(40, int(tip_width or 80)),
-            max_events=300,
-            overshoot=1.25,
-        )
+        text = raw.decode("utf-8", errors="replace")
+        lines = [ln for ln in text.split("\n") if ln.strip()]
+        return {
+            "lines": lines,
+            "new_earliest": int(data_start),
+            "events": [],
+            "bytes_read": len(raw),
+            "line_n": len(lines),
+        }
 
     def _apply_older_history_mount(
         self, agent_name: str, payload: dict, first_child
     ) -> None:
-        """Main thread: build widgets from worker payload and prepend."""
+        """Main thread: fold raw lines → paint units → prepend (tools included)."""
         state = self._agent_state.get(agent_name)
         if not state:
             return
         try:
             content = self._content_scroll(agent_name)
+            lines = payload.get("lines") or []
             events = payload.get("events") or []
             state["earliest_offset"] = int(payload.get("new_earliest") or 0)
 
-            # Fold older events into paint units (same model as tip/live)
+            from chat_model import ChatState, ToolItem as _TI
+            from paint_fold import (
+                fold_hot_lines,
+                fold_tui_events_oldest_first,
+                count_meaningful_paint,
+            )
+            from paint_mount import widget_for_item
+
+            batch_state = ChatState()
+            if lines:
+                fold_hot_lines(batch_state, lines)
+            elif events:
+                batch_state = fold_tui_events_oldest_first(list(events)).state
+            else:
+                self._debug("PAGEUP empty payload")
+                return
+
+            items = list(batch_state.items)
+            c = count_meaningful_paint(batch_state)
+            self._debug(
+                f"PAGEUP_FOLD lines={payload.get('line_n', len(lines))} "
+                f"paint={c} earliest={state['earliest_offset']}"
+            )
+
+            cs = state.get("chat_state")
+            if cs is None:
+                cs = ChatState()
+                state["chat_state"] = cs
+            cs.items = items + list(cs.items)
+            cs.tools = {}
+            cs.open_speech_idx = None
+            cs.open_thinking_idx = None
+            for i, it in enumerate(cs.items):
+                if isinstance(it, _TI) and it.tool_id:
+                    cs.tools[it.tool_id] = i
+
+            widgets = []
+            for it in items:
+                w = widget_for_item(it)
+                if w is not None:
+                    widgets.append(w)
+
+            if not widgets:
+                self.notify(
+                    f"History: 0 widgets (lines={len(lines)} paint={c})",
+                    severity="warning",
+                    timeout=3,
+                )
+                return
+
+            content._follow_tail = False
+            anchor = first_child
+            n_tools = sum(1 for w in widgets if getattr(w, "tool_id", None))
+            self._debug(f"PAGEUP_MOUNT n={len(widgets)} tools={n_tools}")
             try:
-                fr = fold_tui_events_oldest_first(list(events))
-                items = list(fr.state.items)
-                # Merge into agent chat_state at front (rebuild tools map)
-                cs = state.get("chat_state")
-                if cs is None:
-                    from chat_model import ChatState
-                    cs = ChatState()
-                    state["chat_state"] = cs
-                # Prepend items into model (history is older than current tip)
-                cs.items = items + list(cs.items)
-                # rebuild tool indices
-                cs.tools = {}
-                cs.open_speech_idx = None
-                cs.open_thinking_idx = None
-                for i, it in enumerate(cs.items):
-                    from chat_model import ToolItem as _TI
-                    if isinstance(it, _TI) and it.tool_id:
-                        cs.tools[it.tool_id] = i
-                if fr.state.logical_turn and fr.state.logical_turn > (cs.logical_turn or 0):
-                    pass  # older batch turns are lower; keep tip turn
-                widgets_to_prepend = []
-                from paint_mount import widget_for_item
-                for it in items:
-                    w = widget_for_item(it)
-                    if w is not None:
-                        widgets_to_prepend.append(w)
+                if anchor is not None:
+                    content.mount(*widgets, before=anchor)
+                else:
+                    for w in widgets:
+                        content.mount(w)
             except Exception as e:
-                self._debug(f"PAGEUP_FOLD err {e!r}")
-                widgets_to_prepend = []
-
-            # Fallback: fold produced no tools but scan had tool events — dispatch
-            # each event so ToolCallPanels still appear when scrolling back.
-            if events and not any(
-                getattr(w, "tool_id", None) for w in widgets_to_prepend
-            ):
-                n_tool_ev = sum(
-                    1
-                    for e in events
-                    if ((e.get("params") or {}).get("update") or {}).get(
-                        "sessionUpdate"
-                    )
-                    in ("tool_call", "tool_call_update")
-                )
-                if n_tool_ev:
-                    self._debug(
-                        f"PAGEUP_FOLD no tool widgets but {n_tool_ev} tool events "
-                        f"— fallback dispatch"
-                    )
-                    # Build via live handlers into a temp list by dispatching with
-                    # active agent switched; collect is hard — mount via fold retry
-                    # with force tool items from events directly
-                    from chat_model import ToolItem as _TI
-                    from paint_mount import widget_for_item as _wfi
-                    for e in events:
-                        u = (e.get("params") or {}).get("update") or {}
-                        et = u.get("sessionUpdate")
-                        if et not in ("tool_call", "tool_call_update"):
-                            continue
-                        tid = str(u.get("toolCallId") or "")
-                        if not tid:
-                            continue
-                        # skip if already have
-                        if any(getattr(w, "tool_id", None) == tid for w in widgets_to_prepend):
-                            continue
-                        title = u.get("title") or "tool"
-                        status = u.get("status") or (
-                            "completed" if et == "tool_call_update" else "running"
-                        )
-                        out = ""
-                        cl = u.get("content") or []
-                        if isinstance(cl, list):
-                            for block in cl:
-                                if isinstance(block, dict):
-                                    inner = block.get("content") or {}
-                                    if isinstance(inner, dict) and inner.get("text"):
-                                        out += str(inner["text"])
-                        ti = _TI(
-                            tool_id=tid,
-                            title=str(title),
-                            status=str(status),
-                            output=out,
-                            collapsed=True,
-                        )
-                        w = _wfi(ti)
-                        if w is not None:
-                            widgets_to_prepend.append(w)
-
-            if widgets_to_prepend:
-                content._follow_tail = False
-                anchor = first_child
-                self._debug(
-                    f"PAGEUP_MOUNT n={len(widgets_to_prepend)} "
-                    f"tools={sum(1 for w in widgets_to_prepend if getattr(w, 'tool_id', None))}"
-                )
-                try:
-                    if first_child is not None:
-                        # Mount oldest-first before anchor
-                        content.mount(*widgets_to_prepend, before=first_child)
-                    else:
-                        for w in widgets_to_prepend:
-                            content.mount(w)
-                except Exception as e:
-                    self.notify(f"Mount error: {e}", severity="error")
-                    for w in widgets_to_prepend:
-                        try:
-                            if first_child is not None:
-                                content.mount(w, before=first_child)
-                            else:
-                                content.mount(w)
-                        except Exception:
-                            pass
-
-                def _restore_anchor(a=anchor) -> None:
+                self.notify(f"Mount error: {e}", severity="error")
+                for w in widgets:
                     try:
-                        if a is not None and a.is_attached:
-                            content.scroll_to_widget(a, animate=False, top=True)
+                        if anchor is not None:
+                            content.mount(w, before=anchor)
+                        else:
+                            content.mount(w)
                     except Exception:
                         pass
 
-                self.call_after_refresh(_restore_anchor)
-                self.set_timer(0.05, _restore_anchor)
-                self.set_timer(0.2, _restore_anchor)
+            def _restore_anchor(a=anchor) -> None:
+                try:
+                    if a is not None and a.is_attached:
+                        content.scroll_to_widget(a, animate=False, top=True)
+                except Exception:
+                    pass
+
+            self.call_after_refresh(_restore_anchor)
+            self.set_timer(0.05, _restore_anchor)
+            self.set_timer(0.2, _restore_anchor)
 
             if state["earliest_offset"] <= 0:
                 self.notify("Reached beginning of session", severity="information")
+            else:
+                try:
+                    self.notify(
+                        f"History +{len(widgets)} ({n_tools} tools)",
+                        severity="information",
+                        timeout=2,
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             self.notify(f"History error: {e}", severity="error")
+            self._debug(f"PAGEUP apply err {e!r}")
         finally:
             state["loading_history"] = False
 

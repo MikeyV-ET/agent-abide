@@ -63,6 +63,8 @@ from ephact_parser import extract_ephacts, has_partial_ephact
 from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
 from event_coalesce import coalesce_events
 from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event, interjection_key, prune_items
+from paint_fold import fold_event, fold_hot_lines, fold_tui_events_oldest_first, enough_for_tip, count_meaningful_paint
+from paint_mount import mount_items
 from tui_env import TuiEnv
 from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme, apply_auto_if_needed, apply_theme_to_app
 from chat_widgets import (
@@ -3289,122 +3291,115 @@ Type anything else to send a message to the agent.
                     core = str(Path(__file__).resolve().parent.parent / "core")
                     if core not in sys.path:
                         sys.path.insert(0, core)
-                    from tui_history import (
-                        line_to_tui_event,
-                        select_tip_by_rows,
-                        estimate_event_rows,
-                        is_speech_tui_event,
-                        is_dialogue_speech,
+                    from tui_history import line_to_tui_event
+                    from paint_fold import (
+                        fold_hot_lines,
+                        enough_for_tip,
+                        count_meaningful_paint,
                     )
+                    from paint_mount import mount_items
+                    from chat_model import ChatState
 
-                    # -t N = ~N terminal rows at chat width (viewport-aware)
+                    # Catch-up: fold hot lines → paint units until enough FULL speech
+                    # (+ total units). Screen policy lives on paint units, not raw bytes.
                     want = int(tail_count) if tail_count else None
                     try:
                         _tg = tip_geom
                     except NameError:
                         _tg = (80, 24)
                     tip_width = int(_tg[0]) if _tg else 80
-                    windows = [0.25, 1, 2, 8, 32]
-                    if hist_kind != "hot":
-                        windows = [0.25, 1, 2, 8]
-                    events: list = []
-                    data_start = 0
-                    raw_line_n = 0
+                    tip_height = int(_tg[1]) if _tg and len(_tg) > 1 else 24
+                    min_full = max(8, (want or tip_height) // 3)
+                    min_total = max(15, min_full + 5)
+
+                    windows = [0.5, 2, 8, 32]
+                    cs = ChatState()
+                    earliest_off = current_size
+                    last_data_start = 0
+                    chosen_lines: list[str] = []
+
                     for mib in windows:
                         read_size = min(current_size, int(mib * 1024 * 1024))
                         seek_pos = max(0, current_size - read_size)
                         with open(updates_path, "rb") as f:
                             f.seek(seek_pos)
                             if seek_pos > 0:
-                                f.readline()  # drop partial
+                                f.readline()
                             data_start = f.tell()
                             raw = f.read()
                             state["updates_offset"] = f.tell()
+                        last_data_start = data_start
                         text_data = raw.decode("utf-8", errors="replace")
-                        # (byte_offset, line) for earliest_offset after select
-                        paired = []
-                        pos = data_start
-                        parts = text_data.split("\n")
-                        for i, l in enumerate(parts):
-                            line_start = pos
-                            pos += len(l.encode("utf-8")) + (1 if i < len(parts) - 1 else 0)
-                            if not l.strip():
-                                continue
-                            paired.append((line_start, l))
-                        raw_line_n = len(paired)
-                        events = []  # list of (offset, event)
-                        for off, line in paired:
-                            ev = line_to_tui_event(line, hist_kind)
-                            if ev is not None:
-                                events.append((off, ev))
-                        only_probe = [e for _, e in events]
-                        tip_probe = (
-                            select_tip_by_rows(only_probe, want, width=tip_width)
-                            if want
-                            else only_probe
-                        )
-                        est_rows = sum(
-                            estimate_event_rows(e, tip_width) for e in tip_probe
-                        )
+                        lines = [ln for ln in text_data.split("\n") if ln.strip()]
+                        # Fold full window each time (idempotent rebuild)
+                        cs = ChatState()
+                        fold_hot_lines(cs, lines)
+                        # earliest = first kept line offset approx data_start
+                        earliest_off = data_start
+                        # refine: first line start among paired that contributed
+                        # (byte-accurate: first non-empty line at data_start)
+                        c = count_meaningful_paint(cs)
                         self._debug(
-                            f"REPLAY_WINDOW kind={hist_kind} mib={mib} "
-                            f"raw={raw_line_n} events={len(events)} "
-                            f"tip_widgets={len(tip_probe)} est_rows={est_rows} "
-                            f"want_rows={want} width={tip_width}"
+                            f"REPLAY_FOLD mib={mib} lines={len(lines)} "
+                            f"paint={c} min_full={min_full} min_total={min_total}"
                         )
-                        if want is None or est_rows >= want or seek_pos == 0:
+                        if enough_for_tip(cs, min_full=min_full, min_total=min_total) or seek_pos == 0:
+                            chosen_lines = lines
                             break
 
-                    only_ev = [e for _, e in events]
-                    if want:
-                        only_ev = select_tip_by_rows(
-                            only_ev, want, width=tip_width
-                        )
-                        if only_ev:
-                            want_ids = {id(e) for e in only_ev}
-                            events = [(o, e) for o, e in events if id(e) in want_ids]
-                        else:
-                            events = []
-                    if events:
-                        state["earliest_offset"] = events[0][0]
-                    else:
-                        state["earliest_offset"] = data_start
+                    state["earliest_offset"] = int(earliest_off)
+                    state["chat_state"] = cs
 
-                    replay_count = 0
-                    speech_dispatched = 0
-                    dialogue_dispatched = 0
-                    dispatch_errs = 0
-                    for _off, event in events:
+                    def _mount_tip(an=agent_name, items=list(cs.items)):
                         try:
-                            self.call_from_thread(
-                                self._dispatch_event_for_agent, event, agent_name
-                            )
-                            replay_count += 1
-                            if is_speech_tui_event(event):
-                                speech_dispatched += 1
-                            if is_dialogue_speech(event):
-                                dialogue_dispatched += 1
-                        except Exception as de:
-                            dispatch_errs += 1
-                            self._debug(f"REPLAY_DISPATCH_ERR {de!r}")
-                    if dispatch_errs:
-                        self._debug(f"REPLAY dispatch_errs={dispatch_errs}")
-                    self._debug(
-                        f"REPLAY kind={hist_kind} dispatched={replay_count} "
-                        f"dialogue={dialogue_dispatched} speech={speech_dispatched} "
-                        f"raw_lines={raw_line_n} want={want}"
-                    )
-                    est = sum(
-                        estimate_event_rows(e, tip_width) for _, e in events
-                    )
-                    t_label = f"-t{want}rows" if want else "tip"
+                            content = self._content_scroll(an)
+                            # clear any empty placeholder? mount append
+                            n = mount_items(content, items)
+                            st = self._agent_state.get(an) or {}
+                            if cs.logical_turn:
+                                st["logical_turn"] = cs.logical_turn
+                            self._debug(f"TIP_MOUNT agent={an} widgets={n} items={len(items)}")
+                            return n
+                        except Exception as e:
+                            self._debug(f"TIP_MOUNT err {e!r}")
+                            return 0
+
+                    try:
+                        replay_count = self.call_from_thread(_mount_tip) or 0
+                    except Exception as e:
+                        self._debug(f"TIP_MOUNT call err {e!r}")
+                        # Fallback: dispatch events so something shows
+                        replay_count = 0
+                        for line in chosen_lines[-200:]:
+                            ev = line_to_tui_event(line, hist_kind)
+                            if not ev:
+                                continue
+                            try:
+                                self.call_from_thread(
+                                    self._dispatch_event_for_agent, ev, agent_name
+                                )
+                                replay_count += 1
+                            except Exception:
+                                pass
+
+                    c = count_meaningful_paint(cs)
+                    t_label = f"-t{want}" if want else "tip"
                     msg = (
-                        f"Replay ({t_label} @{tip_width}cols): "
-                        f"{replay_count} widgets ~{est} rows from {hist_kind}"
+                        f"Replay ({t_label}): {c.get('full', 0)} full + "
+                        f"{c.get('snippet', 0)} tools + {c.get('system', 0)} sys "
+                        f"= {c.get('total', 0)} paint from {hist_kind}"
                     )
-                    self.call_from_thread(lambda m=msg: self.notify(m, severity="information"))
-                    time.sleep(1)
-                    self.call_from_thread(self._force_scroll_bottom)
+                    try:
+                        self.call_from_thread(
+                            lambda m=msg: self.notify(m, severity="information", timeout=3)
+                        )
+                    except Exception:
+                        pass
+                    self._debug(msg)
+                    try:
+                        self.call_from_thread(self._force_scroll_bottom)
+                    except Exception:
+                        pass
             except Exception as e:
                 self._debug(f"REPLAY error: {e!r}")
                 try:
@@ -3718,7 +3713,7 @@ Type anything else to send a message to the agent.
                 if cs is None:
                     cs = ChatState()
                     st["chat_state"] = cs
-                apply_event(cs, event)
+                fold_event(cs, event)
                 prune_items(cs)
                 # Keep logical_turn in sync for header
                 if cs.logical_turn:
@@ -4563,103 +4558,38 @@ Type anything else to send a message to the agent.
             content = self._content_scroll(agent_name)
             events = payload.get("events") or []
             state["earliest_offset"] = int(payload.get("new_earliest") or 0)
-            widgets_to_prepend = []
 
-            for event in events:
-                try:
-                    update = event.get("params", {}).get("update", {}) or {}
-                    event_type = update.get("sessionUpdate", "")
-
-                    if event_type == "agent_message_chunk":
-                        text = self._update_text(update)
-                        if text:
-                            cleaned, ephacts = extract_ephacts(text)
-                            if ephacts:
-                                try:
-                                    viewer = self.query_one("#ephact-viewer", EphactViewer)
-                                    for eph in ephacts:
-                                        viewer.push(agent_name, eph)
-                                except NoMatches:
-                                    pass
-                            if len(text) > 8000:
-                                text = text[:8000] + "\n… [truncated for TUI]"
-                            msg = AgentMessage()
-                            msg._text = text
-                            msg._chunks = [text]
-                            widgets_to_prepend.append(msg)
-                    elif event_type == "user_message_chunk":
-                        text = self._update_text(update)
-                        if text:
-                            if is_system_reminder(text):
-                                widgets_to_prepend.append(SystemReminderPanel(text))
-                            else:
-                                widgets_to_prepend.append(UserMessage(text))
-                    elif event_type in ("tool_call_update", "tool_call"):
-                        title = update.get("title", "tool")
-                        status = update.get(
-                            "status",
-                            "completed" if event_type == "tool_call_update" else "running",
-                        )
-                        kind = update.get("kind", "")
-                        tool_id = update.get("toolCallId", "")
-                        ts_raw = event.get("timestamp")
-                        try:
-                            ts_str = (
-                                datetime.datetime.fromtimestamp(float(ts_raw)).strftime(
-                                    "%H:%M:%S"
-                                )
-                                if ts_raw
-                                else ""
-                            )
-                        except Exception:
-                            ts_str = ""
-                        panel = ToolCallPanel(tool_id, title, kind, ts=ts_str)
-                        panel.tool_status = status
-                        panel._collapsed = True
-                        raw_parts = []
-                        content_list = update.get("content") or []
-                        if isinstance(content_list, list):
-                            for item in content_list:
-                                if not isinstance(item, dict):
-                                    continue
-                                if item.get("type") == "content":
-                                    inner = item.get("content", {})
-                                    if isinstance(inner, dict):
-                                        raw_parts.append(inner.get("text") or "")
-                                    elif isinstance(inner, str):
-                                        raw_parts.append(inner)
-                        raw_out = update.get("rawOutput")
-                        if isinstance(raw_out, str) and raw_out:
-                            raw_parts.append(raw_out)
-                        raw = "\n".join(raw_parts)
-                        clean, intj_msgs = self._extract_interjections(raw)
-                        pure_ij = bool(
-                            update.get("_aa_interjection")
-                            or (title or "").lower() == "interjection"
-                            or str(tool_id).startswith("ij-")
-                        )
-                        for msg in intj_msgs:
-                            key = interjection_key(msg)
-                            if key in self._seen_interjections:
-                                continue
-                            self._seen_interjections.add(key)
-                            widgets_to_prepend.append(InterjectionBlock(msg))
-                        if pure_ij and not clean.strip():
-                            pass
-                        else:
-                            if clean.strip():
-                                panel.tool_output = (
-                                    clean
-                                    if len(clean) <= 4000
-                                    else clean[:4000] + "\n… [truncated]"
-                                )
-                            widgets_to_prepend.append(panel)
-                    elif event_type == "hook_annotation":
-                        message = update.get("message", "")
-                        if message:
-                            widgets_to_prepend.append(HookAnnotation(message))
-                except Exception:
-                    continue
+            # Fold older events into paint units (same model as tip/live)
+            try:
+                fr = fold_tui_events_oldest_first(list(events))
+                items = list(fr.state.items)
+                # Merge into agent chat_state at front (rebuild tools map)
+                cs = state.get("chat_state")
+                if cs is None:
+                    from chat_model import ChatState
+                    cs = ChatState()
+                    state["chat_state"] = cs
+                # Prepend items into model (history is older than current tip)
+                cs.items = items + list(cs.items)
+                # rebuild tool indices
+                cs.tools = {}
+                cs.open_speech_idx = None
+                cs.open_thinking_idx = None
+                for i, it in enumerate(cs.items):
+                    from chat_model import ToolItem as _TI
+                    if isinstance(it, _TI) and it.tool_id:
+                        cs.tools[it.tool_id] = i
+                if fr.state.logical_turn and fr.state.logical_turn > (cs.logical_turn or 0):
+                    pass  # older batch turns are lower; keep tip turn
+                widgets_to_prepend = []
+                from paint_mount import widget_for_item
+                for it in items:
+                    w = widget_for_item(it)
+                    if w is not None:
+                        widgets_to_prepend.append(w)
+            except Exception as e:
+                self._debug(f"PAGEUP_FOLD err {e!r}")
+                widgets_to_prepend = []
 
             if widgets_to_prepend:
                 content._follow_tail = False

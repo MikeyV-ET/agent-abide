@@ -54,3 +54,15 @@ Implications:
 - Grouping decisions later (e.g. background-tool collapse) land in the fold layer once, then each glass paints.
 
 aa-dev holds the line while the model hardens; SA and thiasai adopt the same contracts rather than inventing parallel ones.
+
+## Wiring status (2026-09-22)
+
+| Path | Status |
+|------|--------|
+| `paint_fold` + policies + tests | done |
+| Tip catch-up mounts from fold | done (`REPLAY_FOLD` / `TIP_MOUNT`) |
+| PageUp folds events then prepends widgets | done |
+| Live `fold_event` into ChatState | done (widgets still via `_dispatch_event`) |
+| Single painter-only path (no dual mount) | polish — dual path OK for stability |
+
+Restart aa-dev TUI to pick up tip/PageUp fold wiring.

@@ -231,3 +231,9 @@ def fold_hot_file_tail(
     prune_items(state, prune_max)
     result.state = state
     return result
+
+
+def fold_tui_events_oldest_first(events: list[dict]) -> FoldResult:
+    """Fold a chronological list of TUI dispatch events (history batch)."""
+    state = ChatState()
+    return fold_events(state, events)

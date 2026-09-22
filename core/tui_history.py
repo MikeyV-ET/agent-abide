@@ -343,6 +343,9 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
             {"reason": body.get("reason") or "doom_loop"},
         )
 
+    if kind == "meta" and (body.get("label") == "turn_completed" or body.get("type") == "turn_completed"):
+        return _frame("turn_completed", {})
+
     # meta / usage / raw_only — no paint
     return None
 

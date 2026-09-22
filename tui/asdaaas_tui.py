@@ -3163,10 +3163,13 @@ Type anything else to send a message to the agent.
             time.sleep(0.3)
 
     def _finalize_current_msg_for(self, agent_name: str) -> None:
-        """Reset message widgets so each conversation.jsonl entry renders fresh."""
-        if agent_name == self._active_agent:
-            self._current_agent_msg = None
-            self._current_thinking = None
+        """Reset message widgets; layout-flush last speech so it is visible."""
+        saved = self._active_agent
+        try:
+            self._active_agent = agent_name
+            self._close_open_agent_streams(layout=True)
+        finally:
+            self._active_agent = saved
 
     def _find_updates_for_agent(self, agent_name: str) -> Optional[Path]:
         """Find grok updates.jsonl for a specific agent (legacy native path)."""
@@ -3795,6 +3798,8 @@ Type anything else to send a message to the agent.
                 self._on_doom_loop(update)
             elif event_type == "available_commands_update":
                 self._on_available_commands(update)
+            elif event_type in ("turn_completed", "turn_complete", "prompt_complete"):
+                self._close_open_agent_streams(layout=True)
             # Silently ignore: git_branch_update, compaction_checkpoint
         except Exception as e:
             # Never let one bad event abort replay / live tail
@@ -3810,6 +3815,34 @@ Type anything else to send a message to the agent.
 
         # Bound DOM growth for long-lived sessions (7d+ must stay responsive).
         self._maybe_prune_after_mount()
+
+    def _close_open_agent_streams(self, *, layout: bool = True) -> None:
+        """Flush layout on open speech/thinking, then clear streaming refs.
+
+        AgentMessage.append_chunk uses refresh() without layout for stream
+        speed. Final lines can stay clipped until the next user message
+        forces layout (Squiggy: last bit of turn invisible until Eric sends).
+        """
+        msg = self._current_agent_msg
+        if msg is not None and layout:
+            try:
+                msg.refresh(layout=True)
+            except Exception:
+                try:
+                    msg.refresh()
+                except Exception:
+                    pass
+        think = self._current_thinking
+        if think is not None and layout:
+            try:
+                think.refresh(layout=True)
+            except Exception:
+                try:
+                    think.refresh()
+                except Exception:
+                    pass
+        self._current_agent_msg = None
+        self._current_thinking = None
 
     def _on_agent_message_chunk(self, update: dict) -> None:
         """Handle streaming agent message text."""
@@ -4153,8 +4186,7 @@ Type anything else to send a message to the agent.
         title = update.get("title", "unknown tool")
         kind = update.get("kind", "") or ""
 
-        self._current_agent_msg = None
-        self._current_thinking = None
+        self._close_open_agent_streams(layout=True)
 
         content = self._content_scroll()
         existing = self._tool_panels.get(tool_id) if tool_id else None
@@ -4396,8 +4428,7 @@ Type anything else to send a message to the agent.
                 self._last_event_ts
             ).strftime("%a %b %d %H:%M:%S")
 
-        self._current_agent_msg = None
-        self._current_thinking = None
+        self._close_open_agent_streams(layout=True)
 
         content = self._content_scroll()
         content.mount(TurnSeparator(turn_num, trigger, ts_str))

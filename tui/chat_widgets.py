@@ -416,8 +416,14 @@ class AgentMessage(Static):
         self._text += text
         if len(self._chunks) > 32:
             self._chunks = [self._text]
-        # Streaming: repaint only — full layout on every chunk starves input/scroll
-        self.refresh()
+        # Streaming: repaint only — full layout every chunk starves input/scroll.
+        # Periodic layout so the last paragraph is not clipped until next user msg.
+        n = getattr(self, "_chunk_n", 0) + 1
+        self._chunk_n = n
+        if n % 24 == 0 or text.endswith("\n\n") or (len(text) > 1 and text.rstrip().endswith((".", "!", "?")) and "\n" in text):
+            self.refresh(layout=True)
+        else:
+            self.refresh()
 
     @property
     def full_text(self) -> str:

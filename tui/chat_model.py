@@ -36,6 +36,12 @@ class ToolItem:
 
 
 @dataclass
+class PlanItem:
+    """Agent plan/todo list — purple PlanPanel on glass."""
+    entries: list = field(default_factory=list)
+
+
+@dataclass
 class SystemItem:
     text: str
     kind: str = "hook"  # hook | compact | task | alert
@@ -219,9 +225,16 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
         return changes
 
     if su == "plan":
-        # Represent as system note; full plan structure optional later
-        n = len(update.get("entries") or [])
-        state.items.append(SystemItem(text=f"Plan update ({n} entries)", kind="plan"))
+        entries = update.get("entries") or update.get("plan") or []
+        if not isinstance(entries, list) or not entries:
+            return changes
+        entries = [
+            (e if isinstance(e, dict) else {"content": str(e), "status": "pending"})
+            for e in entries
+        ]
+        # Replace previous plan unit (one live plan panel)
+        state.items = [it for it in state.items if not isinstance(it, PlanItem)]
+        state.items.append(PlanItem(entries=entries))
         changes.append("plan")
         return changes
 

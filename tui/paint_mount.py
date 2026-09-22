@@ -7,6 +7,7 @@ from chat_model import (
     SpeechItem,
     ThinkingItem,
     ToolItem,
+    PlanItem,
     SystemItem,
     TurnMark,
 )
@@ -20,6 +21,7 @@ def widget_for_item(item: Any):
         AgentMessage,
         ThinkingBlock,
         ToolCallPanel,
+        PlanPanel,
     )
     from chrome_widgets import TurnSeparator, SystemAlert
 
@@ -90,6 +92,12 @@ def widget_for_item(item: Any):
         if hasattr(w, "_collapsed"):
             w._collapsed = bool(getattr(item, "collapsed", True))
         return w
+
+    if isinstance(item, PlanItem):
+        entries = item.entries or []
+        if not entries:
+            return None
+        return PlanPanel(entries)
 
     if isinstance(item, SystemItem):
         sev = "warning" if item.kind in ("retry_state", "doom_loop_detected") else "information"

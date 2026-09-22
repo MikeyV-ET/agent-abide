@@ -28,6 +28,7 @@ from chat_model import (
     SpeechItem,
     ThinkingItem,
     ToolItem,
+    PlanItem,
     SystemItem,
     TurnMark,
     apply_event,
@@ -48,6 +49,8 @@ def policy_for_item(item: Any) -> DisplayPolicy:
         return DisplayPolicy.FULL
     if isinstance(item, ToolItem):
         return DisplayPolicy.SNIPPET
+    if isinstance(item, PlanItem):
+        return DisplayPolicy.FULL  # full plan table in purple panel
     if isinstance(item, SystemItem):
         return DisplayPolicy.BANNER
     if isinstance(item, TurnMark):
@@ -175,7 +178,7 @@ def paint_units(state: ChatState) -> list[tuple[Any, DisplayPolicy]]:
 
 
 def count_meaningful_paint(state: ChatState) -> dict[str, int]:
-    n_speech = n_think = n_tool = n_sys = n_turn = 0
+    n_speech = n_think = n_tool = n_sys = n_turn = n_plan = 0
     for item, _pol in paint_units(state):
         if isinstance(item, SpeechItem):
             n_speech += 1
@@ -183,6 +186,8 @@ def count_meaningful_paint(state: ChatState) -> dict[str, int]:
             n_think += 1
         elif isinstance(item, ToolItem):
             n_tool += 1
+        elif isinstance(item, PlanItem):
+            n_plan += 1
         elif isinstance(item, SystemItem):
             n_sys += 1
         elif isinstance(item, TurnMark):
@@ -191,10 +196,11 @@ def count_meaningful_paint(state: ChatState) -> dict[str, int]:
         "speech": n_speech,
         "thinking": n_think,
         "tools": n_tool,
+        "plans": n_plan,
         "system": n_sys,
         "turns": n_turn,
-        "total": n_speech + n_think + n_tool + n_sys + n_turn,
-        "full": n_speech + n_think,
+        "total": n_speech + n_think + n_tool + n_plan + n_sys + n_turn,
+        "full": n_speech + n_think + n_plan,
         "snippet": n_tool,
     }
 

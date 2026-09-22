@@ -62,6 +62,7 @@ _INTERJECTION_ENVELOPE_RE = re.compile(
 _ATTR_FULL_RE = re.compile(
     r"^(?:<"
     r"(?P<who1>[^>(]+)(?:\s*\(via\s+(?P<via1>[^)]+)\))?"
+    r"(?:\s*\[[^\]]*\])?"  # optional [sent during …] inside <>
     r">|"
     r"\["
     r"(?P<who2>[^>(\]]+)(?:\s*\(via\s+(?P<via2>[^)]+)\))?"

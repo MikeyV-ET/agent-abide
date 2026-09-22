@@ -42,6 +42,10 @@ class ClaudeBackend(AgentBackend):
         self._context_window: int = 200000
         self._claude_path: Optional[str] = None
         self._api_key: Optional[str] = api_key
+        # --- grok-parity surface (asdaaas touches these on some paths) ---
+        self._start_kwargs: dict = {}
+        self._allowed_always: set[str] = set()
+        self._permission_handler: Optional[Callable] = None
 
     async def start(self, agent_cwd: str, model: Optional[str] = None,
                     session_id: Optional[str] = None, yolo: bool = True,
@@ -61,7 +65,13 @@ class ClaudeBackend(AgentBackend):
         if model:
             cmd.extend(["--model", model])
         if session_id:
-            cmd.extend(["--session-id", session_id])
+            # --session-id on an id that already has a session file does NOT
+            # resume -- it silently starts a fresh conversation. Use --resume
+            # for sessions Claude already knows about.
+            if self._session_file_exists(session_id):
+                cmd.extend(["--resume", session_id])
+            else:
+                cmd.extend(["--session-id", session_id])
 
         # API key auth: set env var and use --bare mode
         env = os.environ.copy()
@@ -99,8 +109,26 @@ class ClaudeBackend(AgentBackend):
         # collect_response when we see the system init frame.
         self._session_id = session_id or "pending"
         self._stashed_frame = None
+        self._start_kwargs = dict(model=model, yolo=yolo, session_id=session_id,
+                                  agent_cwd=agent_cwd, **kwargs)
 
         return self._session_id
+
+    @staticmethod
+    def _session_file_exists(session_id: str) -> bool:
+        """True if Claude Code already has a session log for this id.
+
+        Session ids are UUIDs and globally unique, so glob across all project
+        dirs rather than recomputing Claude's cwd-escaping scheme.
+        """
+        from pathlib import Path as _Path
+        base = _Path.home() / ".claude" / "projects"
+        if not base.is_dir():
+            return False
+        try:
+            return any(base.glob(f"*/{session_id}.jsonl"))
+        except OSError:
+            return False
 
     async def send_prompt(self, text: str) -> Any:
         if not self._proc or not self._proc.stdin:
@@ -284,6 +312,24 @@ class ClaudeBackend(AgentBackend):
     async def request_compaction(self) -> bool:
         return False  # Claude Code manages its own context
 
+    def set_permission_handler(self, handler: Callable) -> None:
+        """Accept a mentor-approval handler for interface parity.
+
+        Claude Code decides permissions in-process via --permission-mode /
+        --dangerously-skip-permissions, so there is no per-tool callback to
+        route. Stored so asdaaas can see it was set; not consulted.
+        """
+        self._permission_handler = handler
+
+    async def set_reasoning_effort(self, level: str) -> None:
+        """Record requested effort. Claude takes --effort at launch only.
+
+        Unlike grok's session/set_model, effort cannot be changed on a live
+        Claude session -- it would need a restart. Recorded so the countdown
+        bookkeeping in asdaaas stays consistent.
+        """
+        self._start_kwargs["reasoning_effort"] = level
+
     async def shutdown(self):
         if self._proc:
             if self._proc.stdin:
@@ -319,6 +365,10 @@ class ClaudeBackend(AgentBackend):
     @property
     def context_window(self) -> int:
         return self._context_window
+
+    @context_window.setter
+    def context_window(self, value: int):
+        self._context_window = int(value)
 
     async def _read_frame(self, timeout: float = 30.0) -> Optional[dict]:
         if not self._proc or not self._proc.stdout:

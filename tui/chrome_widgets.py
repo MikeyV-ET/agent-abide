@@ -12,7 +12,12 @@ def classify_turn_trigger(text: str) -> str:
     t = text.strip()
     if t.startswith("<system-reminder>") or t.startswith("<system_reminder>"):
         return "system"
-    # asdaaas doorbells
+    # asdaaas doorbells / agent control registration
+    if "[aa.control]" in t:
+        import re
+        m = re.search(r"\[aa\.control\]\s*([^:\]]+)", t)
+        act = (m.group(1).strip() if m else "control")[:20]
+        return f"aa {act}"
     if "[continue" in t:
         return "continue"
     if "[context" in t and "%" in t:

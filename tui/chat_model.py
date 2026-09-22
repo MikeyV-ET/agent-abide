@@ -94,6 +94,8 @@ def classify_turn_trigger(text: str) -> str:
     low = t.lower()
     if "localmail" in low[:60] or "[FROM:" in t[:30]:
         return "localmail"
+    if "[aa.control]" in low[:40] or low.startswith("[aa.control]"):
+        return "aa-control"
     if "continue" in low[:80] and "your turn" in low:
         return "continue"
     if "doorbell" in low[:80] or low.startswith("[continue"):

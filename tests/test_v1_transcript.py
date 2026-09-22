@@ -146,3 +146,20 @@ def test_user_index_and_expand(tmp_path: Path):
     # ts expand
     exp2 = expand_around(entries, ts=hits[0]["ts"], before=0, after=0)
     assert "thiasai is X" in exp2.text
+
+
+def test_memory_pack_strips_sent_during_attribution(tmp_path: Path):
+    """Interjection-style <eric (via tui) [sent during…]> must lose the wrapper."""
+    from core.v1_transcript import generate_transcript, TranscriptOptions
+    p = tmp_path / "c.jsonl"
+    import json
+    p.write_text(json.dumps({
+        "role": "user",
+        "kind": "interjection",
+        "content": "<eric (via tui) [sent during your previous turn, Tue Aug 04 12:12 PDT]> hello lag",
+    }) + "\n")
+    r = generate_transcript(p, TranscriptOptions.memory_pack())
+    assert "Context left" not in r.text
+    assert "sent during" not in r.text.lower()
+    assert "via tui" not in r.text.lower()
+    assert "hello lag" in r.text

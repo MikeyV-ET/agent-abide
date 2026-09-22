@@ -371,6 +371,7 @@ def write_conversation(agent_name, role, content, env=None, session_id=None,
         f.write(line)
 
 
+
 def get_compaction_instructions(agent_name, env=None):
     """Return compaction instructions for the given agent.
 

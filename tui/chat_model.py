@@ -113,6 +113,28 @@ def classify_turn_trigger(text: str) -> str:
 
 # ── Reducer ─────────────────────────────────────────────────────────────
 
+def _maybe_delay_control(state: "ChatState", update: dict, changes: list) -> None:
+    """If this tool registers a delay, append aa.control banner (tip/history)."""
+    try:
+        from delay_control import delay_control_from_tool_blob, tool_update_blob
+    except ImportError:
+        try:
+            from tui.delay_control import delay_control_from_tool_blob, tool_update_blob
+        except ImportError:
+            return
+    blob = tool_update_blob(update)
+    ctrl = delay_control_from_tool_blob(blob)
+    if not ctrl:
+        return
+    # Avoid duplicate consecutive delay banners
+    if state.items:
+        last = state.items[-1]
+        if isinstance(last, SystemItem) and last.kind == "aa_control" and last.text == ctrl:
+            return
+    state.items.append(SystemItem(text=ctrl, kind="aa_control"))
+    changes.append("aa_control")
+
+
 def apply_event(state: ChatState, event: dict) -> list[str]:
     """Apply one updates.jsonl event. Returns list of change tags for tests/UI.
 
@@ -164,6 +186,7 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
         if tid:
             state.tools[tid] = len(state.items) - 1
         changes.append("tool_open")
+        _maybe_delay_control(state, update, changes)
         return changes
 
     if su == "tool_call_update":
@@ -206,6 +229,7 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
             elif c.get("type") == "diff":
                 item.output = f"[diff] {c.get('path', '')}"
         changes.append("tool_update")
+        _maybe_delay_control(state, update, changes)
         return changes
 
     if su == "user_message_chunk":

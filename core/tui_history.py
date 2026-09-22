@@ -328,6 +328,24 @@ def aa_event_to_tui_update(ev: dict[str, Any]) -> Optional[dict[str, Any]]:
             },
         )
 
+    if kind == "retry_state":
+        return _frame(
+            "retry_state",
+            {
+                "type": body.get("type") or "retrying",
+                "attempt": body.get("attempt"),
+                "max_retries": body.get("max_retries"),
+                "reason": body.get("reason") or "",
+                "error_type": body.get("error_type"),
+            },
+        )
+
+    if kind in ("doom_loop", "doom_loop_detected"):
+        return _frame(
+            "doom_loop_detected",
+            {"reason": body.get("reason") or "doom_loop"},
+        )
+
     # meta / usage / raw_only — no paint
     return None
 
@@ -934,7 +952,12 @@ def scan_older_history_by_rows(
             elif et in ("tool_call", "tool_call_update"):
                 new_earliest = min(new_earliest, line_start)
                 _append(line_start, event)
-            elif et in ("plan", "hook_annotation"):
+            elif et in (
+                "plan",
+                "hook_annotation",
+                "retry_state",
+                "doom_loop_detected",
+            ):
                 new_earliest = min(new_earliest, line_start)
                 _append(line_start, event)
 
@@ -1023,6 +1046,10 @@ def is_tip_paint_event(event: dict) -> bool:
         "tool_call_update",
         "plan",
         "hook_annotation",
+        # Prod updates.jsonl paints these; hot maps them via native pass-through
+        # but tip/PageUp filters were dropping them (Eric 2026-09-22).
+        "retry_state",
+        "doom_loop_detected",
     ):
         return True
     return False
@@ -1107,6 +1134,8 @@ def estimate_event_rows(event: dict, width: int = _DEFAULT_TIP_WIDTH) -> int:
     if not is_tip_paint_event(event):
         return 0
     et = _event_session_update(event)
+    if et in ("retry_state", "doom_loop_detected"):
+        return 2  # one SystemAlert-ish line + chrome
     if et in ("tool_call", "tool_call_update"):
         body = _tool_body_text(event)
         # same spirit as ToolCallPanel snippet

@@ -147,6 +147,22 @@ def map_grok_event(obj: dict) -> Tuple[str, str, Optional[str], Optional[Dict[st
             "total": update.get("totalTokens") or update.get("total"),
         }
 
+    if kind == "retry_state":
+        return "status", "full", "none", {
+            "kind": "retry_state",
+            "type": update.get("type") or "retrying",
+            "attempt": update.get("attempt"),
+            "max_retries": update.get("max_retries") or update.get("maxRetries"),
+            "reason": update.get("reason") or "",
+            "error_type": update.get("error_type") or update.get("errorType"),
+        }
+
+    if kind == "doom_loop_detected":
+        return "status", "full", "none", {
+            "kind": "doom_loop",
+            "reason": update.get("reason") or update.get("message") or "doom_loop",
+        }
+
     # unknown / other sessionUpdate
     if kind:
         return "unknown", "none", None, {"kind": "raw_only"}

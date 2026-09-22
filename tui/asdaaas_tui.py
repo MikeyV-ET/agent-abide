@@ -3437,6 +3437,15 @@ Type anything else to send a message to the agent.
                         self.call_from_thread(self._force_scroll_bottom)
                     except Exception:
                         pass
+            except Exception as e:
+                self._debug(f"REPLAY error: {e!r}")
+                try:
+                    err = f"Replay error: {e}"
+                    self.call_from_thread(
+                        lambda m=err: self.notify(m, severity="error", timeout=6)
+                    )
+                except Exception:
+                    pass
             state["replay_done"] = True
             self._replay_done = True
 

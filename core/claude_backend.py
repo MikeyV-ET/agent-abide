@@ -294,6 +294,18 @@ class ClaudeBackend(AgentBackend):
         self._agent_home = _Path(agent_home)
         self._agent_name = agent_name
         self._hot_ingest = bool(enabled)
+        if self._hot_ingest:
+            try:
+                old_w = getattr(self, "_updates_hot_watcher", None)
+                if old_w is not None:
+                    try:
+                        old_w.stop()
+                    except Exception:
+                        pass
+                from updates_hot_watch import start_updates_hot_watcher
+                start_updates_hot_watcher(self)
+            except Exception as e:
+                print(f"[claude_backend] updates_hot_watch: {e}")
 
     def sync_hot_stream(self, *, max_lines: Optional[int] = None,
                         max_bytes: Optional[int] = None) -> dict:

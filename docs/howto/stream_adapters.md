@@ -46,3 +46,15 @@ and on `refresh_tokens`.
 TUI/SA/thiasai glass should fold aa.stream via a shared **paint unit** model
 (see `docs/howto/paint_fold.md`) — not product-specific ad hoc parsers for the
 same event kinds.
+
+## updates → hot: inotify + debounced sync (aa-dev)
+
+`core/updates_hot_watch.py` watches the native session file (`updates.jsonl` /
+Claude session jsonl). On change (or idle safety poll), it debounces (~150ms)
+and calls `backend.sync_hot_stream()`.
+
+- **inotify** = wake
+- **poller** = checkpointed tail (complete lines only)
+- Frame-driven sync remains; watcher covers delay/BUSY gaps (Squiggy)
+
+Started from `configure_aa_history` on Grok/Claude backends. aa-dev only.

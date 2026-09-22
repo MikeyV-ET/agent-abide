@@ -823,6 +823,20 @@ class GrokBackend(AgentBackend):
         self._agent_home = Path(agent_home)
         self._agent_name = agent_name
         self._hot_ingest = bool(enabled)
+        # Hybrid: inotify on updates.jsonl → debounced sync (aa-dev)
+        if self._hot_ingest:
+            try:
+                # stop prior
+                old_w = getattr(self, "_updates_hot_watcher", None)
+                if old_w is not None:
+                    try:
+                        old_w.stop()
+                    except Exception:
+                        pass
+                from updates_hot_watch import start_updates_hot_watcher
+                start_updates_hot_watcher(self)
+            except Exception as e:
+                print(f"[grok_backend] updates_hot_watch: {e}")
 
     def sync_hot_stream(
         self,

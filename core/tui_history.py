@@ -758,6 +758,208 @@ def scan_older_history_events(
 
 
 
+def scan_older_history_by_rows(
+    path_str: str,
+    earliest_offset: int,
+    hist_kind: str = "hot",
+    *,
+    target_rows: int = 40,
+    width: int = 80,
+    max_bytes: int = 12 * 1024 * 1024,
+    window: int = 512 * 1024,
+    max_line_skip: int = 8 * 1024 * 1024,
+    max_events: int = 200,
+    overshoot: float = 1.15,
+) -> dict:
+    """PageUp / lazy-load: fill about ``target_rows`` of history above the tip.
+
+    Unlike the old speech_target=25 + max_tool_panels=4 path (which left a
+    sparse river — 25 short chats and 4 tools while skipping megabytes of
+    tools), this walks backward collecting *paint* events (speech + collapsed
+    tools) until estimated rows meet the viewport budget.
+
+    Fat-line stall handling matches :func:`scan_older_history_events`.
+    """
+    from pathlib import Path as _Path
+
+    if target_rows <= 0:
+        target_rows = 40
+    width = max(8, int(width or 80))
+    budget = max(1, int(target_rows * (overshoot if overshoot >= 1 else 1.0)))
+    max_events = max(1, int(max_events))
+    # Also require a floor of widgets so dense short turns still fill the glass
+    min_events = max(20, min(max_events, target_rows // 2))
+
+    updates_path = _Path(path_str)
+    new_earliest = earliest_offset
+    bytes_read = 0
+    cursor = earliest_offset
+    # (offset, event) chronological we'll sort at end
+    collected: list[tuple[int, dict]] = []
+    seen_tools: set[str] = set()
+    rows = 0
+    speech_n = 0
+    tool_n = 0
+    chrome_n = 0
+    iterations = 0
+    max_iterations = max(64, (earliest_offset // max(1, window)) + 32)
+
+    def _append(off: int, event: dict) -> bool:
+        nonlocal rows, speech_n, tool_n
+        et = _event_session_update(event)
+        if et in ("tool_call", "tool_call_update"):
+            tid = _event_tool_id(event) or f"anon:{id(event)}"
+            if tid in seen_tools:
+                return False
+            seen_tools.add(tid)
+            tool_n += 1
+        elif et in (
+            "user_message_chunk",
+            "agent_message_chunk",
+            "agent_thought_chunk",
+        ):
+            speech_n += 1
+        r = estimate_event_rows(event, width)
+        if r <= 0:
+            return False
+        collected.append((off, event))
+        rows += r
+        return True
+
+    while (
+        cursor > 0
+        and (rows < budget or len(collected) < min_events)
+        and len(collected) < max_events
+        and bytes_read < max_bytes
+        and iterations < max_iterations
+    ):
+        iterations += 1
+        read_size = min(cursor, window)
+        seek_pos = cursor - read_size
+        with open(updates_path, "rb") as f:
+            f.seek(seek_pos)
+            if seek_pos > 0:
+                f.readline()
+            data_start = f.tell()
+            if data_start >= cursor:
+                back = min(cursor, max_line_skip)
+                f.seek(cursor - back)
+                blob = f.read(back)
+                nl = blob.rfind(b"\n", 0, len(blob) - 1 if len(blob) else 0)
+                if nl < 0:
+                    line_start = cursor - back
+                else:
+                    line_start = (cursor - back) + nl + 1
+                skipped = cursor - line_start
+                bytes_read += max(skipped, 1)
+                new_earliest = min(new_earliest, line_start)
+                cursor = line_start
+                if cursor <= 0:
+                    new_earliest = 0
+                    break
+                continue
+
+            raw = f.read(cursor - data_start)
+        bytes_read += len(raw)
+        if not raw:
+            if seek_pos <= 0:
+                new_earliest = 0
+                break
+            bytes_read += 1
+            cursor = data_start if data_start < cursor else seek_pos
+            continue
+
+        batch: list[tuple[int, str]] = []
+        pos = data_start
+        parts = raw.split(b"\n")
+        for i, lb in enumerate(parts):
+            line_start = pos
+            blen = len(lb) + (1 if i < len(parts) - 1 else 0)
+            pos += blen
+            if not lb.strip() or line_start >= earliest_offset:
+                continue
+            if len(lb) > 2 * 1024 * 1024:
+                continue
+            try:
+                batch.append((line_start, lb.decode("utf-8", errors="replace")))
+            except Exception:
+                continue
+
+        for line_start, line in reversed(batch):
+            if len(collected) >= max_events:
+                break
+            if rows >= budget and len(collected) >= min_events:
+                break
+            event = None
+            if hist_kind == "hot":
+                hit = cheap_hot_line_speech(line)
+                if hit is not None:
+                    su, text, _role = hit
+                    new_earliest = line_start
+                    if is_chrome_speech(text):
+                        chrome_n += 1
+                        continue
+                    event = {
+                        "params": {
+                            "update": {
+                                "sessionUpdate": su,
+                                "content": {"text": text},
+                            }
+                        }
+                    }
+                    _append(line_start, event)
+                    continue
+
+            if len(line) > 64 * 1024 and "tool_call" not in line and "tool_result" not in line:
+                continue
+            event = line_to_tui_event(line, hist_kind)
+            if not event:
+                continue
+            update = (event.get("params") or {}).get("update") or {}
+            et = update.get("sessionUpdate", "")
+            if et in (
+                "user_message_chunk",
+                "agent_message_chunk",
+                "agent_thought_chunk",
+            ):
+                c = update.get("content") or {}
+                text = c.get("text", "") if isinstance(c, dict) else ""
+                if not str(text).strip():
+                    continue
+                new_earliest = line_start
+                if is_chrome_speech(str(text)):
+                    chrome_n += 1
+                    continue
+                _append(line_start, event)
+            elif et in ("tool_call", "tool_call_update"):
+                new_earliest = min(new_earliest, line_start)
+                _append(line_start, event)
+            elif et in ("plan", "hook_annotation"):
+                new_earliest = min(new_earliest, line_start)
+                _append(line_start, event)
+
+        cursor = data_start
+        if data_start <= 0:
+            new_earliest = 0
+            break
+
+    collected.sort(key=lambda x: x[0])
+    # Drop duplicate tool ids keeping latest (highest offset) — already skipped in _append
+    return {
+        "events": [e for _, e in collected],
+        "new_earliest": max(0, int(new_earliest)),
+        "speech_n": speech_n,
+        "tool_n": tool_n,
+        "chrome_n": chrome_n,
+        "est_rows": rows,
+        "target_rows": target_rows,
+        "bytes_read": bytes_read,
+        "iterations": iterations,
+    }
+
+
+
+
 
 # Session meta that bloats -t catch-up without helping the operator read the tip.
 _TIP_DROP_SESSION_UPDATES = frozenset({
@@ -921,9 +1123,10 @@ def estimate_event_rows(event: dict, width: int = _DEFAULT_TIP_WIDTH) -> int:
         text = c
     else:
         text = ""
-    # markdown is denser than plain; plain wrap is a lower bound — add small fudge
-    rows = wrap_text_rows(text, max(8, width - 4))
-    return rows + _SPEECH_BORDER_ROWS
+    # Cap per-message height so one essay cannot consume an entire -t / PageUp
+    # budget (left tip with ~5 widgets and PageUp looking empty).
+    rows = wrap_text_rows(text, max(8, width - 4)) + _SPEECH_BORDER_ROWS
+    return min(rows, 12)
 
 
 def collapse_tip_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -976,6 +1179,7 @@ def select_tip_by_rows(
     if not collapsed:
         return []
 
+    min_events = max(15, min(max_events, target_rows // 2 if target_rows else 15))
     picked_rev: list[dict[str, Any]] = []
     rows = 0
     for ev in reversed(collapsed):
@@ -984,7 +1188,9 @@ def select_tip_by_rows(
             continue
         picked_rev.append(ev)
         rows += r
-        if rows >= budget or len(picked_rev) >= max_events:
+        if len(picked_rev) >= max_events:
+            break
+        if rows >= budget and len(picked_rev) >= min_events:
             break
     picked_rev.reverse()
     return picked_rev

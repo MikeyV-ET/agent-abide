@@ -4490,6 +4490,10 @@ Type anything else to send a message to the agent.
         earliest = int(state["earliest_offset"])
         hist_kind = state.get("history_kind") or "updates"
         path_str = str(updates_path)
+        try:
+            geom_w, geom_h = self._terminal_geometry()
+        except Exception:
+            geom_w, geom_h = 80, 24
 
         def _work(
             an=agent_name,
@@ -4497,10 +4501,12 @@ Type anything else to send a message to the agent.
             earliest_off=earliest,
             kind=hist_kind,
             anchor=first_child,
+            tw=geom_w,
+            th=geom_h,
         ):
             try:
                 payload = self._scan_older_history_events(
-                    path, earliest_off, kind
+                    path, earliest_off, kind, tip_width=tw, tip_height=th
                 )
                 self.call_from_thread(
                     self._apply_older_history_mount,
@@ -4526,18 +4532,24 @@ Type anything else to send a message to the agent.
         self.run_worker(_work, thread=True, name=f"hist_load_{agent_name}")
 
     def _scan_older_history_events(
-        self, path_str: str, earliest_offset: int, hist_kind: str
+        self,
+        path_str: str,
+        earliest_offset: int,
+        hist_kind: str,
+        *,
+        tip_width: int = 80,
+        tip_height: int = 24,
     ) -> dict:
         """Worker: walk hot/updates backward; return plain event dicts (no widgets).
 
-        Delegates to tui_history.scan_older_history_events so fat lines longer
-        than the read window cannot pin the cursor (infinite CPU spin).
+        Fills ~one viewport of *rows* (speech + tools), not a thin 25-speech /
+        4-tool slice. Fat-line stall handling lives in tui_history.
         """
         try:
             core = str(Path(__file__).resolve().parent.parent / "core")
             if core not in sys.path:
                 sys.path.insert(0, core)
-            from tui_history import scan_older_history_events
+            from tui_history import scan_older_history_by_rows
         except Exception as e:
             return {
                 "events": [],
@@ -4546,7 +4558,14 @@ Type anything else to send a message to the agent.
                 "bytes_read": 0,
                 "error": str(e),
             }
-        return scan_older_history_events(path_str, earliest_offset, hist_kind)
+        target_rows = max(12, int(tip_height or 24))
+        return scan_older_history_by_rows(
+            path_str,
+            earliest_offset,
+            hist_kind,
+            target_rows=target_rows,
+            width=max(40, int(tip_width or 80)),
+        )
 
     def _apply_older_history_mount(
         self, agent_name: str, payload: dict, first_child

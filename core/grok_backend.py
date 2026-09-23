@@ -476,26 +476,14 @@ class GrokBackend(AgentBackend):
         self._file_source = FileEventSource(session_dir)
         self._file_source.open()
         self._seed_tokens_from_session()
-        # configure_aa_history often ran before session_dir existed — arm watcher now
+        # Hot spine (native→hot always-on + reconcile). configure_aa_history
+        # may have run before session_dir existed — arm here with real path.
         if getattr(self, "_hot_ingest", False):
             try:
-                old_w = getattr(self, "_updates_hot_watcher", None)
-                if old_w is not None:
-                    try:
-                        old_w.stop()
-                    except Exception:
-                        pass
-                from updates_hot_watch import start_updates_hot_watcher
-                w = start_updates_hot_watcher(self)
-                if w is not None:
-                    print(
-                        f"[grok_backend] updates_hot_watch armed on "
-                        f"{session_dir / 'updates.jsonl'}"
-                    )
-                else:
-                    print("[grok_backend] updates_hot_watch: no path after session ready")
+                from hot_spine import start_hot_spine_for_backend
+                start_hot_spine_for_backend(self)
             except Exception as e:
-                print(f"[grok_backend] updates_hot_watch re-arm: {e}")
+                print(f"[grok_backend] hot_spine arm: {e}")
 
         # Process stdout in background to prevent pipe buffer from filling.
         # Also intercepts session/request_permission when yolo is off.
@@ -877,20 +865,17 @@ class GrokBackend(AgentBackend):
         self._agent_home = Path(agent_home)
         self._agent_name = agent_name
         self._hot_ingest = bool(enabled)
-        # Hybrid: inotify on updates.jsonl → debounced sync (aa-dev)
-        if self._hot_ingest:
-            try:
-                # stop prior
-                old_w = getattr(self, "_updates_hot_watcher", None)
-                if old_w is not None:
-                    try:
-                        old_w.stop()
-                    except Exception:
-                        pass
-                from updates_hot_watch import start_updates_hot_watcher
-                start_updates_hot_watcher(self)
-            except Exception as e:
-                print(f"[grok_backend] updates_hot_watch: {e}")
+        # Watcher/spine arm at session ready (start_hot_spine_for_backend) when
+        # native path is known. Early start without session_dir was a no-op or
+        # a lucky find_live_updates — spine owns the always-on path now.
+        if not self._hot_ingest:
+            old = getattr(self, "_hot_spine", None)
+            if old is not None:
+                try:
+                    old.stop()
+                except Exception:
+                    pass
+                self._hot_spine = None
 
     def sync_hot_stream(
         self,
@@ -953,14 +938,17 @@ class GrokBackend(AgentBackend):
                     pass
 
     def _final_hot_sync(self) -> None:
-        """End-of-collect / quiet-path catch-up for hot.jsonl.
-
-        Frame-driven sync can miss the last tool_result + speech + turn_completed
-        when those land just as collect exits, or while asdaaas is between turns.
-        Always push checkpoint→hot here; watcher kick covers the idle case.
-        """
+        """End-of-collect catch-up + spine kick (reconcile is source of truth)."""
         if not getattr(self, "_hot_ingest", False):
             return
+        spine = getattr(self, "_hot_spine", None)
+        if spine is not None:
+            try:
+                spine.reconcile(catch_up=True)
+                spine.kick()
+                return
+            except Exception as e:
+                print(f"[grok_backend] hot_spine final: {e}")
         try:
             self.sync_hot_stream()
         except Exception as e:

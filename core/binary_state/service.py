@@ -344,7 +344,16 @@ class InProcessObserver:
         try:
             while self._running:
                 # Process new native events
-                self.poll_once()
+                try:
+                    self.poll_once()
+                except Exception as e:
+                    # Do not look like a quiet binary: log and keep heartbeat
+                    # writing so TUI can see the observer is sick.
+                    print(f"[observer] poll_once error: {type(e).__name__}: {e}")
+                    try:
+                        self.observer.write_state_file(self._state_file)
+                    except Exception:
+                        pass
 
                 # Heartbeat: check process liveness + silence
                 self.observer.check_heartbeat()
@@ -365,6 +374,9 @@ class InProcessObserver:
 
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            print(f"[observer] _run crashed: {type(e).__name__}: {e}")
+            raise
         finally:
             if self._bus is not None:
                 try:

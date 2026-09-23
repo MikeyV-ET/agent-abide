@@ -2557,14 +2557,19 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     ),
                 )
             else:
+                _bus = getattr(backend, "_native_bus", None)
                 in_process_observer = InProcessObserver(
                     pid=backend.proc.pid,
                     session_dir=str(backend.session_dir),
                     state_file=observer_state_file,
+                    native_bus=_bus,
                 )
             in_process_observer.start()
             backend.set_observer(in_process_observer)
-            print(f"[asdaaas] Observer started (in-process, watching PID {backend.proc.pid})")
+            _via = getattr(in_process_observer, "_via", "?")
+            print(
+                f"[asdaaas] Observer started (in-process, watching PID {backend.proc.pid}, ear={_via})"
+            )
         except Exception as e:
             print(f"[asdaaas] WARN: Failed to start observer: {e}")
             in_process_observer = None

@@ -7,7 +7,7 @@ Phase 2 of hot spine architecture:
   optional collect buffer (FileEventSource window).
 * ``events.jsonl`` has its own cursor (lifecycle only; not the AA tape).
 
-Occupancy (binary_state) stays on its own tail until phase 3.
+Phase 3: occupancy (InProcessObserver) attaches the same updates ear.
 """
 from __future__ import annotations
 
@@ -48,6 +48,8 @@ class GrokNativeBus:
         self._collect_active = False
         self._collect_updates: List[dict] = []
         self._collect_events: List[dict] = []
+        self._occupancy_active = False
+        self._occupancy_updates: List[dict] = []
         self._on_hot: Optional[Callable[[dict], None]] = None
         self._last_pump: Optional[dict] = None
 
@@ -86,6 +88,26 @@ class GrokNativeBus:
             self._collect_updates.clear()
             self._collect_events.clear()
 
+    def begin_occupancy_window(self) -> None:
+        """Attach occupancy at current updates tip (after orient)."""
+        with self._lock:
+            self._occupancy_updates.clear()
+            self._occupancy_active = True
+            log.debug("occupancy window begin updates_off=%s", self.updates.offset)
+
+    def end_occupancy_window(self) -> None:
+        with self._lock:
+            self._occupancy_active = False
+            self._occupancy_updates.clear()
+
+    def read_for_occupancy(self) -> List[dict]:
+        """Pump then drain occupancy buffer (InProcessObserver.poll_once)."""
+        with self._lock:
+            self._pump_unlocked()
+            u = list(self._occupancy_updates)
+            self._occupancy_updates.clear()
+            return u
+
     def pump(self, *, max_lines: Optional[int] = None) -> dict:
         """Read new complete lines; project hot; buffer for collect."""
         with self._lock:
@@ -106,6 +128,8 @@ class GrokNativeBus:
                 parsed.append((rec.offset, obj))
                 if self._collect_active:
                     self._collect_updates.append(obj)
+                if self._occupancy_active:
+                    self._occupancy_updates.append(obj)
 
         for rec in e_batch.records:
             if not rec.text.strip():
@@ -181,5 +205,7 @@ class GrokNativeBus:
             "events_offset": self.events.offset,
             "collect_active": self._collect_active,
             "collect_buf_u": len(self._collect_updates),
+            "occupancy_active": self._occupancy_active,
+            "occupancy_buf_u": len(self._occupancy_updates),
             "last_pump": self._last_pump,
         }

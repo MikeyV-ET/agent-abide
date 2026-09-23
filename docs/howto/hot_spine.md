@@ -65,3 +65,11 @@ events.jsonl ── second cursor (lifecycle only)
 - `sync_hot_stream` / spine reconcile call `bus.pump()` (same ear).
 - Occupancy still has its own tail (**phase 3**).
 - Code: `core/native_tail.py`, `core/grok_native_bus.py`, `ingest_grok_records`.
+
+## Phase 3 — occupancy on the bus
+
+`InProcessObserver` takes optional `native_bus`. After file-based **orient**
+(backward scan), live polls use `bus.read_for_occupancy()` so occupancy shares
+the same updates.jsonl cursor as hot + collect.
+
+Log: `Observer started (… ear=bus)`.

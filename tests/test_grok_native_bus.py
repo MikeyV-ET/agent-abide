@@ -99,3 +99,24 @@ def test_jsonl_byte_tail_partial_line(tmp_path: Path):
     b2 = t.read_batch()
     assert len(b2.records) == 1
     assert "2" in b2.records[0].text
+
+
+def test_occupancy_buffer_shares_bus(tmp_path: Path):
+    home = tmp_path / "A"
+    (home / "asdaaas").mkdir(parents=True)
+    sess = tmp_path / "s"
+    sess.mkdir()
+    (sess / "updates.jsonl").write_text("")
+    (sess / "events.jsonl").write_text("")
+    bus = GrokNativeBus(
+        sess, agent_home=home, agent_name="A", session_id=sess.name, start_offset=0
+    )
+    bus.begin_occupancy_window()
+    with (sess / "updates.jsonl").open("a") as f:
+        f.write(_line("agent_message_chunk", content={"type": "text", "text": "x"}))
+        f.write(_line("turn_completed"))
+    frames = bus.read_for_occupancy()
+    assert len(frames) >= 2
+    assert bus.updates.behind() == 0
+    # second read empty until more writes
+    assert bus.read_for_occupancy() == []

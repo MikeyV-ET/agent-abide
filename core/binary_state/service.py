@@ -36,6 +36,7 @@ class ObserverService:
         session_dir: str,
         state_file: str,
         data_dir: str = None,
+        native_bus=None,
     ):
         self.pid = pid
         self.session_dir = session_dir
@@ -217,13 +218,15 @@ class InProcessObserver:
             event_silence_windows=event_windows,
         )
 
-        # Create tailer for updates.jsonl
+        # Live ear: shared GrokNativeBus (phase 3) or private UpdatesJSONLTailer
         updates_path = os.path.join(session_dir, "updates.jsonl")
-        self._tailer = UpdatesJSONLTailer(updates_path)
+        self._bus = native_bus
+        self._tailer = None if native_bus is not None else UpdatesJSONLTailer(updates_path)
         self._state_file = state_file
         self._session_dir = session_dir
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._via = "bus" if native_bus is not None else "private_tail"
 
     # -- Public interface --
 
@@ -243,9 +246,11 @@ class InProcessObserver:
         self.observer.reset(new_pid)
         if session_dir:
             self._session_dir = session_dir
-            self._tailer.close()
-            updates_path = os.path.join(session_dir, "updates.jsonl")
-            self._tailer = UpdatesJSONLTailer(updates_path)
+            if self._bus is None:
+                if self._tailer is not None:
+                    self._tailer.close()
+                updates_path = os.path.join(session_dir, "updates.jsonl")
+                self._tailer = UpdatesJSONLTailer(updates_path)
         self._orient()
         self.observer.write_state_file(self._state_file)
 
@@ -267,9 +272,15 @@ class InProcessObserver:
         """Scan tail of updates.jsonl to establish current state."""
         scan_size = self._p95_events
         max_retries = 3
+        # Orientation always reads the file directly (backward scan). Live
+        # path may still use the shared bus after attach.
+        orient_tailer = self._tailer
+        if orient_tailer is None:
+            updates_path = os.path.join(self._session_dir, "updates.jsonl")
+            orient_tailer = UpdatesJSONLTailer(updates_path)
 
         for attempt in range(max_retries):
-            lines = self._tailer.read_tail_lines(scan_size)
+            lines = orient_tailer.read_tail_lines(scan_size)
             if not lines:
                 break
 
@@ -295,11 +306,30 @@ class InProcessObserver:
             self.observer._pending_tools.clear()
             self.observer._turn_event_count = 0
 
-        self._tailer.seek_to_end()
+        if self._bus is not None:
+            # Shared ear: attach occupancy at current bus tip (after catch-up)
+            try:
+                self._bus.catch_up()
+            except Exception:
+                pass
+            self._bus.begin_occupancy_window()
+        elif self._tailer is not None:
+            self._tailer.seek_to_end()
+        else:
+            orient_tailer.seek_to_end()
+            if self._bus is None:
+                # keep a private live tailer if bus missing
+                self._tailer = orient_tailer
         self.observer.write_state_file(self._state_file)
 
     def poll_once(self):
         """Feed any new tailed lines to the observer. Sync; safe to call often."""
+        if self._bus is not None:
+            for frame in self._bus.read_for_occupancy():
+                self.observer.process_event(frame)
+            return
+        if self._tailer is None:
+            return
         for line in self._tailer.read_new_lines():
             try:
                 frame = json.loads(line)
@@ -336,7 +366,13 @@ class InProcessObserver:
         except asyncio.CancelledError:
             pass
         finally:
-            self._tailer.close()
+            if self._bus is not None:
+                try:
+                    self._bus.end_occupancy_window()
+                except Exception:
+                    pass
+            if self._tailer is not None:
+                self._tailer.close()
             # Write final state on shutdown
             try:
                 self.observer.write_state_file(self._state_file)

@@ -36,7 +36,6 @@ class ObserverService:
         session_dir: str,
         state_file: str,
         data_dir: str = None,
-        native_bus=None,
     ):
         self.pid = pid
         self.session_dir = session_dir
@@ -193,6 +192,7 @@ class InProcessObserver:
         session_dir: str,
         state_file: str,
         data_dir: str = None,
+        native_bus=None,
     ):
         # Resolve data directory
         if data_dir is None:

@@ -476,6 +476,26 @@ class GrokBackend(AgentBackend):
         self._file_source = FileEventSource(session_dir)
         self._file_source.open()
         self._seed_tokens_from_session()
+        # configure_aa_history often ran before session_dir existed — arm watcher now
+        if getattr(self, "_hot_ingest", False):
+            try:
+                old_w = getattr(self, "_updates_hot_watcher", None)
+                if old_w is not None:
+                    try:
+                        old_w.stop()
+                    except Exception:
+                        pass
+                from updates_hot_watch import start_updates_hot_watcher
+                w = start_updates_hot_watcher(self)
+                if w is not None:
+                    print(
+                        f"[grok_backend] updates_hot_watch armed on "
+                        f"{session_dir / 'updates.jsonl'}"
+                    )
+                else:
+                    print("[grok_backend] updates_hot_watch: no path after session ready")
+            except Exception as e:
+                print(f"[grok_backend] updates_hot_watch re-arm: {e}")
 
         # Process stdout in background to prevent pipe buffer from filling.
         # Also intercepts session/request_permission when yolo is off.
@@ -685,8 +705,18 @@ class GrokBackend(AgentBackend):
                 pending_tool_calls, on_speech_chunk, on_tool_call, on_meta,
             )
 
-            # Keepalive check — extend while permission is pending
-            if time.monotonic() - last_activity > keepalive_timeout and not self._permission_pending:
+            # Keepalive check — extend while permission OR tools are in flight.
+            # Long shell/search_replace with no intermediate frames used to trip
+            # 30s keepalive; collect returned empty while binary still wrote
+            # tool_result + final speech + turn_completed → hot stuck mid-tool.
+            tools_pending = bool(pending_tool_calls) or bool(
+                getattr(self, "_pending_tool_calls", None)
+            )
+            if (
+                time.monotonic() - last_activity > keepalive_timeout
+                and not self._permission_pending
+                and not tools_pending
+            ):
                 stop_reason = stop_reason or "keepalive_timeout"
                 break
 

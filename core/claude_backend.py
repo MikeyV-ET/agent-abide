@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import time
+from datetime import datetime
 from typing import Any, Callable, Optional
 
 from agent_backend import AgentBackend, ResponseResult
@@ -49,6 +50,21 @@ def _occupancy_from_usage(usage) -> int:
         + usage.get("cache_creation_input_tokens", 0)
         + usage.get("output_tokens", 0)
     )
+
+
+def _boundary_epoch(boundary: dict) -> Optional[float]:
+    """Epoch seconds for a compact_boundary's ISO-8601 `timestamp`, or None.
+
+    None means "cannot tell", and callers treat that as not-disqualifying --
+    a boundary we can date is the only one we can rule out.
+    """
+    ts = boundary.get("timestamp")
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 class ClaudeBackend(AgentBackend):
@@ -81,10 +97,16 @@ class ClaudeBackend(AgentBackend):
         self._observer = None
         # --- compaction: uuid of the last compact_boundary already reported ---
         self._last_compaction_uuid: Optional[str] = None
+        # Boundaries older than this process cannot be ours to report. Set at
+        # construction so a backend that is never start()ed still has a floor.
+        self._compaction_floor: float = time.time()
 
     async def start(self, agent_cwd: str, model: Optional[str] = None,
                     session_id: Optional[str] = None, yolo: bool = True,
                     **kwargs) -> str:
+        # Any compact_boundary already in the transcript predates this process,
+        # so it can never be the result of a command we are about to send.
+        self._compaction_floor = time.time()
         self._claude_path = shutil.which("claude") or str(
             __import__("pathlib").Path.home() / ".local" / "bin" / "claude"
         )
@@ -803,6 +825,15 @@ class ClaudeBackend(AgentBackend):
         uuid = boundary.get("uuid")
         if uuid and uuid == self._last_compaction_uuid:
             return False, None, 0  # already reported this one
+
+        # A restart resets _last_compaction_uuid, so uuid dedup alone would let
+        # an old boundary be announced as fresh. Live on 2026-09-22 that told me
+        # "[Compaction complete. Context reduced from 878559 to 9961 tokens]"
+        # from a compaction five hours earlier, on a restart where nothing had
+        # compacted at all -- and set occupancy to a stale 9,961.
+        when = _boundary_epoch(boundary)
+        if when is not None and when < self._compaction_floor:
+            return False, None, 0  # predates this process; not ours to report
 
         meta = boundary.get("compactMetadata") or {}
         post = meta.get("postTokens")

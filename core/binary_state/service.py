@@ -429,6 +429,15 @@ class ClaudeInProcessObserver(InProcessObserver):
         self._state_file = state_file
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        # Skipping super().__init__ means every attribute the base sets must be
+        # set here too. Claude has no grok native bus -- it tails its own
+        # transcript -- so the bus is None and the route is a private tail.
+        # 2b67bc4 added self._bus to the base and a `self._bus is not None`
+        # check to poll_once; this subclass did not have it, and poll_once
+        # raised AttributeError on every tick. Live that froze the Claude
+        # binary state at the values it held when the process started.
+        self._bus = None
+        self._via = "private_tail"
 
     def orient(self):
         """Read the transcript tail to establish state. Sync; no event loop."""

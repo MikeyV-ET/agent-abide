@@ -227,3 +227,61 @@ def test_reset_repoints_at_the_new_session_file(session, tmp_path):
 
     assert obs.state == ObserverState.IDLE
     assert obs.state_dict()["pending_tools"] is None
+
+
+# --- subclass attribute contract -------------------------------------------
+#
+# ClaudeInProcessObserver deliberately does not call super().__init__() -- the
+# base builds the grok state machine and points a tailer at updates.jsonl, and
+# Claude has neither. The cost of that choice is that every attribute the base
+# sets has to be mirrored by hand, and nothing enforced it.
+#
+# 2b67bc4 added self._bus to the base and a `self._bus is not None` branch to
+# poll_once(). The Claude subclass never got the attribute, so poll_once raised
+# AttributeError on every tick. Live, that froze my binary state at whatever it
+# held when the process started: 249 seconds stale, turn_event_count stuck at 1
+# while a dozen tool calls ran, and a TUI showing none of it.
+#
+# This test is the guard that was missing -- it fails whenever the base grows an
+# attribute the Claude path has not mirrored, in CI instead of in production.
+
+
+def _base_observer(tmp_path):
+    from binary_state.service import InProcessObserver
+
+    return InProcessObserver(
+        pid=os.getpid(),
+        session_dir=str(tmp_path),
+        state_file=str(tmp_path / "state.json"),
+    )
+
+
+def test_claude_observer_sets_every_attribute_the_base_does(tmp_path):
+    from binary_state.service import ClaudeInProcessObserver
+
+    base = _base_observer(tmp_path)
+    claude = ClaudeInProcessObserver(
+        pid=os.getpid(),
+        session_file=str(tmp_path / "sess.jsonl"),
+        state_file=str(tmp_path / "state2.json"),
+    )
+
+    missing = sorted(set(vars(base)) - set(vars(claude)))
+    assert not missing, (
+        "ClaudeInProcessObserver skips super().__init__(), so these attributes "
+        f"the base sets are absent and will AttributeError at runtime: {missing}"
+    )
+
+
+def test_claude_observer_has_no_native_bus(tmp_path):
+    """The grok native bus is grok-only; Claude tails its own transcript."""
+    from binary_state.service import ClaudeInProcessObserver
+
+    claude = ClaudeInProcessObserver(
+        pid=os.getpid(),
+        session_file=str(tmp_path / "sess.jsonl"),
+        state_file=str(tmp_path / "state.json"),
+    )
+
+    assert claude._bus is None
+    assert claude._via == "private_tail"

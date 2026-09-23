@@ -144,6 +144,21 @@ def find_live_session(
 #: paints them as a wall of characters. Keep the fact, drop the bytes.
 ELIDE_OVER_CHARS = 4096
 
+#: Claude Code injects a whole skill document into the conversation as a
+#: user-role turn. One landed in hot.jsonl at 91,192 chars and the TUI painted
+#: every byte of it -- Eric: "holy shit what just happened? it looked like you
+#: recited a wall of documentation." `native` was already spared by
+#: _elide_binary's generic string rule; `body.text` was not, and body is what
+#: the TUI reads.
+SKILL_DOC_PREFIX = "Base directory for this skill:"
+#: A skill document is recognisable, so it can fold at a modest size.
+FOLD_SKILL_DOC_OVER_CHARS = 8192
+#: Anything else user-role folds only past a size no human types, so a long
+#: paste from Eric still arrives intact.
+FOLD_USER_TEXT_OVER_CHARS = 32768
+#: Enough to keep the opening -- for a skill doc that names the skill.
+FOLD_KEEP_HEAD_CHARS = 600
+
 
 def _elide_blob(value: str, label: str = "data") -> str:
     return f"[{label}: {len(value)} chars elided]"
@@ -169,6 +184,33 @@ def _elide_binary(node):
     if isinstance(node, str) and len(node) > ELIDE_OVER_CHARS * 8:
         return _elide_blob(node)
     return node
+
+
+
+def _fold_injected_document(text: str) -> str:
+    """Fold an oversized injected user-role document down to head + marker.
+
+    Returns `text` unchanged unless it is large enough to be a document rather
+    than a message. The head is kept because a skill document's first line
+    names the skill, which is the part worth seeing.
+    """
+    if not isinstance(text, str):
+        return text
+
+    is_skill_doc = text.lstrip().startswith(SKILL_DOC_PREFIX)
+    threshold = FOLD_SKILL_DOC_OVER_CHARS if is_skill_doc else FOLD_USER_TEXT_OVER_CHARS
+    if len(text) <= threshold:
+        return text
+
+    if is_skill_doc:
+        first_line = text.lstrip().split("\n", 1)[0]
+        name = first_line.rsplit("/", 1)[-1].strip() or "unknown"
+        label = f"skill document: {name}"
+    else:
+        label = "injected document"
+
+    head = text[:FOLD_KEEP_HEAD_CHARS].rstrip()
+    return f"{head}\n\n[{label} — {len(text)} chars total, {len(text) - len(head)} elided]"
 
 
 def _flatten_tool_result_content(content) -> str:
@@ -257,6 +299,7 @@ def map_claude_event(obj: dict) -> Tuple[str, str, Optional[str], Optional[Dict[
         text = _text_from_blocks(blocks)
         if not text and isinstance((obj.get("message") or {}).get("content"), str):
             text = (obj.get("message") or {}).get("content") or ""
+        text = _fold_injected_document(text)
         body = {"kind": "text", "text": text} if text else {"kind": "raw_only"}
         return "message", "full", "user", body
 

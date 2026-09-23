@@ -2656,11 +2656,22 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     # Prefer processing wake doorbell this iteration
                     delay_until_event = False
                     next_turn_delay = 0
-                elif _pr.get("holding") and next_turn_delay <= 0 and not delay_until_event:
+                elif _pr.get("holding"):
                     rem = float(_pr.get("remaining_s") or 0)
                     if rem > 0:
-                        # Chunked in-process wait; restart also scheduled at park time
-                        next_turn_delay = min(rem, 600.0)
+                        # Chunked in-process wait; restart also scheduled at park time.
+                        # This used to be gated on `next_turn_delay <= 0 and not
+                        # delay_until_event`, so any delay the agent had already
+                        # queued suppressed the park's own chunking and the loop
+                        # slept on the agent's timer instead. That is how a 600s
+                        # delay came to expire inside a 4.5h park and wake it.
+                        # A park caps the next delay; it never defers to one.
+                        from session_limit import park_delay_chunk
+                        capped = park_delay_chunk(
+                            rem, next_turn_delay, delay_until_event)
+                        if capped is not None:
+                            next_turn_delay = capped
+                        delay_until_event = False
                         print(
                             f"[asdaaas] session_limit holding — "
                             f"delay chunk {next_turn_delay:.0f}s "

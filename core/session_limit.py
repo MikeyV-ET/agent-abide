@@ -226,6 +226,35 @@ def read_park_state(agent_dir: Path) -> Optional[dict]:
 
 
 
+PARK_DELAY_CHUNK_S = 600.0
+
+
+def park_delay_chunk(remaining_s: float, next_turn_delay: float,
+                     delay_until_event: bool,
+                     max_chunk: float = PARK_DELAY_CHUNK_S) -> Optional[float]:
+    """The delay a holding park permits, or None to leave the delay alone.
+
+    A park caps the next wait; it never defers to one. The main loop used to
+    apply its chunk only when the agent had no delay of its own pending, so any
+    already-queued delay won and the loop slept on the agent's timer instead of
+    the park's.
+
+    Astro measured the consequence on a live limit: a 600s delay queued at 14:04,
+    a minute before the limit hit at 14:05, expired at 14:15 inside a park whose
+    reset was 18:50 -- "back online" 4h35m early, and straight back into the
+    limit nine seconds later.
+
+    A shorter delay than the chunk is kept, so a park never makes the loop less
+    responsive than it already was.
+    """
+    if remaining_s <= 0:
+        return None
+    chunk = min(remaining_s, max_chunk)
+    if delay_until_event or next_turn_delay <= 0 or next_turn_delay > chunk:
+        return chunk
+    return next_turn_delay
+
+
 def should_hold_park(agent_dir: Path, *, now: Optional[float] = None) -> bool:
     """True while session_limit.json says we are still before reset.
 
@@ -271,6 +300,12 @@ def count_queued_inputs(agent_dir: Path) -> dict:
         for f in bell_dir.glob("*.json"):
             name = f.name
             if name.startswith("cont_"):
+                n_continue += 1
+            elif name.startswith("wake_sesslim_"):
+                # Our own wake notice from an earlier park in this chain.
+                # Counting it told the agent "1 item queued while parked" when
+                # nothing human had arrived -- a false positive on exactly the
+                # behaviour (A) that this count exists to demonstrate.
                 n_continue += 1
             else:
                 n_bells += 1

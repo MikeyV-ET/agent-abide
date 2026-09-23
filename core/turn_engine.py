@@ -1218,13 +1218,28 @@ class TurnEngine:
                             return result
                     elif _park_before and _park_before.get("status") == "session_limited":
                         try:
-                            from session_limit import clear_park_with_wake
-                            notice = clear_park_with_wake(agent_name, env=self.env)
-                            if notice:
+                            from session_limit import (
+                                clear_park_with_wake, should_hold_park,
+                            )
+                            from asdaaas import agent_dir as _ad
+                            # The delay that just expired is not necessarily the
+                            # park's own chunk. Astro 2026-09-22: a 600s delay
+                            # queued a minute BEFORE the limit hit expired at
+                            # 14:15 and cleared a park whose reset was 18:50 --
+                            # "back online" 4h35m early, straight back into the
+                            # limit 9s later. Only the reset decides.
+                            if should_hold_park(_ad(agent_name, env=self.env)):
                                 print(
-                                    "[asdaaas] session_limit park delay expired — "
-                                    "wake notice emitted"
+                                    "[asdaaas] session_limit: delay expired but "
+                                    "park still holding — not waking"
                                 )
+                            else:
+                                notice = clear_park_with_wake(agent_name, env=self.env)
+                                if notice:
+                                    print(
+                                        "[asdaaas] session_limit park delay expired — "
+                                        "wake notice emitted"
+                                    )
                         except Exception as e:
                             print(f"[asdaaas] session_limit wake on expiry failed: {e}")
 

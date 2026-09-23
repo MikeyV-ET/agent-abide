@@ -48,3 +48,20 @@ Log line on arm: `[hot_spine] armed agent=… native=… watcher=True reconcile=
 
 If glass is stuck mid-tool and native has the tail, check `HotSpine.status()` /
 `behind` before blaming paint.
+
+## Phase 2 — shared native bus
+
+```
+updates.jsonl ── JsonlByteTail (one cursor)
+       │
+       ▼
+ GrokNativeBus.pump()
+       ├─► ingest_grok_records → hot.jsonl   (AA tape)
+       └─► collect buffer → FileEventSource  (turn delivery)
+events.jsonl ── second cursor (lifecycle only)
+```
+
+- Arm: session ready creates `GrokNativeBus` at hot checkpoint, `catch_up()`, then collect window at tip.
+- `sync_hot_stream` / spine reconcile call `bus.pump()` (same ear).
+- Occupancy still has its own tail (**phase 3**).
+- Code: `core/native_tail.py`, `core/grok_native_bus.py`, `ingest_grok_records`.

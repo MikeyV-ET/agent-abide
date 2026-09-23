@@ -309,3 +309,91 @@ def tail_grok_once(
         "hot": str(hot_path(fs_dir)),
         "hot_bytes": hot_path(fs_dir).stat().st_size,
     }
+
+
+def ingest_grok_records(
+    agent_home: Path | str,
+    agent: str,
+    *,
+    session_id: str,
+    source: Path | str,
+    records: list,
+    end_offset: int,
+) -> Dict[str, Any]:
+    """Project already-read native objects into hot.jsonl (shared-tail path).
+
+    ``records`` is a list of ``(line_offset, obj_dict)``. Checkpoint advances
+    to ``end_offset`` even when some lines fail JSON (caller skipped them) so
+    the shared tail and hot meta stay aligned.
+    """
+    agent_home = Path(agent_home)
+    src = Path(source).resolve()
+    fs_dir = ensure_aa_stream_layout(resolve_history_dir(agent_home), agent)
+    sid = session_id or src.parent.name
+    meta = read_hot_meta(fs_dir) or default_hot_meta(agent, fs_dir)
+    seq = int(meta.get("stream_seq_next") or 0)
+    ckpt = read_checkpoint(fs_dir, "grok")
+    # If durable checkpoint is ahead of what bus thinks, do not double-append:
+    # only emit events for line_offsets >= ckpt offset.
+    ck_off = int(ckpt.get("byte_offset") or 0)
+    if ckpt.get("path") and Path(ckpt["path"]).resolve() != src:
+        ck_off = 0
+
+    events: List[Dict[str, Any]] = []
+    for line_off, obj in records:
+        if line_off < ck_off:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        ev = wrap_grok_line(
+            obj,
+            agent=agent,
+            session_id=sid,
+            stream_seq=seq,
+            source_path=str(src),
+            offset=line_off,
+        )
+        events.append(ev)
+        seq += 1
+
+    written = append_hot_events(fs_dir, events)
+    new_offset = int(end_offset)
+    # Never move durable checkpoint backwards
+    if new_offset < ck_off and Path(ckpt.get("path") or src).resolve() == src:
+        new_offset = ck_off
+
+    write_checkpoint(
+        fs_dir,
+        "grok",
+        {
+            "path": str(src),
+            "byte_offset": new_offset,
+            "session_id": sid,
+            "last_ts": events[-1]["ts"] if events else ckpt.get("last_ts"),
+            "lines_total_ingested": int(ckpt.get("lines_total_ingested") or 0) + len(events),
+        },
+    )
+    meta["stream_seq_next"] = seq
+    meta["agent"] = agent
+    meta.setdefault("backends", {})
+    meta["backends"]["grok"] = {
+        "session_id": sid,
+        "source_path": str(src),
+        "byte_offset": new_offset,
+        "last_ts": events[-1]["ts"] if events else meta.get("backends", {}).get("grok", {}).get("last_ts"),
+    }
+    if events:
+        meta["v_min_present"] = FORMAT_V
+        meta["v_max_present"] = FORMAT_V
+    write_hot_meta(fs_dir, meta)
+    return {
+        "status": "ok",
+        "source": str(src),
+        "session_id": sid,
+        "offset_after": new_offset,
+        "lines_ingested": len(events),
+        "bytes_hot_written": written,
+        "stream_seq_next": seq,
+        "via": "bus",
+    }
+

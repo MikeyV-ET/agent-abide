@@ -30,47 +30,48 @@ POST_TURN_DRAIN_DELAY_S = 0.15
 
 
 class FileEventSource:
-    """Tails updates.jsonl + events.jsonl for a grok session.
+    """Turn-window reader for updates.jsonl + events.jsonl.
 
-    updates.jsonl carries content events (speech, thoughts, tool calls, _meta).
-    events.jsonl carries lifecycle events (turn_started, turn_ended).
+    When a ``GrokNativeBus`` is attached (phase 2), collect shares the bus
+    ear: ``read_new_lines`` pumps the bus and drains the collect buffer.
+    Without a bus, falls back to private file handles seeked to EOF (legacy).
     """
 
-    def __init__(self, session_dir: Path):
-        self._updates_path = session_dir / "updates.jsonl"
-        self._events_path = session_dir / "events.jsonl"
+    def __init__(self, session_dir: Path, bus=None):
+        self._session_dir = Path(session_dir)
+        self._updates_path = self._session_dir / "updates.jsonl"
+        self._events_path = self._session_dir / "events.jsonl"
         self._updates_fp: Optional[IO] = None
         self._events_fp: Optional[IO] = None
+        self._bus = bus
+
+    def set_bus(self, bus) -> None:
+        self._bus = bus
 
     def open(self, timeout: float = 30.0):
-        """Open both files and seek to end. Call BEFORE sending a prompt.
-
-        Waits up to `timeout` seconds for files to appear (new sessions
-        may not have updates.jsonl/events.jsonl created immediately).
-        """
+        """Attach collect window at current tip. Call BEFORE sending a prompt."""
         import time
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self._updates_path.exists() and self._events_path.exists():
                 break
             time.sleep(0.5)
-        # Create files if they don't exist yet (new sessions may not have
-        # updates.jsonl/events.jsonl until the first prompt is sent).
         for p in (self._updates_path, self._events_path):
             if not p.exists():
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.touch()
+        if self._bus is not None:
+            self._bus.begin_collect_window()
+            return
         self._updates_fp = open(self._updates_path, "r")
         self._events_fp = open(self._events_path, "r")
         self._updates_fp.seek(0, 2)
         self._events_fp.seek(0, 2)
 
     def read_new_lines(self) -> tuple[list[dict], list[dict]]:
-        """Non-blocking read of new complete lines from both files.
-
-        Returns (update_frames, event_frames). Only yields lines
-        terminated by newline (partial writes are skipped until complete).
-        """
+        """Non-blocking read of new complete lines from both files."""
+        if self._bus is not None:
+            return self._bus.read_for_collect()
         updates = []
         if self._updates_fp:
             for line in self._updates_fp:
@@ -80,7 +81,6 @@ class FileEventSource:
                         updates.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
-
         events = []
         if self._events_fp:
             for line in self._events_fp:
@@ -90,7 +90,6 @@ class FileEventSource:
                         events.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
-
         return updates, events
 
     def close(self):
@@ -473,11 +472,46 @@ class GrokBackend(AgentBackend):
         encoded_cwd = agent_cwd.replace("/", "%2F")
         session_dir = self._grok_sessions_dir / encoded_cwd / self._session_id
         self._session_dir = session_dir
-        self._file_source = FileEventSource(session_dir)
+
+        # Phase 2: shared native bus (one updates.jsonl cursor → hot + collect)
+        self._native_bus = None
+        start_off = 0
+        if getattr(self, "_hot_ingest", False) and getattr(self, "_agent_home", None):
+            try:
+                from hot_spine import measure_behind
+                st = measure_behind(
+                    agent_home=Path(self._agent_home),
+                    agent=str(self._agent_name or "agent"),
+                    native_path=session_dir / "updates.jsonl",
+                )
+                if st.ok:
+                    start_off = int(st.checkpoint_offset or 0)
+            except Exception:
+                start_off = 0
+            try:
+                from grok_native_bus import GrokNativeBus
+                bus = GrokNativeBus(
+                    session_dir,
+                    agent_home=self._agent_home,
+                    agent_name=str(self._agent_name or "agent"),
+                    session_id=self._session_id,
+                    start_offset=start_off,
+                )
+                # Catch up hot through shared ear before collect window
+                bus.catch_up()
+                self._native_bus = bus
+                print(
+                    f"[grok_native_bus] up offset={bus.updates.offset} "
+                    f"behind={bus.updates.behind()}"
+                )
+            except Exception as e:
+                print(f"[grok_backend] native bus: {e}")
+                self._native_bus = None
+
+        self._file_source = FileEventSource(session_dir, bus=self._native_bus)
         self._file_source.open()
         self._seed_tokens_from_session()
-        # Hot spine (native→hot always-on + reconcile). configure_aa_history
-        # may have run before session_dir existed — arm here with real path.
+        # Hot spine: always-on pump/reconcile (uses bus when present)
         if getattr(self, "_hot_ingest", False):
             try:
                 from hot_spine import start_hot_spine_for_backend
@@ -892,6 +926,31 @@ class GrokBackend(AgentBackend):
             return {"status": "skipped", "reason": "hot ingest not configured"}
         if not getattr(self, "_agent_home", None) or not getattr(self, "_agent_name", None):
             return {"status": "skipped", "reason": "hot ingest not configured"}
+        bus = getattr(self, "_native_bus", None)
+        if bus is not None:
+            try:
+                r = bus.pump(max_lines=max_lines)
+                # Normalize to tail_grok_once-like keys for callers/logs
+                hot = (r or {}).get("hot") if isinstance(r, dict) else None
+                if isinstance(hot, dict) and hot.get("status") == "ok":
+                    return {
+                        **hot,
+                        "via": "bus",
+                        "updates_lines": r.get("updates_lines"),
+                        "behind": r.get("behind"),
+                    }
+                if isinstance(r, dict) and r.get("behind", 0) == 0 and not r.get("updates_lines"):
+                    return {
+                        "status": "ok",
+                        "lines_ingested": 0,
+                        "via": "bus",
+                        "behind": 0,
+                        "offset_after": bus.updates.offset,
+                    }
+                return r if isinstance(r, dict) else {"status": "ok", "via": "bus"}
+            except Exception as e:
+                return {"status": "error", "error": f"bus.pump: {e}"}
+
         try:
             from stream_adapters.grok import tail_grok_once
         except Exception as e:

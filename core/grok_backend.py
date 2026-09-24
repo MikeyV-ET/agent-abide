@@ -433,7 +433,9 @@ class GrokBackend(AgentBackend):
         await self._wait_for_response(self._rpc_id, timeout=30)
         await self._send(self._rpc_notification("notifications/initialized"))
 
-        # Create or load session
+        # Create or load session. Fake/stale ids (e.g. hand-minted for guest
+        # restart) make session/load return "unknown session id"; prompts then
+        # never write user_message_chunk and TUI looks dead while asdaaas is "up".
         if session_id:
             print(f"[asdaaas] Loading session {session_id[:12]}...")
             await self._send(self._rpc_request("session/load", {
@@ -449,7 +451,39 @@ class GrokBackend(AgentBackend):
             }))
 
         resp = await self._wait_for_response(self._rpc_id, timeout=120)
-        self._session_id = resp.get("result", {}).get("sessionId", session_id or "unknown")
+        err = resp.get("error") if isinstance(resp, dict) else None
+        sid = None
+        if isinstance(resp, dict):
+            sid = (resp.get("result") or {}).get("sessionId")
+        if err or not sid:
+            # Do NOT fall back to the requested session_id — binary rejected it
+            detail = err if err else "no sessionId in result"
+            if session_id:
+                print(
+                    f"[asdaaas] session/load failed ({detail}); "
+                    "creating new session via session/new"
+                )
+                await self._send(self._rpc_request("session/new", {
+                    "cwd": agent_cwd,
+                    "mcpServers": [],
+                }))
+                resp = await self._wait_for_response(self._rpc_id, timeout=120)
+                err = resp.get("error") if isinstance(resp, dict) else None
+                sid = (resp.get("result") or {}).get("sessionId") if isinstance(resp, dict) else None
+            if err or not sid:
+                msg = err or "missing sessionId"
+                hint = ""
+                if isinstance(err, dict) and "auth" in str(err).lower():
+                    hint = (
+                        " — grok has no usable auth under this HOME "
+                        f"(need valid ~/.grok/auth.json for the agent user). "
+                        f"Citizen will look 'up' only if asdaaas stays running; "
+                        f"TUI will not work until auth is fixed."
+                    )
+                raise RuntimeError(
+                    f"grok session unavailable: {msg}{hint}"
+                )
+        self._session_id = sid
 
         # Model: CLI/agents.json arg first; summary fills in if omitted
         self._model_id = model or "unknown"

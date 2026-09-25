@@ -109,9 +109,10 @@ echo "=== Starting asdaaas agents ==="
 
 AGENT_NAMES_CSV=""
 for agent in "${AGENTS[@]}"; do
-    session=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent']['session'])")
+    session=$(python3 -c "import json; s=json.load(open('$CONFIG'))['agents']['$agent'].get('session') or ''; print('' if s in ('None','null') else s)")
     home=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent']['home'])")
-    model=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent'].get('model', ''))" 2>/dev/null)
+    model=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent'].get('model', '') or '')" 2>/dev/null)
+    backend=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent'].get('backend', 'grok') or 'grok')" 2>/dev/null)
     log_file="$LOG_DIR/asdaaas_$(echo "$agent" | tr '[:upper:]' '[:lower:]').log"
 
     MODEL_FLAG=""
@@ -119,13 +120,20 @@ for agent in "${AGENTS[@]}"; do
         MODEL_FLAG="--model $model"
     fi
     GROK_BIN_FLAG=""
-    if [ -n "$GROK_BINARY" ]; then
+    if [ -n "$GROK_BINARY" ] && [ "$backend" != "claude" ]; then
         GROK_BIN_FLAG="--grok-binary $GROK_BINARY"
     fi
-    # Prefer agents.json "user" so grok gets the citizen HOME (auth.json under ~/.grok).
+    BACKEND_FLAG=""
+    if [ "$backend" = "claude" ]; then
+        BACKEND_FLAG="--backend claude"
+    fi
+    # Prefer agents.json "user" so grok/claude gets the citizen HOME (auth under ~/.grok or ~/.claude).
     # Glass often launches via sudo root; without this HOME=/root and turns hang (no auth).
     agent_user=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent'].get('user',''))" 2>/dev/null || true)
-    run_cmd=(python3 -u "$ASDAAAS" --agent "$agent" --session "$session" --cwd "$home")
+    run_cmd=(python3 -u "$ASDAAAS" --agent "$agent" --cwd "$home")
+    if [ -n "$session" ]; then
+        run_cmd+=(--session "$session")
+    fi
     if [ -n "$MODEL_FLAG" ]; then
         # shellcheck disable=SC2206
         run_cmd+=($MODEL_FLAG)
@@ -133,6 +141,10 @@ for agent in "${AGENTS[@]}"; do
     if [ -n "$GROK_BIN_FLAG" ]; then
         # shellcheck disable=SC2206
         run_cmd+=($GROK_BIN_FLAG)
+    fi
+    if [ -n "$BACKEND_FLAG" ]; then
+        # shellcheck disable=SC2206
+        run_cmd+=($BACKEND_FLAG)
     fi
     if [ "$(id -u)" -eq 0 ] && [ -n "$agent_user" ] && id "$agent_user" >/dev/null 2>&1; then
         setsid nohup sudo -u "$agent_user" --preserve-env=ASDAAAS_CONFIG,ASDAAAS_DEBUG \

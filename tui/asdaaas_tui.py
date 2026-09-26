@@ -89,7 +89,7 @@ from status_read import telemetry_from_files, code_version_stale
 
 class Config:
     """Runtime configuration, set from CLI args."""
-    AGENT_NAME: str = "Trip"
+    AGENT_NAME: str = ""  # empty until operator picks a tab; no silent default
     AGENTS_HOME: str = os.path.expanduser("~/agents")
     GROK_SESSIONS_DIR: Optional[str] = None  # Override for session directory
     SESSION_DIR: Optional[str] = None  # Auto-detected from sessions root
@@ -1060,8 +1060,9 @@ class AsdaaasTUI(App):
 
     def __init__(self, agents: list[str] = None, **kwargs):
         super().__init__(**kwargs)
-        self._agents = agents or [Config.AGENT_NAME]
-        self._active_agent = Config.AGENT_NAME
+        # Empty list = blank screen until [+] pick (no default agent)
+        self._agents = list(agents) if agents else []
+        self._active_agent = self._agents[0] if self._agents else ""
         # Per-agent state
         self._agent_state: dict[str, dict] = {}
         for agent in self._agents:
@@ -1106,30 +1107,44 @@ class AsdaaasTUI(App):
 
     @property
     def _tool_panels(self) -> dict:
+        if not self._active_agent or self._active_agent not in self._agent_state:
+            return {}
         return self._agent_state[self._active_agent]["tool_panels"]
 
     @property
     def _current_agent_msg(self) -> Optional[AgentMessage]:
+        if not self._active_agent or self._active_agent not in self._agent_state:
+            return None
         return self._agent_state[self._active_agent]["current_agent_msg"]
 
     @_current_agent_msg.setter
     def _current_agent_msg(self, val):
+        if not self._active_agent or self._active_agent not in self._agent_state:
+            return
         self._agent_state[self._active_agent]["current_agent_msg"] = val
 
     @property
     def _current_thinking(self) -> Optional[ThinkingBlock]:
+        if not self._active_agent or self._active_agent not in self._agent_state:
+            return None
         return self._agent_state[self._active_agent]["current_thinking"]
 
     @_current_thinking.setter
     def _current_thinking(self, val):
+        if not self._active_agent or self._active_agent not in self._agent_state:
+            return
         self._agent_state[self._active_agent]["current_thinking"] = val
 
     @property
     def _updates_offset(self) -> int:
+        if not self._active_agent or self._active_agent not in self._agent_state:
+            return 0
         return self._agent_state[self._active_agent]["updates_offset"]
 
     @_updates_offset.setter
     def _updates_offset(self, val):
+        if not self._active_agent or self._active_agent not in self._agent_state:
+            return
         self._agent_state[self._active_agent]["updates_offset"] = val
 
     def _content_scroll(self, agent: str = None) -> ContentScroll:
@@ -1152,6 +1167,10 @@ class AsdaaasTUI(App):
             if agent != self._active_agent:
                 vs.display = False
             yield vs
+        # Blank pick screen when no agent tabs open yet
+        pick_vs = ContentScroll(id="content-__pick__")
+        pick_vs.display = not bool(self._agents)
+        yield pick_vs
         # Room content scroll (IRC channel view)
         room_vs = ContentScroll(id="content-room")
         room_vs.display = False
@@ -1161,7 +1180,14 @@ class AsdaaasTUI(App):
         viewer.display = False
         yield viewer
         with Vertical(id="bottom-bar"):
-            yield MessageInput(placeholder=f"Message {Config.AGENT_NAME}...", id="input-bar")
+            yield MessageInput(
+                placeholder=(
+                    f"Message {Config.AGENT_NAME}..."
+                    if Config.AGENT_NAME
+                    else "Pick an agent with [+] (no default)…"
+                ),
+                id="input-bar",
+            )
             yield DynamicFooter(id="dynamic-footer")
 
     def _cleanup_and_exit(self) -> None:
@@ -1203,14 +1229,40 @@ class AsdaaasTUI(App):
         """Start background workers and initialize UI."""
         try:
             viewer = self.query_one("#ephact-viewer", EphactViewer)
-            viewer.set_active_agent(self._active_agent)
+            if self._active_agent:
+                viewer.set_active_agent(self._active_agent)
         except NoMatches:
             pass
         try:
             tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
-            tab_bar.active_agent = self._active_agent
+            if self._active_agent:
+                tab_bar.active_agent = self._active_agent
         except NoMatches:
             pass
+        # Blank boot: paint pick hint and open [+] catalog (in-TUI, not shell)
+        if not self._agents:
+            try:
+                pick = self.query_one("#content-__pick__", ContentScroll)
+                pick.display = True
+                pick.remove_children()
+                pick.mount(
+                    Static(
+                        "[b]No agent selected[/b]\n\n"
+                        "This is an empty TUI session — nothing is defaulted.\n"
+                        "Press [+] on the tab bar (or the binding below) to open a citizen.\n\n"
+                        "[dim]Tip: launch_tui.sh -a Jr still opens a tab directly.[/dim]",
+                        id="pick-hint",
+                    )
+                )
+            except Exception:
+                pass
+            try:
+                header = self.query_one("#agent-header", AgentHeader)
+                header.agent_name = "(pick agent)"
+            except Exception:
+                pass
+            # Defer menu so layout exists
+            self.set_timer(0.15, self.action_add_agent_menu)
         # Start the status poller
         self.status_worker = self.run_worker(
             self._poll_status, thread=True, name="status_poller"
@@ -1247,8 +1299,11 @@ class AsdaaasTUI(App):
 
 
         # Set the header
-        header = self.query_one("#agent-header", AgentHeader)
-        header.agent_name = Config.AGENT_NAME
+        try:
+            header = self.query_one("#agent-header", AgentHeader)
+            header.agent_name = Config.AGENT_NAME or "(pick agent)"
+        except NoMatches:
+            pass
 
     # -------------------------------------------------------------------------
     # Input handling
@@ -2191,6 +2246,19 @@ Type anything else to send a message to the agent.
             )
 
         self._sync_tab_bar()
+        try:
+            pick = self.query_one("#content-__pick__", ContentScroll)
+            pick.display = False
+        except NoMatches:
+            pass
+        if Config.AGENT_NAME != agent_name:
+            # first agent: Config may still be empty
+            Config.AGENT_NAME = agent_name
+        try:
+            Config.tui_inbox().mkdir(parents=True, exist_ok=True)
+            Config.tui_outbox().mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         self.action_switch_agent(agent_name)
         self.notify(f"Added {agent_name}", severity="information", timeout=2)
 
@@ -2198,14 +2266,14 @@ Type anything else to send a message to the agent.
         """Close an agent tab (does not delete agents.json entry)."""
         if agent_name not in self._agents:
             return
-        if len(self._agents) <= 1:
-            self.notify("Keep at least one agent open", severity="warning")
-            return
-
-        # Pick next active if removing current
+        # Pick next active if removing current (may go to empty / pick screen)
         if self._active_agent == agent_name and not self._room_active:
             others = [a for a in self._agents if a != agent_name]
-            self.action_switch_agent(others[0])
+            if others:
+                self.action_switch_agent(others[0])
+            else:
+                self._active_agent = ""
+                Config.AGENT_NAME = ""
 
         # Mark removed so tail workers exit
         st = self._agent_state.get(agent_name)
@@ -2224,7 +2292,24 @@ Type anything else to send a message to the agent.
         # Drop state (after workers can see removed flag)
         self._agent_state.pop(agent_name, None)
 
-        self._sync_tab_bar()
+                self._sync_tab_bar()
+        if not self._agents:
+            try:
+                pick = self.query_one("#content-__pick__", ContentScroll)
+                pick.display = True
+            except NoMatches:
+                pass
+            try:
+                header = self.query_one("#agent-header", AgentHeader)
+                header.agent_name = "(pick agent)"
+            except NoMatches:
+                pass
+            try:
+                input_bar = self.query_one("#input-bar", MessageInput)
+                input_bar._placeholder = "Pick an agent with [+] (no default)…"
+            except NoMatches:
+                pass
+            self.set_timer(0.1, self.action_add_agent_menu)
         self.notify(f"Closed {agent_name}", severity="information", timeout=2)
 
     def action_switch_to_room(self) -> None:
@@ -4966,7 +5051,7 @@ def main():
     )
     parser.add_argument(
         "--agent", "-a", action="append", dest="agents", default=None,
-        help="Agent to open (repeatable). Default: Trip only. Use tab [+] to add more.",
+        help="Agent to open (repeatable). Omit for blank TUI + in-app [+] picker (no default).",
     )
     parser.add_argument(
         "--agents-home", default=os.path.expanduser("~/agents"),
@@ -5011,8 +5096,8 @@ def main():
     )
     args = parser.parse_args()
 
-    open_agents = args.agents if args.agents else ["Trip"]
-    Config.AGENT_NAME = open_agents[0]
+    open_agents = list(args.agents) if args.agents else []
+    Config.AGENT_NAME = open_agents[0] if open_agents else ""
     Config.AGENTS_HOME = args.agents_home
     Config.set_env(TuiEnv.from_defaults(args.agents_home))
     Config.UPDATES_FILE = args.updates
@@ -5027,18 +5112,22 @@ def main():
     elif args.theme:
         set_theme(args.theme)
 
-    # Ensure adapter directories exist
-    Config.tui_inbox().mkdir(parents=True, exist_ok=True)
-    Config.tui_outbox().mkdir(parents=True, exist_ok=True)
-
-    # Check for updates file (only needed when not using API)
-    if not Config.API_URL:
-        updates = Config.find_updates_file()
-        if updates:
-            print(f"Found updates at: {updates}")
-        else:
-            print(f"Warning: No updates.jsonl found for agent {Config.AGENT_NAME}")
-            print("The TUI will wait for the file to appear...")
+    # Ensure adapter directories exist only when an agent is pre-selected
+    if Config.AGENT_NAME:
+        try:
+            Config.tui_inbox().mkdir(parents=True, exist_ok=True)
+            Config.tui_outbox().mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        if not Config.API_URL:
+            updates = Config.find_updates_file()
+            if updates:
+                print(f"Found updates at: {updates}")
+            else:
+                print(f"Warning: No updates.jsonl found for agent {Config.AGENT_NAME}")
+                print("The TUI will wait for the file to appear...")
+    else:
+        print("No --agent: blank TUI — pick a citizen with [+] after paint.")
 
     # Open only CLI-selected agents; [+] adds more from agents.json catalog.
     # Dedupe preserving order.

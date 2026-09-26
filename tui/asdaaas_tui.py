@@ -1150,6 +1150,8 @@ class AsdaaasTUI(App):
     def _content_scroll(self, agent: str = None) -> ContentScroll:
         """Get the content scroll widget for the given agent (or active agent)."""
         agent = agent or self._active_agent
+        if not agent:
+            return self.query_one("#content-__pick__", ContentScroll)
         return self.query_one(f"#content-{agent}", ContentScroll)
 
     def compose(self) -> ComposeResult:
@@ -2292,7 +2294,7 @@ Type anything else to send a message to the agent.
         # Drop state (after workers can see removed flag)
         self._agent_state.pop(agent_name, None)
 
-                self._sync_tab_bar()
+        self._sync_tab_bar()
         if not self._agents:
             try:
                 pick = self.query_one("#content-__pick__", ContentScroll)

@@ -3,7 +3,9 @@
 **Status:** concept (Eric 2026-10-08). Not implementing today.  
 **Related:** [`aa_stream/SESSION_EPOCHS.md`](./aa_stream/SESSION_EPOCHS.md), gaze, thiasai dual viewports.
 
-Grok bot got this right: **what is on a device is a local representation of the agent**, so the same bot can show up on a phone or a laptop. The cost is that xAI owns the real thing (session, memory, inference).
+Grok bot got this right: **what is on a device is a local representation of the agent**, so the same bot can show up on a phone or a laptop. Their inference still runs on **one** virtual machine in their cloud; every device is a client of that VM. The cost is that xAI owns the VM.
+
+Ours is a different topology. There is no one remote box. **The virtual machine is the set of places es has instantiated.** Phone, this WSL, guest, a lab host — together they *are* the computer. Sync is how that overlay stays one machine.
 
 We want that fluidity **without** handing the agent to a vendor. Eric’s version (2026-10-08): the agent is **on all of the machines**. The problem is keeping those replicas in sync — not packing a suitcase and moving one seat.
 
@@ -16,7 +18,7 @@ We want that fluidity **without** handing the agent to a vendor. Eric’s versio
 | **Surface** | Where Eric talks (phone app, TUI, glass, SA) | Gaze already routes speech | Any logged-in device |
 | **Home / SoR** | Who the agent *is*: V1 speech, V2 stream, V3 epochs, notes, METHOD | Path on one disk (`~/agents/Squiggy`) | xAI cloud |
 | **Control** | asdaaas: doorbells, delay, commands, occupancy | One process on one host | xAI |
-| **Seat** | Active inference + tools/cwd for this turn | Same host as control + grok UUID | xAI GPU |
+| **Seat** | Where this turn’s inference runs (an organ of the overlay VM) | Same host as control + grok UUID | Always one xAI VM |
 
 Gaze already splits **surface** from the other three. Session epochs split **seat UUID** from **home**. Still glued: home, control, and seat live on one machine.
 
@@ -33,7 +35,9 @@ The hard problem is **sync**, not travel:
 | V3 continuity | Who has which epoch; converge |
 | Native grok/claude/codex journals | **Do not sync.** Disposable per replica. Carry/compact-prior is how a replica that was behind infers. |
 
-Token generation is still one-writer at a time (two groks on one V1 will fork). **Which replica is inferring is under the agent’s control** — same class of decision as gaze and delay, not a hidden scheduler. Because every machine already has a current replica, switching seat is cheap: no 3.4G `session/load`, no packing ceremony if home is already caught up.
+Active inference can run on any instantiation; **which one is ihm’s choice** (same class as gaze and delay). That is not a copy of grok-bot’s “one VM, many clients.” The instantiations are organs of one body. A turn here can use this filesystem; a turn on the phone can stay on the phone; a tool on the guest is the guest — all the same agent, one synced home.
+
+Two uncoordinated grok binaries dumping into one V1 will fork. Coordination is the overlay: one agent, many organs, explicit seat for a given turn. Cheap to move because the body is already there.
 
 Thiasai already has the collab pattern for documents (Yjs / change-log ladder). Agent-as-peer on that kind of store is the same idea with V1 as the shared tape.
 

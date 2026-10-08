@@ -3,6 +3,8 @@
 **Status:** concept (Eric 2026-10-08). Not implemented.  
 **Lock change:** we **abandon** “one UUID for the life of the agent.” Backend session ids are **epochs**. The agent (Squiggy, Trip-G, …) is the durable identity.
 
+Placement (surface / home / control / seat across devices): [`../AGENT_PLACEMENT.md`](../AGENT_PLACEMENT.md).
+
 Related: [`HISTORY_VERSIONS.md`](./HISTORY_VERSIONS.md) (V1 speech, V2 aa.stream, V3 continuity), [`AUDIT_backend_session_schemas.md`](./AUDIT_backend_session_schemas.md), [`V1_TRANSCRIPT.md`](./V1_TRANSCRIPT.md), [`HOT_FORMAT_v1.md`](./HOT_FORMAT_v1.md).
 
 ---

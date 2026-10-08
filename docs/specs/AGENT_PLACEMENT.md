@@ -63,3 +63,19 @@ Carry (post-compaction slots 2+3) is how a replica that was offline, or a new ba
 4. A new epoch on any replica seeds from compact-prior + the synced home, then publishes back.
 
 Vendor lock shows up the moment home or carry lives only inside a binary session. Epochs + V1 are the escape hatch we just named.
+
+---
+
+## Why the grok journal hunt (2026-10-08)
+
+Managing native file size is **in service of multi-endpoint sync**. The overlay VM only works if what we replicate is light.
+
+Squiggy’s live grok dir is ~3.4G (`stdout_log` 1.95G, `updates.jsonl` 711M, …). That cannot be the backplane. The syncable home is the small SoR:
+
+| Sync | Leave local |
+|------|-------------|
+| V1 speech, notes, METHOD, gaze, continuity | Native `updates.jsonl` / Claude jsonl / Codex rollout |
+| Compact-prior slots 2+3 (~80k chars) | `stdout_log`, `terminal/`, checkpoints as caches |
+| Thiasai collab / change-log | Anything that only exists to feed one binary |
+
+Lighter is better: a phone and a guest can instantiate es if they share the tape, not the 3.4G. Epochs exist so a new seat starts from the compact prior plus synced home, and never needs the last machine’s native journal.

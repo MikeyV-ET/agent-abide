@@ -179,6 +179,7 @@ class GrokBackend(AgentBackend):
         self._grok_binary = grok_binary or "grok"
         self._file_source: Optional[FileEventSource] = None
         self._stdout_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
         self._permission_handler: Optional[Callable] = None
         self._allowed_always: set[str] = set()  # tool kinds auto-approved
         self._permission_pending: bool = False  # set while awaiting mentor decision
@@ -232,23 +233,47 @@ class GrokBackend(AgentBackend):
 
             await asyncio.wait_for(_read(), timeout=timeout)
         except asyncio.TimeoutError:
-            return None
+            raise
 
         data = b"".join(chunks)
         if not data:
             return None
         return json.loads(data.decode("utf-8").strip())
 
+    async def _drain_stderr(self):
+        """Keep grok's stderr pipe from filling (64KB) and log it."""
+        err = self._proc.stderr if self._proc else None
+        if not isinstance(err, asyncio.StreamReader):
+            return
+        try:
+            while True:
+                line = await err.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    print(f"[grok:stderr] {text}", flush=True)
+        except Exception:
+            return
+
     async def _wait_for_response(self, expected_id: int, timeout: float = 60.0) -> dict:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = max(0.1, deadline - time.monotonic())
-            frame = await self._read_frame(timeout=remaining)
+            try:
+                frame = await self._read_frame(timeout=remaining)
+            except asyncio.TimeoutError:
+                rc = self._proc.returncode if self._proc else None
+                raise TimeoutError(
+                    f"No response for id={expected_id} within {timeout}s (rc={rc})"
+                )
             if frame is None:
-                raise RuntimeError("stdio process closed stdout")
+                rc = self._proc.returncode if self._proc else None
+                raise RuntimeError(f"stdio process closed stdout (rc={rc})")
             if frame.get("id") == expected_id:
                 return frame
-        raise TimeoutError(f"No response for id={expected_id} within {timeout}s")
+        rc = self._proc.returncode if self._proc else None
+        raise TimeoutError(f"No response for id={expected_id} within {timeout}s (rc={rc})")
 
     def set_permission_handler(self, handler: Callable):
         """Set async callback for tool permission requests.
@@ -472,6 +497,7 @@ class GrokBackend(AgentBackend):
             cwd=agent_cwd,
             env=proc_env,
         )
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
 
         # Initialize JSON-RPC
         print(f"[asdaaas] Initializing protocol...")
@@ -498,7 +524,9 @@ class GrokBackend(AgentBackend):
                 "mcpServers": [],
             }))
 
-        resp = await self._wait_for_response(self._rpc_id, timeout=120)
+        # Huge spines (Squiggy ~3.4G / 115k msgs) stay silent on stdout until
+        # load finishes. 120s after a cold reboot looked like a crash.
+        resp = await self._wait_for_response(self._rpc_id, timeout=300)
         try:
             self._session_id = resolve_session_after_rpc(
                 requested=session_id, resp=resp
@@ -1226,6 +1254,9 @@ class GrokBackend(AgentBackend):
         if self._stdout_task:
             self._stdout_task.cancel()
             self._stdout_task = None
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            self._stderr_task = None
         if self._file_source:
             self._file_source.close()
             self._file_source = None

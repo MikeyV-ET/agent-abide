@@ -5,7 +5,7 @@
 
 Grok bot got this right: **what is on a device is a local representation of the agent**, so the same bot can show up on a phone or a laptop. The cost is that xAI owns the real thing (session, memory, inference).
 
-We want that fluidity **without** handing the agent to a vendor. An agent in thiasai can be *on* several systems at once, and **active inference** can move while the conversation stays put.
+We want that fluidity **without** handing the agent to a vendor. Eric’s version (2026-10-08): the agent is **on all of the machines**. The problem is keeping those replicas in sync — not packing a suitcase and moving one seat.
 
 ---
 
@@ -20,16 +20,24 @@ We want that fluidity **without** handing the agent to a vendor. An agent in thi
 
 Gaze already splits **surface** from the other three. Session epochs split **seat UUID** from **home**. Still glued: home, control, and seat live on one machine.
 
-The phone story is a **placement**, not a new identity:
+## On all machines (the intended picture)
 
-1. Conversation on a native thiasai app (surface = phone).
-2. Move **seat** to this machine (inference + this filesystem, this grok/claude/codex).
-3. Maybe a third machine (guest VM, another host).
-4. Back to the phone — same V1 thread, different seat.
+Es is not visiting. Es **lives** on the phone, this WSL, the guest, a third box — each has a local representation that is allowed to be live (talk, see files, take doorbells). Grok bot does that by making every device a client of one cloud agent. We do it by **replicating home + control** and defining a sync plane we own.
 
-Nothing in that requires the grok session UUID, the asdaaas pid, or the phone to be the same object.
+The hard problem is **sync**, not travel:
 
-“On multiple systems” is occupancy: the agent may have a **set** of systems (phone, WSL, guest, a lab box) while **one** seat is doing active inference. Tools and files can stay on the interesting machine even when the surface is elsewhere. That is gaze + seating taken off a single host.
+| What | Sync shape |
+|------|------------|
+| V1 speech / conversation | Append-only log or CRDT; every surface shows the same thread |
+| Notes, METHOD, gaze, delay | Small files; same as thiasai collab (patch/rev, not whole-doc LWW) |
+| V3 continuity | Who has which epoch; converge |
+| Native grok/claude/codex journals | **Do not sync.** Disposable per replica. Carry/compact-prior is how a replica that was behind infers. |
+
+Token generation is still one-writer at a time (two groks on one V1 will fork). That is an **election on synced state**, not “es only exists on one host.” Because every machine already has a current replica, switching who infers is cheap — no 3.4G `session/load`, no packing ceremony if home is already caught up.
+
+Thiasai already has the collab pattern for documents (Yjs / change-log ladder). Agent-as-peer on that kind of store is the same idea with V1 as the shared tape.
+
+Phone + this machine + guest: one conversation object, three live representations, doorbells land wherever, inference runs where the interesting files are *this turn*.
 
 ---
 
@@ -39,15 +47,15 @@ Nothing in that requires the grok session UUID, the asdaaas pid, or the phone to
 - Seat ≠ home. A new grok/claude/codex epoch on this box does not fork the agent.
 - Home ≠ vendor cloud. V1/V3/carry are ours; native journals are disposable caches on whatever seat last ran.
 
-Carry (post-compaction slots 2+3) is what lets a **seat move**: the next machine instantiates a new epoch with the same priors. The phone never needs `updates.jsonl`.
+Carry (post-compaction slots 2+3) is how a replica that was offline, or a new backend epoch, **joins the sync** without swallowing another machine’s native journal. The phone never needs `updates.jsonl`.
 
 ---
 
 ## Gentle modularity (no rewrite)
 
 1. Keep gaze as the surface pointer. A thiasai phone app is another gaze target, same as TUI/SA.
-2. Keep home as files we already have (V1, notes, continuity). Next cut is **home reachable from more than one host** (thiasai store / sync of the small SoR, not the 3.4G grok dir).
-3. Seat placement: spawn/resume backend on a chosen host, seed with compact-prior, record the seat in V3 (`host`, `backend`, `epoch`).
-4. Control can stay “one asdaaas” for a long time if doorbells and gaze can **find** the live seat. Migrating asdaaas itself is later.
+2. Home is a **replicated object** (V1, notes, continuity) — thiasai store / CRDT / change-log, not rsync of `~/.grok/sessions`.
+3. Each machine may run control. Doorbells and speech append to the shared tape; one elected writer for inference.
+4. A new epoch on any replica seeds from compact-prior + the synced home, then publishes back.
 
 Vendor lock shows up the moment home or carry lives only inside a binary session. Epochs + V1 are the escape hatch we just named.

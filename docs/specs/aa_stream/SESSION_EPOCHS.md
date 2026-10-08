@@ -37,12 +37,36 @@ V1 already says: *span is lifetime; new UUID must not reset speech.* V3 already 
                          V3 continuity.json  {chain[], live_uuid, pack_id}
 ```
 
-**CarryPack** (backend-agnostic bytes we already almost have):
+**CarryPack** is the **post-compaction prompt**, not a homemade memoir.
 
-- Token-budgeted V1 transcript (`v1_transcript.py --memory-pack` + a recency window)
-- Optional last-N tool *summaries* from V2/hot (not raw payloads)
-- Epoch pointer: previous uuid, why we cut (disk / load-time / session_limit / operator)
-- Not: the 711M `updates.jsonl`
+Grok already writes that object on every compact. Squiggy checkpoint `fb82100d` (2026-10-07) is five messages, ~80k chars:
+
+| Slot | Type | What | New epoch? |
+|------|------|------|------------|
+| 0 | system | CLI system prompt + memory-v2 index | Regenerated from cwd / `prompt_context.json` |
+| 1 | user | `<user_info>` + `<rules>` (AGENTS.md, …) | Regenerated |
+| 2 | user | In-flight `<user_query>` at compact time | **Carry** |
+| 3 | user | `This session is being continued from a previous conversation…` + structured Summary | **Carry** (the prior) |
+| 4 | user | `<system-reminder>` skills | Regenerated |
+
+Slots 0/1/4 are what `session/new` already instantiates. The hurdle is slots **2 and 3** — the same priors a post-compaction turn would have had. Do not replace them with a V1 memory-pack unless no checkpoint exists.
+
+**How to obtain 2+3 (prefer in this order):**
+
+1. **Compact-then-cut (live):** trigger the binary’s own compact, read `compaction_checkpoints/<id>.json` → `compacted_history`. Same summarizer, same shape.
+2. **Last checkpoint on disk:** if the native journal will not load, the newest checkpoint is still a valid post-compact prior (possibly stale vs the last hours).
+3. **Synthesize** only if there is no checkpoint: V1 recency window poured into the same “This session is being continued…” preamble. This is the weak path.
+
+Claude/Codex: find that backend’s compact artifact (or first-turn inject of an equivalent continuation summary). The *slot* is portable; the *file* is native.
+
+---
+
+**CarryPack (bytes we seed):**
+
+- Slot 3 continuation summary (required)
+- Slot 2 in-flight user query (if any)
+- Epoch pointer: previous uuid, why we cut
+- Not: the 711M `updates.jsonl`, not a second system prompt, not a V1 dump that duplicates AGENTS.md
 
 **When we mint a new epoch**
 

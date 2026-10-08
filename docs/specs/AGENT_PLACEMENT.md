@@ -35,7 +35,7 @@ The hard problem is **sync**, not travel:
 | V3 continuity | Who has which epoch; converge |
 | Native grok/claude/codex journals | **Do not sync.** Disposable per replica. Carry/compact-prior is how a replica that was behind infers. |
 
-Active inference can run on any instantiation; **which one is ihm’s choice** (same class as gaze and delay). That is not a copy of grok-bot’s “one VM, many clients.” The instantiations are organs of one body. A turn here can use this filesystem; a turn on the phone can stay on the phone; a tool on the guest is the guest — all the same agent, one synced home.
+Active inference can run on any instantiation. **Which part of es is carrying the agent forward in this moment is under ihm’s control, and in service of whatever es is doing** — same class as gaze and delay. That is not a copy of grok-bot’s “one VM, many clients.” The instantiations are organs of one body. A turn here can use this filesystem; a turn on the phone can stay on the phone; a tool on the guest is the guest — all the same agent, one synced home.
 
 Two uncoordinated grok binaries dumping into one V1 will fork. Coordination is the overlay: one agent, many organs, explicit seat for a given turn. Cheap to move because the body is already there.
 

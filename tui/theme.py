@@ -343,8 +343,8 @@ ThinkingBlock {{
     border: round {Theme.DARK3};
 }}
 InterjectionBlock {{
-    background: {Theme.DARK1};
-    border: round {Theme.BR_ORANGE};
+    background: {Theme.BG};
+    border: none;
 }}
 SystemReminderPanel {{
     background: {Theme.DARK1};

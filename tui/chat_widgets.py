@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from textual.widgets import Static
+from textual.containers import Vertical, Horizontal
 from rich.markdown import Markdown as RichMarkdown
 from rich.panel import Panel
 from rich.text import Text
@@ -9,6 +10,99 @@ from rich.table import Table
 from rich.console import Console as RichConsole, Group
 
 from theme import Theme
+from nav_widgets import layout_bubble, layout_painted_bubble, nick_mark, bubble_metrics
+import re
+
+
+def operator_body(text: str) -> str:
+    """Strip envelope/context tag for paint. Does not change the record."""
+    t = (text or "").strip()
+    t = re.sub(r"^\[background\][^\n]*\n?", "", t)
+    t = re.sub(r"^<eric\b[^>]*>\s*", "", t, flags=re.I)
+    t = re.sub(r"^\[eric\b[^\]]*\]\s*", "", t, flags=re.I)
+    t = re.sub(r"^\[IRC [^\]]*\]\s*", "", t)
+    t = re.sub(r"\n\[Context left[^\]]*\]\s*$", "", t)
+    return t.strip()
+
+
+def telemetry_from_chunk(text: str) -> str:
+    m = re.search(r"\[Context left[^\]]*\]", text or "")
+    if not m:
+        return ""
+    return m.group(0).strip("[]").replace("Context left ", "")
+
+
+def via_from_chunk(text: str) -> str:
+    t = text or ""
+    m = re.search(r"reply_via=([a-z0-9_-]+)", t, re.I)
+    if m:
+        v = m.group(1).lower().replace("_outbox", "").strip("_")
+        return v or "irc"
+    if t.startswith("[background]") or "[IRC #" in t:
+        return "irc"
+    m = re.search(r"\(via\s+([a-z0-9_-]+)\)", t, re.I)
+    if m:
+        return m.group(1).lower()
+    return "tui"
+
+
+def is_control_user_line(text: str) -> bool:
+    """asdaaas chrome (continue / aa.control / localmail / compact / session-limit), not an operator turn."""
+    if not text or not isinstance(text, str):
+        return False
+    s = text.strip()
+    if not s:
+        return False
+    body = s
+    footer_re = re.compile(r"\n?\[context left[^\]]*\]\s*$", re.IGNORECASE)
+    while True:
+        nxt = footer_re.sub("", body).rstrip()
+        if nxt == body:
+            break
+        body = nxt
+    if not body:
+        return True
+    blow = body.lower()
+    if blow.startswith("[continue") or blow.startswith("[delay") or blow.startswith("[aa.control"):
+        return True
+    if blow.startswith("[localmail") or blow.startswith("[from:"):
+        return True
+    if "mail from" in blow[:80] and "localmail" in blow[:80]:
+        return True
+    if blow.startswith("[session:compact") or blow.startswith("[compaction"):
+        return True
+    if blow.startswith("[compaction complete") or "follow your boot protocol" in blow[:240]:
+        return True
+    if blow.startswith("this session is being continued"):
+        return True
+    if "your turn ended" in blow and "stand by" in blow:
+        return True
+    if re.match(r"^you(?:'ve| have) hit your session limit\b", blow):
+        return True
+    if blow.startswith("[context left"):
+        return True
+    return False
+
+
+def system_alert_body(text: str, cap: int = 800) -> str:
+    """Paint-only: peel context footer, cap length. Record stays raw."""
+    t = (text or "").strip()
+    t = re.sub(r"\n\[context left[^\]]*\]\s*$", "", t, flags=re.I).strip()
+    if len(t) > cap:
+        t = t[:cap].rstrip() + "…"
+    return t
+
+
+def make_user_message(text: str, *, echo: bool = False) -> "UserMessage":
+    """Paint-only: eric (tui|irc) + body + dim telemetry. Record stays raw."""
+    via = via_from_chunk(text) if not echo else "tui"
+    nick = f"eric ({via})"
+    body = operator_body(text) if not echo else (text or "").strip()
+    um = UserMessage(body or (text or "").strip(), nick=nick, via=via)
+    tel = telemetry_from_chunk(text)
+    if tel:
+        um.mark_received(tel)
+    return um
 
 
 def short_ref(tool_id: str, prefix: str = "id") -> str:
@@ -79,13 +173,21 @@ class ToolCallPanel(Static):
     keep *both* the command and the return so you can see what ran.
     """
 
+    DEFAULT_CSS = """
+    ToolCallPanel {
+        width: 80%;
+        margin: 0 2 1 1;
+        align: left top;
+    }
+    """
+
     SNIPPET_LINES = 4
     SNIPPET_MAX_CHARS = 480
-    SNIPPET_MAX_VISUAL_ROWS = 6
+    SNIPPET_MAX_VISUAL_ROWS = 4
     MAX_EXPANDED_LINES = 80
     MAX_STORED_CHARS = 65536
     MAX_ACTIVE_LINES = 15
-    COMMAND_MAX_CHARS = 320
+    COMMAND_MAX_CHARS = 8000
 
     def __init__(self, tool_id: str, title: str, kind: str = "", ts: str = "", **kwargs):
         super().__init__(**kwargs)
@@ -97,7 +199,7 @@ class ToolCallPanel(Static):
         self.tool_output = ""
         self.tool_ts = ts or ""
         self.border_title = title.replace("[", "\\[")
-        self._collapsed = True
+        self.density = "snippet"  # one | snippet | full
         self._mounted_interjections: set[str] = set()
 
     def _cap_output(self, content: str) -> str:
@@ -130,11 +232,34 @@ class ToolCallPanel(Static):
         self.tool_command = first
         self.refresh(layout=True)
 
+    @property
+    def _collapsed(self) -> bool:
+        return self.density != "full"
+
+    @_collapsed.setter
+    def _collapsed(self, val: bool) -> None:
+        if val:
+            if self.density == "full":
+                self.density = "snippet"
+        else:
+            self.density = "full"
+
+    def _run_stack(self):
+        w = self.parent
+        while w is not None:
+            if isinstance(w, ToolRunStack):
+                return w
+            w = getattr(w, "parent", None)
+        return None
+
     def set_status(self, status: str):
         self.tool_status = status
-        if status in ("completed", "failed"):
-            self._collapsed = True
+        if status in ("completed", "failed") and self.density != "full":
+            self.density = "one"
         self.refresh(layout=True)
+        stack = self._run_stack()
+        if stack is not None:
+            stack._apply_densities()
 
     def set_output(self, content: str):
         """Set return/stdout. Does **not** clear tool_command."""
@@ -152,27 +277,43 @@ class ToolCallPanel(Static):
             self.refresh(layout=True)
 
     def on_click(self, event) -> None:
-        self._collapsed = not self._collapsed
+        if self.density == "one":
+            self.density = "snippet"
+        elif self.density == "snippet":
+            self.density = "full"
+        else:
+            self.density = "one"
         self.refresh(layout=True)
+        if hasattr(event, "stop"):
+            event.stop()
 
-    def _collapsed_snippet(self) -> tuple[str, bool]:
-        raw = self.tool_output or ""
+    def _collapsed_snippet(self, raw: str | None = None) -> tuple[str, bool]:
+        raw = self.tool_command if raw is None and self.tool_command else (raw if raw is not None else (self.tool_output or ""))
         if not raw:
             return "", False
-        lines = raw.split("\n")
-        piece = "\n".join(lines[: self.SNIPPET_LINES])
-        more = len(lines) > self.SNIPPET_LINES or len(raw) > self.SNIPPET_MAX_CHARS
-        if len(piece) > self.SNIPPET_MAX_CHARS:
-            piece = piece[: self.SNIPPET_MAX_CHARS].rstrip() + "…"
-            more = True
-        approx_rows = 0
-        for ln in piece.split("\n"):
-            approx_rows += max(1, (len(ln) + 79) // 80)
-        if approx_rows > self.SNIPPET_MAX_VISUAL_ROWS:
-            budget = self.SNIPPET_MAX_VISUAL_ROWS * 80
-            if len(piece) > budget:
-                piece = piece[:budget].rstrip() + "…"
+        width = max(40, (self.size.width or 80) - 6)
+        max_rows = self.SNIPPET_MAX_VISUAL_ROWS
+        out: list[str] = []
+        visual = 0
+        more = False
+        for ln in raw.split("\n"):
+            chunks = max(1, (len(ln) + width - 1) // width) if ln else 1
+            if visual + chunks > max_rows:
+                remain = max_rows - visual
+                if remain > 0:
+                    cap = remain * width
+                    bit = ln[: max(0, cap - 1)].rstrip()
+                    out.append(bit + "…")
                 more = True
+                break
+            out.append(ln)
+            visual += chunks
+        else:
+            if len(raw.split("\n")) > len(out):
+                more = True
+        piece = "\n".join(out)
+        if len(raw.split("\n")) > len(out) or len(raw) > len(piece):
+            more = True
         return piece, more
 
     def _title_line(self, status_icon: str) -> str:
@@ -229,21 +370,57 @@ class ToolCallPanel(Static):
             if self.tool_command:
                 body.append(f"$ {self.tool_command}\n", style=f"bold {Theme.FG}")
 
-        if self._collapsed:
+        if self.density == "one":
+            try:
+                self.styles.border = ("none", color)
+            except Exception:
+                self.styles.border = None
+            self.styles.padding = (0, 0)
+            self.styles.margin = (0, 0, 0, 0)
+            try:
+                self.styles.height = 1
+            except Exception:
+                pass
+            self.border_title = ""
+            cmd = (self.tool_command or self.tool_title or self.tool_kind or "tool").strip()
+            cmd = " ".join(cmd.split())
+            if len(cmd) > 56:
+                cmd = cmd[:55] + "…"
+            kind_icons = {
+                "read": "📖", "execute": "⚡", "edit": "✏️",
+                "search": "🔍", "think": "💭", "other": "📋",
+            }
+            kicon = kind_icons.get(self.tool_kind, "🔧")
+            ref = short_ref(self.tool_id)
+            line = Text()
+            line.append(f"{status_icon} ", style=f"bold {border_style}")
+            line.append(f"{kicon} {cmd}", style=Theme.FG)
+            if ref:
+                line.append(f"  {ref}", style=Theme.DARK4)
+            line.append("  ▸", style=Theme.DARK4)
+            return line
+
+        if self.density != "full":
+            try:
+                self.styles.height = "auto"
+            except Exception:
+                pass
             self.styles.border = ("round", color)
             self.styles.padding = (0, 1)
+            if self._run_stack() is not None:
+                self.styles.margin = (0, 0, 0, 0)
+                self.styles.border = ("none", color)
+                self.styles.padding = (0, 0)
             self.border_title = title.replace("[", "\\[")
             body = Text()
-            _prepend_command(body)
-            if not self.tool_output:
-                cite = self.tool_ts or short_ref(self.tool_id)
-                empty = f"(no output yet — cite {cite})" if cite else "(no output yet)"
-                body.append(empty, style=f"italic {Theme.DARK4}")
-            else:
-                snippet, more = self._collapsed_snippet()
-                body.append(snippet, style=Theme.GRAY)
-                if more or n_lines > self.SNIPPET_LINES or len(self.tool_output) > 200:
-                    hidden = max(0, n_lines - self.SNIPPET_LINES)
+            src = self.tool_command or self.tool_output or ""
+            if src:
+                snippet, more = self._collapsed_snippet(src)
+                style = f"bold {Theme.FG}" if self.tool_command else Theme.GRAY
+                body.append(snippet, style=style)
+                nsrc = len(src.split("\n"))
+                hidden = max(0, nsrc - self.SNIPPET_LINES)
+                if more or hidden:
                     if hidden > 0:
                         body.append(
                             f"\n  ▸ +{hidden} lines — click to expand",
@@ -256,6 +433,10 @@ class ToolCallPanel(Static):
                         )
                 else:
                     body.append("\n  ▸ click to expand", style=Theme.DARK4)
+            else:
+                cite = self.tool_ts or short_ref(self.tool_id)
+                empty = f"(no output yet — cite {cite})" if cite else "(no output yet)"
+                body.append(empty, style=f"italic {Theme.DARK4}")
             return body
 
         self.styles.border = ("round", color)
@@ -277,8 +458,225 @@ class ToolCallPanel(Static):
         return body
 
 
+
+def tool_run_window(panels, *, max_rows: int = 8, snippet_cost: int = 5):
+    """Which tools are visible in a run. Oldest finished hide behind +N.
+
+    Live tools are always visible (snippet). Finished fill leftover rows as
+    one-liners (cost 1). panels is chronological (oldest first).
+    """
+    live, done = [], []
+    for p in panels:
+        st = getattr(p, "tool_status", "") or ""
+        if st in ("completed", "failed"):
+            done.append(p)
+        else:
+            live.append(p)
+    live_cost = snippet_cost if live else 0
+    fin_slots = max_rows if not live else max(0, max_rows - live_cost)
+    hidden = max(0, len(done) - fin_slots)
+    visible_done = done[hidden:]
+    return hidden, visible_done + live
+
+
+class ToolRunGutter(Static):
+    """Left ▸ / ▾ — expands the run to 4+1 summaries."""
+
+    DEFAULT_CSS = """
+    ToolRunGutter {
+        width: 3;
+        height: auto;
+        padding: 0;
+    }
+    """
+
+    def __init__(self, stack: "ToolRunStack", **kwargs):
+        super().__init__(**kwargs)
+        self._stack = stack
+
+    def on_click(self, event) -> None:
+        self._stack.toggle_run()
+        if hasattr(event, "stop"):
+            event.stop()
+
+    def render(self) -> Text:
+        n = self._stack.panel_count()
+        mark = "▾" if self._stack._run_open else "▸"
+        t = Text()
+        t.append(f" {mark}", style=f"bold {Theme.BR_AQUA}")
+        if n:
+            t.append(f"\n {n}", style=Theme.DARK4)
+        return t
+
+
+class ToolRunOverflow(Static):
+    """+N earlier — click reveals hidden finished tools."""
+
+    DEFAULT_CSS = """
+    ToolRunOverflow {
+        width: 100%;
+        height: auto;
+        padding: 0;
+    }
+    """
+
+    def __init__(self, stack: "ToolRunStack", **kwargs):
+        super().__init__(**kwargs)
+        self._stack = stack
+
+    def on_click(self, event) -> None:
+        self._stack.reveal_hidden()
+        if hasattr(event, "stop"):
+            event.stop()
+
+    def render(self) -> Text:
+        n = self._stack._hidden
+        return Text(f"  +{n} earlier — click to show", style=Theme.DARK4)
+
+
+class ToolRunStack(Horizontal):
+    """Consecutive tools: one-liners + live 4+1, left ▸, ~8-line cap."""
+
+    DEFAULT_CSS = """
+    ToolRunStack {
+        width: 80%;
+        height: auto;
+        margin: 0 2 1 1;
+        align: left top;
+        padding: 0;
+    }
+    ToolRunStack ToolCallPanel {
+        width: 100%;
+        height: auto;
+        margin: 0;
+        padding: 0;
+    }
+    .tool-run-body {
+        width: 1fr;
+        height: auto;
+        padding: 0;
+    }
+    ToolRunOverflow {
+        margin: 0;
+        padding: 0;
+        height: 1;
+    }
+    """
+
+    MAX_ROWS = 8
+    SNIPPET_COST = 5
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._run_open = False
+        self._reveal = False
+        self._hidden = 0
+        self._pending: list = []
+        self._gutter: ToolRunGutter | None = None
+        self._body: Vertical | None = None
+        self._overflow: ToolRunOverflow | None = None
+
+    def compose(self):
+        self._gutter = ToolRunGutter(self)
+        yield self._gutter
+        self._body = Vertical(classes="tool-run-body")
+        self._overflow = ToolRunOverflow(self)
+        with self._body:
+            yield self._overflow
+
+    def on_mount(self) -> None:
+        try:
+            from textual.color import Color as TextualColor
+            self.styles.border = ("round", TextualColor.parse(Theme.DARK3))
+        except Exception:
+            self.styles.border = ("round", "gray")
+        self.styles.padding = (0, 0, 0, 0)
+        self._flush_pending()
+
+    def panel_count(self) -> int:
+        return len(self._panels())
+
+    def _panels(self) -> list:
+        if self._body is None:
+            return list(self._pending)
+        return [c for c in self._body.children if isinstance(c, ToolCallPanel)]
+
+    def add_panel(self, panel: "ToolCallPanel") -> None:
+        self._pending.append(panel)
+        if self._body is not None and getattr(self._body, "is_attached", False):
+            self._flush_pending()
+
+    def _flush_pending(self) -> None:
+        if self._body is None or not getattr(self._body, "is_attached", False):
+            return
+        for p in self._pending:
+            try:
+                p.styles.margin = (0, 0, 0, 0)
+                p.styles.padding = (0, 0, 0, 0)
+            except Exception:
+                pass
+            self._body.mount(p)
+        self._pending.clear()
+        self._apply_densities()
+
+    def toggle_run(self) -> None:
+        self._run_open = not self._run_open
+        self._apply_densities()
+        if self._gutter is not None:
+            self._gutter.refresh()
+
+    def reveal_hidden(self) -> None:
+        self._reveal = True
+        self._apply_densities()
+
+    def _apply_densities(self) -> None:
+        panels = self._panels()
+        if not panels:
+            self._hidden = 0
+            if self._overflow is not None:
+                self._overflow.display = False
+            return
+        if self._reveal:
+            hidden, visible = 0, panels
+        else:
+            hidden, visible = tool_run_window(
+                panels, max_rows=self.MAX_ROWS, snippet_cost=self.SNIPPET_COST
+            )
+        self._hidden = hidden
+        vis = set(id(p) for p in visible)
+        for p in panels:
+            show = id(p) in vis
+            p.display = show
+            if not show:
+                continue
+            st = p.tool_status or ""
+            live = st not in ("completed", "failed")
+            if p.density == "full":
+                continue
+            if live:
+                p.density = "snippet"
+            else:
+                p.density = "snippet" if self._run_open else "one"
+            p.refresh(layout=True)
+        if self._overflow is not None:
+            self._overflow.display = hidden > 0
+            if hidden > 0:
+                self._overflow.refresh()
+        if self._gutter is not None:
+            self._gutter.refresh()
+
+
+
 class PlanPanel(Static):
     """Renders the agent's todo/plan list."""
+
+    DEFAULT_CSS = """
+    PlanPanel {
+        width: 80%;
+        margin: 0 2 1 1;
+        align: left top;
+    }
+    """
 
     def __init__(self, entries: list, **kwargs):
         super().__init__(**kwargs)
@@ -389,25 +787,89 @@ class SystemReminderPanel(Static):
 
 
 class UserMessage(Static):
-    """User message display -- clean inline style with chevron prefix."""
+    """Operator turn — same grow-left bubble as IRC room human lines."""
 
-    def __init__(self, text: str, **kwargs):
+    DEFAULT_CSS = """
+    UserMessage {
+        height: auto;
+        width: 100%;
+        padding: 0;
+        margin: 0 2 1 0;
+    }
+    """
+
+    def __init__(self, text: str, nick: str = "eric", via: str = "tui", **kwargs):
         super().__init__(**kwargs)
         self.user_text = text
+        self._nick = nick or "eric"
+        self._via = via or "tui"
+        self._received = False
+        self._telemetry = ""
+
+    def on_resize(self) -> None:
+        self.refresh()
+
+    def set_text(self, text: str) -> None:
+        self.user_text = text
+        self.refresh(layout=True)
+
+    def mark_received(self, telemetry: str = "") -> None:
+        self._received = True
+        if telemetry:
+            self._telemetry = telemetry.strip()
+        self.refresh(layout=True)
+
+    def copy_payload(self) -> str:
+        return (self.user_text or "").strip()
+
+    def on_click(self, event) -> None:
+        text = self.copy_payload()
+        if not text:
+            return
+        try:
+            self.app.copy_to_clipboard(text)
+            self.app.notify(f"copied user turn ({len(text)} chars)", severity="information", timeout=2)
+        except Exception:
+            pass
+        if hasattr(event, "stop"):
+            event.stop()
 
     def render(self) -> Text:
-        text = Text()
-        text.append("❯ ", style=f"bold {Theme.BR_BLUE}")
-        text.append(self.user_text, style=Theme.FG)
-        return text
+        mark, color = nick_mark(self._nick)
+        inner = Text()
+        inner.append(f"{mark} ", style=f"bold {color}")
+        inner.append(f"{self._nick}  ", style=f"bold {color}")
+        if getattr(self, "_via", "tui") != "tui":
+            inner.append("· background  ", style=f"italic {Theme.BR_ORANGE}")
+        inner.append(self.user_text, style=Theme.FG)
+        if getattr(self, "_received", False):
+            inner.append("  ✓", style=Theme.DARK4)
+        tel = getattr(self, "_telemetry", "") or ""
+        if tel:
+            inner.append("\n")
+            inner.append(tel, style=Theme.DARK4)
+        total = self.size.width if self.size.width >= 40 else 80
+        return layout_painted_bubble(
+            inner, is_human=True, total=total, border=color, fill=Theme.DARK2
+        )
 
 class AgentMessage(Static):
-    """Agent message display — renders accumulated markdown."""
+    """Agent message display — markdown in the left 75% bubble."""
 
-    def __init__(self, **kwargs):
+    DEFAULT_CSS = """
+    AgentMessage {
+        height: auto;
+        width: 100%;
+        padding: 0;
+        margin: 0 2 1 0;
+    }
+    """
+
+    def __init__(self, nick: str = "", **kwargs):
         super().__init__(**kwargs)
         self._chunks: list[str] = []
         self._text = ""
+        self._nick = nick or ""
 
     def append_chunk(self, text: str):
         # Keep a single growing string; chunk lists explode on multi-day streams
@@ -444,7 +906,9 @@ class AgentMessage(Static):
 
     @staticmethod
     def _format_ephacts(text: str) -> str:
-        """Replace <ephact> blocks with visible markdown blockquotes so they render inline."""
+        """Replace <ephact> blocks with inline markdown. Tables are NOT blockquoted:
+        quoting + flatten(width=4000) padded them into dozens of empty bubble rows.
+        """
         import re
         if "<ephact" not in text:
             return text
@@ -453,6 +917,8 @@ class AgentMessage(Static):
             title = m.group(2)
             body = m.group(3).strip()
             label = f"📌 {title}" if title else f"📌 {etype}"
+            if etype == "table":
+                return f"\n\n**{label}**\n\n{body}\n"
             lines = body.split("\n")
             quoted = "\n".join(f"> {line}" for line in lines)
             return f"\n> **{label}**\n{quoted}\n"
@@ -460,11 +926,48 @@ class AgentMessage(Static):
             r'<ephact\s+type=["\'](\w+)["\'](?:\s+title=["\']([^"\']*)["\'])?\s*>(.*?)</ephact>',
             _repl, text, flags=re.DOTALL)
 
+    def on_resize(self) -> None:
+        self.refresh()
+
+    def copy_payload(self) -> str:
+        return (self._text or "").strip()
+
+    def on_click(self, event) -> None:
+        text = self.copy_payload()
+        if not text:
+            return
+        try:
+            self.app.copy_to_clipboard(text)
+            self.app.notify(f"copied agent turn ({len(text)} chars)", severity="information", timeout=2)
+        except Exception:
+            pass
+        if hasattr(event, "stop"):
+            event.stop()
+
     def render(self):
         text = self._format_interjections(self._text)
         text = self._format_ephacts(text)
-        w = self.size.width - 2 if self.size.width > 10 else 120
-        return _flatten_to_text(RichMarkdown(text), width=w)
+        total = self.size.width if self.size.width >= 40 else 80
+        _, _, _, col = bubble_metrics(total)
+        inner_col = max(24, col - 2)
+        # Prose: flatten wide so markdown does not pre-wrap. Tables in ephacts
+        # must flatten at bubble width or Rich pads them to thousands of cells.
+        md_width = inner_col if "📌" in text or "|" in text else 4000
+        md = _flatten_to_text(RichMarkdown(text), width=md_width)
+        nick = self._nick
+        if not nick:
+            try:
+                nick = self.app._active_agent or "agent"
+            except Exception:
+                nick = "agent"
+        mark, color = nick_mark(nick)
+        inner = Text()
+        inner.append(f"{mark} ", style=f"bold {color}")
+        inner.append(f"{nick}  ", style=f"bold {color}")
+        inner.append(md)
+        return layout_painted_bubble(
+            inner, is_human=False, total=total, border=color, fill=Theme.DARK1
+        )
 
 class ThinkingBlock(Static):
     """Dimmed thinking/reasoning block with token counter. Click to expand/collapse."""
@@ -522,24 +1025,42 @@ class ThinkingBlock(Static):
         return Text(display, style=Theme.DARK4)
 
 class InterjectionBlock(Static):
-    """Renders an interjection message as a distinct panel, styled like ThinkingBlock."""
+    """Interjection — same grow-left bubble as a user turn."""
+
+    DEFAULT_CSS = """
+    InterjectionBlock {
+        height: auto;
+        width: 100%;
+        padding: 0;
+        margin: 0 2 1 0;
+        border: none;
+    }
+    """
 
     def __init__(self, message: str, **kwargs):
         super().__init__(**kwargs)
         self._message = message
         self._ref = short_ref(message, prefix="bell") if "id=bell_" in (message or "") or "(id=" in (message or "") else ""
-        # pull id=bell_xxx from message
         import re
         m = re.search(r"id=(bell_[a-zA-Z0-9_]+)", message or "")
         if m:
             self._ref = short_ref(m.group(1))
 
+    def on_resize(self) -> None:
+        self.refresh()
+
     def render(self):
+        mark, color = nick_mark("eric")
+        inner = Text()
+        inner.append(f"{mark} ", style=f"bold {color}")
+        inner.append("interjection  ", style=f"bold {Theme.BR_ORANGE}")
+        inner.append(self._message, style=Theme.BR_ORANGE)
         if self._ref:
-            self.border_title = f"🔔 Interjection · {self._ref}"
-        else:
-            self.border_title = "🔔 Interjection"
-        return Text(self._message, style=Theme.BR_ORANGE)
+            inner.append(f"  {self._ref}", style=Theme.DARK4)
+        total = self.size.width if self.size.width >= 40 else 80
+        return layout_painted_bubble(
+            inner, is_human=True, total=total, border=color, fill=Theme.DARK2
+        )
 
 
 # =============================================================================

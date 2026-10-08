@@ -18,9 +18,11 @@ def widget_for_item(item: Any):
     """Return a new widget for one paint unit, or None to skip."""
     from chat_widgets import (
         UserMessage,
+        make_user_message,
         AgentMessage,
         ThinkingBlock,
         ToolCallPanel,
+        ToolRunStack,
         PlanPanel,
     )
     from chrome_widgets import TurnSeparator, SystemAlert
@@ -34,7 +36,11 @@ def widget_for_item(item: Any):
 
     if isinstance(item, SpeechItem):
         if item.kind == "user":
-            return UserMessage(item.text or "")
+            from chat_widgets import is_control_user_line, system_alert_body
+            if is_control_user_line(item.text or ""):
+                from chrome_widgets import SystemAlert
+                return SystemAlert(system_alert_body(item.text or ""), severity="info")
+            return make_user_message(item.text or "")
         w = AgentMessage()
         if item.text:
             w.append_chunk(item.text)
@@ -91,6 +97,8 @@ def widget_for_item(item: Any):
                 w.tool_output = item.output
         if hasattr(w, "_collapsed"):
             w._collapsed = bool(getattr(item, "collapsed", True))
+        if getattr(item, "collapsed", True) is False and hasattr(w, "density"):
+            w.density = "full"
         return w
 
     if isinstance(item, PlanItem):
@@ -111,15 +119,36 @@ def widget_for_item(item: Any):
 
 
 def mount_items(content_scroll, items: list, *, before: Optional[Any] = None) -> int:
-    """Mount paint units onto a VerticalScroll. Returns widgets mounted."""
+    """Mount paint units onto a VerticalScroll. Returns widgets mounted.
+
+    Consecutive ToolCallPanels join one ToolRunStack; other items break the run.
+    """
+    from chat_model import ToolItem
+    from chat_widgets import ToolRunStack
     n = 0
+    stack = None
     for item in items:
-        w = widget_for_item(item)
-        if w is None:
+        try:
+            w = widget_for_item(item)
+            if w is None:
+                continue
+            if isinstance(item, ToolItem):
+                if stack is None:
+                    stack = ToolRunStack()
+                    if before is not None:
+                        content_scroll.mount(stack, before=before)
+                    else:
+                        content_scroll.mount(stack)
+                    n += 1
+                stack.add_panel(w)
+                continue
+            stack = None
+            if before is not None:
+                content_scroll.mount(w, before=before)
+            else:
+                content_scroll.mount(w)
+            n += 1
+        except Exception:
+            stack = None
             continue
-        if before is not None:
-            content_scroll.mount(w, before=before)
-        else:
-            content_scroll.mount(w)
-        n += 1
     return n

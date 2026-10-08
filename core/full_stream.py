@@ -39,6 +39,8 @@ except ImportError as e:  # pragma: no cover
 # Hot policy (Eric 2026-09-11)
 HOT_MAX_BYTES = 300 * 1024 * 1024
 HOT_KEEP_BYTES = 100 * 1024 * 1024
+# Spec: ~100-200MB plain per zst for ~100ms decompress. Peel at 100MiB.
+HOT_CHUNK_PLAIN_BYTES = 100 * 1024 * 1024
 DEFAULT_ZSTD_LEVEL = 3
 MANIFEST_NAME = "manifest.jsonl"
 CHUNKS_DIR = "chunks"
@@ -304,6 +306,11 @@ def seal_byte_range(
                         if ts is not None:
                             if from_ts is None:
                                 from_ts = ts
+                            elif until_ts is not None and ts < until_ts:
+                                print(
+                                    f"[hot] ERROR seal {chunk_id}: ts went backward "
+                                    f"{until_ts} -> {ts} at line {line_count}"
+                                )
                             until_ts = ts
                     except Exception:
                         pass
@@ -386,6 +393,65 @@ def open_chunk_lines(fs_dir: Path, rec: ChunkRecord) -> Iterator[bytes]:
                 buf = buf[i + 1 :]
         if buf:
             yield buf
+
+
+def check_archive_ts_monotonic(fs_dir: Path) -> Dict[str, Any]:
+    """Decompress every chunk; ts must be non-decreasing inside and across chunks."""
+    fs_dir = Path(fs_dir)
+    recs = read_manifest(fs_dir)
+    inversions: List[Dict[str, Any]] = []
+    prev_last: Optional[float] = None
+    prev_id: Optional[str] = None
+    for rec in recs:
+        prev: Optional[float] = None
+        first: Optional[float] = None
+        last: Optional[float] = None
+        n = 0
+        for line in open_chunk_lines(fs_dir, rec):
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            ts = _parse_ts(obj)
+            if ts is None:
+                continue
+            n += 1
+            if first is None:
+                first = ts
+            if prev is not None and ts < prev:
+                inversions.append(
+                    {
+                        "chunk_id": rec.chunk_id,
+                        "line": n,
+                        "ts": ts,
+                        "prev_ts": prev,
+                    }
+                )
+                if len(inversions) >= 20:
+                    break
+            prev = ts
+            last = ts
+        if (
+            prev_last is not None
+            and first is not None
+            and first < prev_last
+            and len(inversions) < 20
+        ):
+            inversions.append(
+                {
+                    "chain": True,
+                    "prev_chunk": prev_id,
+                    "chunk_id": rec.chunk_id,
+                    "first_ts": first,
+                    "prev_last_ts": prev_last,
+                }
+            )
+        prev_last = last
+        prev_id = rec.chunk_id
+    status = "error" if inversions else "ok"
+    if status == "error":
+        print(f"[hot] ERROR archive ts not monotonic: {len(inversions)} inversion(s)")
+    return {"status": status, "chunks": len(recs), "inversions": inversions}
 
 
 def chunks_covering_ts(
@@ -497,8 +563,8 @@ def prune_hot(
     zstd_level: int = DEFAULT_ZSTD_LEVEL,
 ) -> Dict[str, Any]:
     """
-    If hot >= max_bytes: seal [0:cut) into V2, verify, then if apply rewrite tail.
-    Default apply=False (dry-run).
+    If hot >= max_bytes: seal [0:cut) into V2 in ~HOT_CHUNK_PLAIN_BYTES slices,
+    verify each, then if apply rewrite tail. Default apply=False (dry-run).
 
     SAFETY: refuses backend-native paths (.grok/sessions, .codex/sessions, .claude/projects).
     Target must be AA history/hot.jsonl (or legacy full_stream/hot.jsonl).
@@ -526,21 +592,36 @@ def prune_hot(
         result["would_keep_bytes"] = plan["tail_bytes"]
         return result
 
-    rec = seal_byte_range(
-        Path(hot_path),
-        Path(fs_dir),
-        start=0,
-        end=cut,
-        agent=agent,
-        session_id=session_id,
-        source_label="prune_hot",
-        zstd_level=zstd_level,
-    )
-    if not verify_chunk(fs_dir, rec):
-        raise RuntimeError("post-seal verify failed; refusing to prune hot")
-    tail = rewrite_hot_tail(Path(hot_path), cut, apply=True)
+    recs = []
+    start = 0
+    hp = Path(hot_path)
+    while start < cut:
+        target = min(start + HOT_CHUNK_PLAIN_BYTES, cut)
+        end = find_line_cut_offset(hp, target)
+        if end <= start:
+            end = cut
+        if end > cut:
+            end = cut
+        rec = seal_byte_range(
+            hp,
+            Path(fs_dir),
+            start=start,
+            end=end,
+            agent=agent,
+            session_id=session_id,
+            source_label="prune_hot",
+            zstd_level=zstd_level,
+        )
+        if not verify_chunk(fs_dir, rec):
+            raise RuntimeError(
+                f"post-seal verify failed for {rec.chunk_id}; refusing to prune hot"
+            )
+        recs.append(rec)
+        start = end
+    tail = rewrite_hot_tail(hp, cut, apply=True)
     result["status"] = "pruned"
-    result["chunk"] = json.loads(rec.to_json())
+    result["chunks"] = [json.loads(r.to_json()) for r in recs]
+    result["chunk"] = result["chunks"][-1] if recs else None
     result["tail"] = tail
     return result
 

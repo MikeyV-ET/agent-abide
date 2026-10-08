@@ -105,10 +105,11 @@ def test_prune_hot_dry_and_apply(tmp_path: Path):
     assert result["status"] == "pruned"
     assert hot.stat().st_size == result["tail"]["size_after"]
     assert hot.stat().st_size <= keep_b + 5000
-    assert verify_chunk(fs, read_manifest(fs)[0])
-    # sealed prefix lines + tail lines ≈ original
-    rec = read_manifest(fs)[0]
-    sealed_lines = rec.line_count
+    recs = read_manifest(fs)
+    assert recs
+    for rec in recs:
+        assert verify_chunk(fs, rec)
+    sealed_lines = sum(r.line_count for r in recs)
     tail_lines = sum(1 for _ in open(hot))
     assert sealed_lines + tail_lines == 400
 

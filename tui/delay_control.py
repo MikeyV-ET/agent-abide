@@ -9,10 +9,17 @@ def delay_control_from_tool_blob(text: str) -> Optional[str]:
     """If tool payload registers a delay command, return [aa.control] line."""
     if not text or "delay" not in text:
         return None
-    if not re.search(
+    literal_cmd = re.search(
         r"commands/cmd_[^\s\"']*\.json|commands/cmd_\$\{?date|commands/cmd_\$\(",
         text,
-    ):
+    )
+    # Claude/Astro: dir in a variable, then open(f'{d}/cmd_{ts}_….json')
+    split_cmd = (
+        "asdaaas/commands" in text
+        and re.search(r"cmd_[\$\{\w]", text)
+        and re.search(r"json\.dump|open\(", text)
+    )
+    if not literal_cmd and not split_cmd:
         return None
     if not re.search(
         r'["\']action["\']\s*:\s*["\']delay["\']|"action"\s*:\s*"delay"',
@@ -24,9 +31,13 @@ def delay_control_from_tool_blob(text: str) -> Optional[str]:
         text,
         re.I | re.S,
     )
-    if re.search(r"\b(rg|grep|ripgrep)\b", text) and not writes:
+    if re.search(r"\b(rg|grep|ripgrep)\b", text) and not writes and not split_cmd:
         return None
-    if not writes and not re.search(r"(>|>>).{0,40}commands/cmd_", text, re.S):
+    if (
+        not writes
+        and not re.search(r"(>|>>).{0,40}commands/cmd_", text, re.S)
+        and not split_cmd
+    ):
         return None
     sec = None
     m = re.search(

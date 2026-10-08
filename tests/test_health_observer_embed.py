@@ -76,3 +76,19 @@ def test_write_health_sticky_tokens_and_rejects_synthetic(tmp_path, monkeypatch)
     assert h["totalTokens"] == 150000  # sticky
     assert h["model"] == "claude-opus-5"  # from observer, not synthetic
     assert h["reasoning_effort"] == "high"
+
+
+def test_write_health_does_not_stick_tokens_across_session_id(tmp_path, monkeypatch):
+    import asdaaas
+    import asdaaas_runtime as rt
+    rt.set_identity(model_id="grok-4.6", session_id="new-sid", backend_type="grok", reasoning_effort=None)
+    base = tmp_path / "agents" / "A" / "asdaaas"
+    base.mkdir(parents=True)
+    (base / "health.json").write_text(
+        '{"totalTokens": 358765, "session_id": "old-sid", "contextWindow": 500000}'
+    )
+    monkeypatch.setattr(asdaaas, "agent_dir", lambda n, env=None: base)
+    asdaaas.write_health("A", "ready", "session=new-sid", total_tokens=0, context_window=500000)
+    h = json.loads((base / "health.json").read_text())
+    assert h["totalTokens"] == 0
+    assert h["session_id"] == "new-sid"

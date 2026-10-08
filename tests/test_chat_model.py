@@ -85,3 +85,20 @@ def test_boundary_tool_closes_speech():
     speeches = [i for i in s.items if isinstance(i, SpeechItem)]
     assert len(speeches) == 2
     assert speeches[0].text == "A" and speeches[1].text == "B"
+
+
+def test_plan_update_does_not_corrupt_tool_index():
+    """Replacing a plan in the middle must not make tool_call_update hit a PlanItem."""
+    from chat_model import ChatState, apply_event, ToolItem, PlanItem
+    s = ChatState()
+    apply_event(s, _ev("tool_call", toolCallId="t1", title="a"))
+    apply_event(s, _ev("plan", entries=[{"content": "one", "status": "pending"}]))
+    apply_event(s, _ev("tool_call", toolCallId="t2", title="b"))
+    apply_event(s, _ev("plan", entries=[{"content": "two", "status": "in_progress"}]))
+    apply_event(s, _ev("tool_call_update", toolCallId="t2", status="completed"))
+    t2 = s.items[s.tools["t2"]]
+    assert isinstance(t2, ToolItem)
+    assert t2.status == "completed"
+    plans = [it for it in s.items if isinstance(it, PlanItem)]
+    assert len(plans) == 1
+    assert plans[0].entries[0]["content"] == "two"

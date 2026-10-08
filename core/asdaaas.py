@@ -331,19 +331,27 @@ def write_health(agent_name, status, detail="", total_tokens=0, context_window=C
         except Exception:
             observer_state = None
 
-    # Sticky tokens: never publish 0 over a previous good occupancy.
+    # Sticky tokens: never publish 0 over a previous good occupancy
+    # on the same session. A new session_id starts at 0.
     prev_tokens = 0
+    prev_sid = None
     try:
         prev = json.loads((adir / "health.json").read_text(encoding="utf-8"))
         prev_tokens = int(prev.get("totalTokens") or 0)
+        prev_sid = prev.get("session_id")
     except Exception:
         prev_tokens = 0
+        prev_sid = None
     try:
         tok = int(total_tokens or 0)
     except (TypeError, ValueError):
         tok = 0
+    new_sid = getattr(_rt, "current_session_id", None)
     if tok <= 0:
-        tok = prev_tokens
+        if prev_sid and new_sid and prev_sid != new_sid:
+            tok = 0
+        else:
+            tok = prev_tokens
 
     model = _good_model_name(getattr(_rt, "current_model_id", None))
     if not model and observer_state:
@@ -2155,16 +2163,63 @@ def ensure_host_service(name: str, *, action: str = "ensure") -> dict:
         return {"status": "error", "error": str(e)}
 
 
+def self_restart_pid_path(agent_name: str):
+    """Pid file for the detached sleep+restart of one agent."""
+    from pathlib import Path as _P
+    return _P("/tmp") / ("asdaaas_self_restart_%s.pid" % agent_name)
+
+
+def cancel_scheduled_self_restart(agent_name: str) -> bool:
+    """Kill a previously detached sleep+restart for this agent, if still armed.
+
+    Session-limit park can be written many times; each used to spawn another
+    sleep N; restart_agent.sh --force. Those all fired at reset and raced.
+    """
+    import os
+    import signal
+    from pathlib import Path as _P
+
+    path = self_restart_pid_path(agent_name)
+    try:
+        raw = path.read_text().strip()
+        pid = int(raw.split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    killed = False
+    for killer in (
+        lambda: os.killpg(pid, signal.SIGTERM),
+        lambda: os.kill(pid, signal.SIGTERM),
+    ):
+        try:
+            killer()
+            killed = True
+            break
+        except ProcessLookupError:
+            break
+        except OSError:
+            continue
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    if killed:
+        print("[asdaaas] RESTART: cancelled prior schedule pid=%s for %s" % (pid, agent_name))
+    return killed
+
+
 def schedule_self_restart(agent_name: str, *, reason: str = "", delay_s: float = 2.0) -> bool:
     """Detach restart_agent.sh so this process can exit and come back.
 
     Uses the scripts/ next to this asdaaas install (dev or prod tree).
     --force: we are already shutting down; no need for a second graceful stop.
+    Cancels a prior schedule for the same agent (one wake, not N).
     Returns True if the scheduler process was spawned.
     """
     import shlex
     import subprocess
     from pathlib import Path as _P
+
+    cancel_scheduled_self_restart(agent_name)
 
     script = _P(__file__).resolve().parent.parent / "scripts" / "restart_agent.sh"
     if not script.is_file():
@@ -2184,7 +2239,7 @@ def schedule_self_restart(agent_name: str, *, reason: str = "", delay_s: float =
         "echo [self-restart] done exit=$? >> %s"
     ) % (delay, agent_q, reason_q, log_q, script_q, agent_q, log_q, log_q)
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["bash", "-c", bash],
             start_new_session=True,
             stdin=subprocess.DEVNULL,
@@ -2192,9 +2247,13 @@ def schedule_self_restart(agent_name: str, *, reason: str = "", delay_s: float =
             stderr=subprocess.DEVNULL,
             cwd=str(script.parent.parent),
         )
+        try:
+            self_restart_pid_path(agent_name).write_text("%s\n" % proc.pid)
+        except OSError as e:
+            print("[asdaaas] RESTART: pid file write failed: %s" % e)
         print(
-            "[asdaaas] RESTART: scheduled %s --force %s in %.1fs (log %s)"
-            % (script.name, agent_name, delay, log)
+            "[asdaaas] RESTART: scheduled %s --force %s in %.1fs pid=%s (log %s)"
+            % (script.name, agent_name, delay, proc.pid, log)
         )
         return True
     except Exception as e:
@@ -2519,6 +2578,9 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
         print(f"[asdaaas] Session registry updated: {agent_name} -> {sid[:8]}...")
     except Exception as _e:
         print(f"[asdaaas] WARN: failed to update session registry: {_e}")
+
+    # Roster agents.json session is operator-chosen. Do not rewrite it to a
+    # minted id (silent spine divergence).
 
     # ---- Observer (in-process async task, Phase 1 refactor) ----
     from binary_state_observer import ClaudeInProcessObserver, InProcessObserver

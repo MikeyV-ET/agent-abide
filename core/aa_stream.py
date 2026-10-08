@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -31,6 +32,8 @@ HOT_NAME = "hot.jsonl"
 HOT_META_NAME = "hot.meta.json"
 SOURCES_DIR = "sources"
 NATIVE_GROK = "grok.session_update.v1"
+
+_prune_lock = threading.Lock()
 
 
 def hot_path(fs_dir: Path) -> Path:
@@ -248,16 +251,280 @@ def map_claude_event(*a, **k):
 
 
 
+def maybe_prune_hot(
+    fs_dir: Path,
+    *,
+    agent: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """If hot.jsonl is at/over policy max_bytes: seal prefix to V2, keep tail.
+
+    Never touches backend-native logs. On seal/verify failure, hot is left
+    intact (prune_hot refuses to rewrite). Concurrent callers share one lock.
+    """
+    fs_dir = Path(fs_dir)
+    hp = hot_path(fs_dir)
+    if not hp.exists():
+        return None
+    meta = read_hot_meta(fs_dir) or {}
+    policy = meta.get("policy") or {}
+    try:
+        max_b = int(policy.get("max_bytes") or HOT_MAX_BYTES)
+        keep_b = int(policy.get("keep_bytes") or HOT_KEEP_BYTES)
+    except (TypeError, ValueError):
+        max_b, keep_b = HOT_MAX_BYTES, HOT_KEEP_BYTES
+    try:
+        size = hp.stat().st_size
+    except OSError:
+        return None
+    if size < max_b:
+        return None
+    if not _prune_lock.acquire(blocking=False):
+        return {"status": "busy"}
+    try:
+        size = hp.stat().st_size
+        if size < max_b:
+            return None
+        agent = agent or meta.get("agent")
+        grok = (meta.get("backends") or {}).get("grok") or {}
+        session_id = session_id or grok.get("session_id")
+        from full_stream import prune_hot
+
+        result = prune_hot(
+            hp,
+            fs_dir,
+            apply=True,
+            agent=agent,
+            session_id=session_id,
+            max_bytes=max_b,
+            keep_bytes=keep_b,
+        )
+        after = hp.stat().st_size
+        print(
+            f"[hot] prune status={result.get('status')} "
+            f"before={size} after={after} agent={agent}"
+        )
+        return result
+    except Exception as e:
+        print(f"[hot] WARN prune failed (hot left intact): {e}")
+        return {"status": "error", "error": str(e)}
+    finally:
+        _prune_lock.release()
+
+
+def _event_key(o: Dict[str, Any]) -> Optional[Tuple[float, str]]:
+    """Unique-ish tape key: (ts, session_id). ts primary; uuid breaks a same-second tie."""
+    ts = o.get("ts")
+    if ts is None:
+        return None
+    try:
+        ts_f = float(ts)
+    except (TypeError, ValueError):
+        return None
+    sid = o.get("session_id") or ""
+    return (ts_f, sid)
+
+
+def last_hot_key(fs_dir: Path) -> Optional[Tuple[float, str]]:
+    hp = hot_path(fs_dir)
+    if not hp.exists() or hp.stat().st_size == 0:
+        return None
+    try:
+        with open(hp, "rb") as f:
+            f.seek(0, 2)
+            n = f.tell()
+            f.seek(max(0, n - 1_000_000))
+            if n > 1_000_000:
+                f.readline()
+            lines = f.readlines()
+        for raw in reversed(lines):
+            raw = raw.strip()
+            if not raw:
+                continue
+            o = json.loads(raw)
+            k = _event_key(o)
+            if k is not None:
+                return k
+    except Exception:
+        return None
+    return None
+
+
+def last_hot_ts(fs_dir: Path) -> Optional[float]:
+    k = last_hot_key(fs_dir)
+    return None if k is None else k[0]
+
+
+def check_hot_ts_monotonic(fs_dir: Path) -> Dict[str, Any]:
+    """Scan hot.jsonl: (ts, session_id) must be non-decreasing.
+
+    ts is primary. Same ts: session_id breaks the tie. Equal keys are legal
+    (two grok lines in the same second, same session). Backward is error.
+    """
+    fs_dir = Path(fs_dir)
+    hp = hot_path(fs_dir)
+    out: Dict[str, Any] = {
+        "status": "ok",
+        "path": str(hp),
+        "lines": 0,
+        "inversions": [],
+    }
+    if not hp.exists():
+        out["status"] = "missing"
+        _write_continuity(fs_dir, out)
+        return out
+    prev: Optional[Tuple[float, str]] = None
+    prev_seq = None
+    n = 0
+    with open(hp, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            k = _event_key(o)
+            if k is None:
+                continue
+            n += 1
+            if prev is not None and k < prev:
+                inv = {
+                    "line": n,
+                    "ts": k[0],
+                    "ts_iso": o.get("ts_iso"),
+                    "session_id": k[1],
+                    "prev_ts": prev[0],
+                    "prev_session_id": prev[1],
+                    "stream_seq": o.get("stream_seq"),
+                    "prev_stream_seq": prev_seq,
+                }
+                out["inversions"].append(inv)
+                if len(out["inversions"]) >= 20:
+                    break
+            prev = k
+            prev_seq = o.get("stream_seq")
+    out["lines"] = n
+    if out["inversions"]:
+        out["status"] = "error"
+        print(
+            f"[hot] ERROR (ts, session_id) not monotonic: {len(out['inversions'])} "
+            f"inversion(s) in {hp} e.g. seq={out['inversions'][0].get('stream_seq')}"
+        )
+    _write_continuity(fs_dir, out)
+    return out
+
+
+def check_history_continuity(fs_dir: Path) -> Dict[str, Any]:
+    """Hot monotonic ts, plus archive chunks whose last-line ts < first-line ts.
+
+    Interior chunk inversions need a decompress scan (CLI check-continuity).
+    This cheap pass flags the inverted from_ts/until_ts we already have.
+    """
+    fs_dir = Path(fs_dir)
+    hot = check_hot_ts_monotonic(fs_dir)
+    chunk_inv: List[Dict[str, Any]] = []
+    try:
+        from full_stream import read_manifest
+
+        for rec in read_manifest(fs_dir):
+            a, b = rec.from_ts, rec.until_ts
+            if a is not None and b is not None and b < a:
+                chunk_inv.append(
+                    {
+                        "chunk_id": rec.chunk_id,
+                        "from_ts": a,
+                        "until_ts": b,
+                        "from_ts_iso": rec.from_ts_iso,
+                        "until_ts_iso": rec.until_ts_iso,
+                        "plain_bytes": rec.plain_bytes,
+                    }
+                )
+    except Exception as e:
+        chunk_inv.append({"error": str(e)})
+    status = "ok"
+    if hot.get("status") == "error" or chunk_inv:
+        status = "error"
+        if chunk_inv:
+            print(
+                f"[hot] ERROR archive chunk ts not sequential: "
+                f"{[c.get('chunk_id') for c in chunk_inv]}"
+            )
+    out = {
+        "status": status,
+        "hot": hot,
+        "chunk_inversions": chunk_inv,
+    }
+    _write_continuity(fs_dir, out)
+    return out
+
+
+def _write_continuity(fs_dir: Path, payload: Dict[str, Any]) -> None:
+    payload = dict(payload)
+    payload["checked_at"] = datetime.now(timezone.utc).isoformat()
+    path = Path(fs_dir) / "continuity.json"
+    try:
+        path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
+    except Exception:
+        pass
+
+
 def append_hot_events(fs_dir: Path, events: List[Dict[str, Any]]) -> int:
-    """Append events to hot.jsonl. Returns bytes written."""
+    """Append events to hot.jsonl. Returns bytes written.
+
+    Refuses events whose (ts, session_id) is behind the hot tip.
+    """
     if not events:
         return 0
+    fs_dir = Path(fs_dir)
+    tip = last_hot_key(fs_dir)
+    if tip is not None:
+        kept: List[Dict[str, Any]] = []
+        dropped = 0
+        for e in events:
+            if not isinstance(e, dict):
+                kept.append(e)
+                continue
+            k = _event_key(e)
+            if k is not None and k < tip:
+                dropped += 1
+                continue
+            kept.append(e)
+            if k is not None:
+                tip = k
+        if dropped:
+            print(
+                f"[hot] ERROR refused {dropped} event(s) with (ts, session_id) "
+                f"< hot tip; continuity broken — not appending backward"
+            )
+            _write_continuity(
+                fs_dir,
+                {
+                    "status": "error",
+                    "reason": "append_refused_backward_key",
+                    "dropped": dropped,
+                    "kept": len(kept),
+                    "tip": list(tip) if tip else None,
+                },
+            )
+        events = kept
+        if not events:
+            return 0
     hp = hot_path(fs_dir)
     raw = "".join(json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n" for e in events)
     with open(hp, "a", encoding="utf-8") as f:
         f.write(raw)
         f.flush()
         os.fsync(f.fileno())
+    sid = None
+    last = events[-1] if events else None
+    if isinstance(last, dict):
+        sid = last.get("session_id")
+    agent = None
+    meta = read_hot_meta(fs_dir) or {}
+    agent = meta.get("agent")
+    maybe_prune_hot(fs_dir, agent=agent, session_id=sid)
     return len(raw.encode("utf-8"))
 
 

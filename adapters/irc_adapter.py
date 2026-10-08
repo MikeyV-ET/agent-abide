@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import os, sys; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 import adapter_api
+import irc_rooms
 
 def tprint(msg):
     """Timestamped print."""
@@ -282,6 +283,18 @@ class IRCConnection:
         _joined_channels.add(channel)  # keep legacy global for command paths
         tprint(f"[irc-adapter] {self.agent_name} joined {channel}")
 
+    async def part(self, channel):
+        if not self.connected or not self.writer:
+            return
+        try:
+            self.writer.write(f"PART {channel}\r\n".encode())
+            await self.writer.drain()
+        except Exception:
+            pass
+        if hasattr(self, "_joined"):
+            self._joined.discard(channel)
+        tprint(f"[irc-adapter] {self.agent_name} left {channel}")
+
     async def close(self):
         if self.writer:
             try:
@@ -430,13 +443,73 @@ def parse_irc_commands(text):
 # MAIN LOOP
 # ============================================================================
 
+async def _sync_irc_roster(connections, agents, default_channel, host, port, listener_box):
+    """Connect/join/part from ~/agents/config/irc_rooms.json."""
+    roster = irc_rooms.rooms()
+    desired_agents = set(irc_rooms.all_agents())
+    if not desired_agents:
+        desired_agents = set(agents)
+    load_agent_nicks()
+    # add missing connections
+    for name in sorted(desired_agents):
+        if name in connections:
+            continue
+        nick = AGENT_NICKS.get(name) or name.replace(" ", "_")[:16]
+        agents[name] = nick
+        conn = IRCConnection(nick, default_channel, host, port, name)
+        connections[name] = conn
+        try:
+            await conn.connect()
+            tprint(f"[irc-adapter] {name} connected as {nick} (roster)")
+        except Exception as e:
+            tprint(f"[irc-adapter] {name} connect failed: {e}")
+        await asyncio.sleep(0.3)
+    # drop nicks not in any room (and not still in --agents seed if file empty)
+    file_agents = set(irc_rooms.all_agents())
+    if file_agents:
+        for name in list(connections):
+            if name not in file_agents:
+                conn = connections.pop(name)
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
+                agents.pop(name, None)
+                tprint(f"[irc-adapter] {name} disconnected (not in roster)")
+    # JOINs
+    all_rooms = set(roster) | {default_channel}
+    listener = listener_box[0]
+    if listener not in connections and connections:
+        listener_box[0] = next(iter(connections))
+        listener = listener_box[0]
+        tprint(f"[irc-adapter] Channel listener now {listener}")
+    for name, conn in list(connections.items()):
+        if not conn.connected:
+            continue
+        want = set()
+        for ch, members in roster.items():
+            if name in members:
+                want.add(ch)
+        want.update(get_awareness_channels(name))
+        if name == listener:
+            want |= all_rooms
+        if not want:
+            want.add(default_channel)
+        have = getattr(conn, "_joined", set()) or set()
+        for ch in sorted(want - have):
+            await conn.join_if_needed(ch)
+        for ch in sorted(have - want):
+            await conn.part(ch)
+
+
 async def run_adapter(agents, channel, host, port):
     adapter_api.ensure_dirs(ADAPTER_NAME)
     batcher = MessageBatcher()
 
     connections = {}
     agent_list = list(agents)
-    channel_listener = agent_list[0]
+    channel_listener = agent_list[0] if agent_list else None
+    listener_box = [channel_listener]
 
     tprint(f"[irc-adapter] Starting multi-nick IRC adapter")
     tprint(f"[irc-adapter]   Channel: {channel}")
@@ -457,29 +530,16 @@ async def run_adapter(agents, channel, host, port):
             tprint(f"[irc-adapter] {agent_name} connect failed (will retry): {e}")
         await asyncio.sleep(0.5)
 
-    # Join additional channels from agents' awareness configs.
-    # The listener joins ALL awareness channels (it's the single source for
-    # channel messages — section 1 handles routing via awareness cache).
-    # Other agents only need their own channels joined for outbound sends.
     refresh_awareness_cache(agent_list)
-    all_awareness_channels = set()
-    for agent_name in agent_list:
-        all_awareness_channels.update(get_awareness_channels(agent_name))
-    all_awareness_channels.discard(channel)  # main channel already joined
-    if channel_listener in connections:
-        for ch in sorted(all_awareness_channels):
-            await connections[channel_listener].join_if_needed(ch)
-    # Other agents join their own awareness channels (for sending)
     for agent_name, conn in connections.items():
-        if agent_name == channel_listener:
+        if not conn.connected:
             continue
         for ch in get_awareness_channels(agent_name):
             if ch != channel:
                 await conn.join_if_needed(ch)
 
     if not connections:
-        tprint("[irc-adapter] ERROR: No connections. Exiting.")
-        return
+        tprint("[irc-adapter] No nicks yet; waiting on irc_rooms.json")
 
     tprint(f"[irc-adapter] All {len(connections)} agents online. Running.")
 
@@ -498,7 +558,21 @@ async def run_adapter(agents, channel, host, port):
         },
     )
 
+    _rooms_mtime = 0.0
     while True:
+        # ---- Roster file: add/remove nicks and JOINs without restart ----
+        try:
+            p = irc_rooms.DEFAULT_PATH
+            mt = p.stat().st_mtime if p.exists() else 0.0
+            if mt != _rooms_mtime:
+                _rooms_mtime = mt
+                await _sync_irc_roster(
+                    connections, agents, channel, host, port, listener_box
+                )
+                channel_listener = listener_box[0]
+        except Exception as e:
+            tprint(f"[irc-adapter] roster sync: {e}")
+
         # ---- Reconnect dropped connections ----
         for name, conn in list(connections.items()):
             if not conn.connected:
@@ -512,24 +586,19 @@ async def run_adapter(agents, channel, host, port):
                     if msg["is_pm"]:
                         # PM to the listener agent
                         batcher.add(channel_listener, msg)
-                    elif msg["target"] == channel:
-                        # Main channel message → everyone except the sender
+                    elif msg["target"].startswith("#"):
                         sender_lower = msg["sender"].lower()
-                        for agent_name in connections:
-                            agent_nick = connections[agent_name].nick.lower()
-                            if agent_nick == sender_lower:
-                                continue  # don't echo back to sender
-                            batcher.add(agent_name, msg)
-                    else:
-                        # Non-main channel — deliver to all agents whose
-                        # awareness includes this channel
                         target_ch = msg.get("target", "")
-                        sender_lower = msg["sender"].lower()
+                        room_members = set(irc_rooms.members_of(target_ch))
+                        if not room_members:
+                            room_members = set(connections) if target_ch == channel else set()
                         for agent_name in connections:
                             agent_nick = connections[agent_name].nick.lower()
                             if agent_nick == sender_lower:
                                 continue
-                            if target_ch in get_awareness_channels(agent_name):
+                            if agent_name in room_members or (
+                                not room_members and target_ch in get_awareness_channels(agent_name)
+                            ):
                                 batcher.add(agent_name, msg)
             except Exception as e:
                 tprint(f"[irc-adapter] Channel poll error: {e}")
@@ -721,19 +790,11 @@ async def run_adapter(agents, channel, host, port):
             adapter_api.update_heartbeat(ADAPTER_NAME)
             # Re-check awareness for new channels to join
             refresh_awareness_cache(list(connections.keys()))
-            all_aw_ch = set()
-            for an in connections:
-                all_aw_ch.update(get_awareness_channels(an))
-            all_aw_ch.discard(channel)
-            if channel_listener in connections and connections[channel_listener].connected:
-                for ch in sorted(all_aw_ch):
-                    await connections[channel_listener].join_if_needed(ch)
             for agent_name, conn in connections.items():
-                if agent_name == channel_listener or not conn.connected:
+                if not conn.connected:
                     continue
                 for ch in get_awareness_channels(agent_name):
-                    if ch != channel:
-                        await conn.join_if_needed(ch)
+                    await conn.join_if_needed(ch)
             _last_heartbeat = _now
 
         await asyncio.sleep(OUTBOX_POLL_INTERVAL)
@@ -755,12 +816,14 @@ def main():
         if missing:
             tprint(f"[irc-adapter] WARNING: unknown agents skipped: {missing}")
     else:
-        # Prefer agents that have asdaaas homes (skip pure test stubs without dirs)
+        roster_names = irc_rooms.all_agents()
         agents = {}
-        for name, nick in AGENT_NICKS.items():
-            home = Path(AGENTS_DIR) / name / "asdaaas"
-            if home.exists() or name in _DEFAULT_AGENT_NICKS:
-                agents[name] = nick
+        if roster_names:
+            for name in roster_names:
+                agents[name] = AGENT_NICKS.get(name) or name.replace(" ", "_")[:16]
+            tprint(f"[irc-adapter] Roster file: {roster_names}")
+        else:
+            tprint("[irc-adapter] irc_rooms.json empty — no nicks until TUI adds some")
 
     try:
         asyncio.run(run_adapter(agents, args.channel, args.host, args.port))

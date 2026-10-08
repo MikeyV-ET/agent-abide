@@ -8,41 +8,199 @@ from rich.text import Text
 
 from theme import Theme, THEMES, set_theme, reload_themes
 
+NICK_COLORS = [
+    Theme.BR_YELLOW, Theme.BR_GREEN, Theme.BR_BLUE,
+    Theme.BR_PURPLE, Theme.BR_AQUA, Theme.BR_ORANGE, Theme.BR_RED,
+]
+NICK_MARKS = {
+    "eric": ("@", Theme.BR_ORANGE),
+    "eric_tui": ("@", Theme.BR_ORANGE),
+    "trip-g": ("△", Theme.BR_AQUA),
+    "trip": ("▲", Theme.BR_BLUE),
+    "squiggy": ("◌", Theme.BR_YELLOW),
+    "sr": ("◆", Theme.BR_RED),
+    "jr": ("◇", Theme.BR_GREEN),
+    "q": ("▣", Theme.BR_PURPLE),
+    "cinco": ("⬟", Theme.BR_ORANGE),
+    "wend": ("✶", Theme.BR_PURPLE),
+    "astro": ("✦", Theme.BR_AQUA),
+}
+
+
+def nick_mark(nick: str) -> tuple[str, str]:
+    key = (nick or "").lower()
+    if key in NICK_MARKS:
+        return NICK_MARKS[key]
+    base = key.split()[0] if key else ""
+    if base in NICK_MARKS:
+        return NICK_MARKS[base]
+    mark = (nick[:1] or "?").upper()
+    color = NICK_COLORS[hash(key) % len(NICK_COLORS)]
+    return mark, color
+
+
+BUBBLE_GUTTER_PCT = 30  # speech bubbles — user 70% from the right
+SYSTEM_SIDE_PCT = 15    # system chrome 15:70:15 centered band
+
+
+def bubble_metrics(total: int, gutter_pct: int = BUBBLE_GUTTER_PCT) -> tuple[int, int, int, int]:
+    """total, gutter, edge, col — one wrap width for flatten + layout."""
+    total = total if total >= 40 else 80
+    edge = 1  # user short-lines sit a bit further right; widget margin-right is the bar gap
+    gutter = max(8, total * gutter_pct // 100)
+    col = max(24, total - gutter - edge)
+    return total, gutter, edge, col
+
+
+def layout_bubble(inner: Text, *, is_human: bool, total: int, gutter_pct: int = BUBBLE_GUTTER_PCT) -> Text:
+    """Speech columns. Human grows left from the right edge; agent wraps on the left."""
+    from rich.console import Console
+    total, gutter, edge, col = bubble_metrics(total, gutter_pct)
+    console = Console(width=col, force_terminal=True, color_system="truecolor")
+    out = Text()
+    if is_human:
+        natural = inner.cell_len
+        if natural <= col:
+            out.append(" " * max(0, total - natural - edge))
+            out.append(inner)
+        else:
+            wrapped = inner.wrap(console, col) or [Text()]
+            for i, line in enumerate(wrapped):
+                if i:
+                    out.append("\n")
+                out.append(" " * gutter)
+                out.append(line)
+    else:
+        wrapped = inner.wrap(console, col) or [Text()]
+        for i, line in enumerate(wrapped):
+            if i:
+                out.append("\n")
+            out.append(" " * edge)
+            out.append(line)
+    return out
+
+
+def layout_painted_bubble(
+    inner: Text,
+    *,
+    is_human: bool,
+    total: int,
+    border: str,
+    fill: str | None = None,
+    gutter_pct: int = BUBBLE_GUTTER_PCT,
+) -> Text:
+    """Round box hugging speech. Human right / agent left. Gutter cells unpainted."""
+    from rich.console import Console
+    total, gutter, edge, col = bubble_metrics(total, gutter_pct)
+    inner_col = max(8, col - 2)
+    console = Console(width=inner_col, force_terminal=True, color_system="truecolor")
+    wrapped = [ln.copy() for ln in (inner.wrap(console, inner_col) or [Text()])]
+    content_w = max((ln.cell_len for ln in wrapped), default=1)
+    content_w = min(inner_col, max(1, content_w))
+    box_w = content_w + 2
+    left = max(0, total - box_w - edge) if is_human else edge
+    fill_style = f"on {fill}" if fill else ""
+
+    out = Text()
+    out.append(" " * left)
+    out.append("╭" + "─" * content_w + "╮", style=border)
+    for ln in wrapped:
+        out.append("\n")
+        out.append(" " * left)
+        out.append("│", style=border)
+        piece = ln.copy()
+        padn = max(0, content_w - piece.cell_len)
+        if fill_style:
+            piece.stylize(fill_style)
+            out.append(piece)
+            if padn:
+                out.append(" " * padn, style=fill_style)
+        else:
+            out.append(piece)
+            if padn:
+                out.append(" " * padn)
+        out.append("│", style=border)
+    out.append("\n")
+    out.append(" " * left)
+    out.append("╰" + "─" * content_w + "╯", style=border)
+    return out
+
+
+def layout_center_band(inner: Text, *, total: int, side_pct: int = SYSTEM_SIDE_PCT) -> Text:
+    """Centered 15:70:15 band for system chrome (continue, aa.control, localmail)."""
+    from rich.console import Console
+    total = total if total >= 40 else 80
+    side = max(4, total * side_pct // 100)
+    col = max(20, total - 2 * side)
+    console = Console(width=col, force_terminal=True, color_system="truecolor")
+    wrapped = inner.wrap(console, col) or [Text()]
+    out = Text()
+    for i, line in enumerate(wrapped):
+        if i:
+            out.append("\n")
+        out.append(" " * side)
+        out.append(line)
+    return out
+
+
 class RoomMessage(Static):
     """A single IRC channel message displayed in the room tab."""
 
     DEFAULT_CSS = """
     RoomMessage {
-        padding: 0 1;
-        margin: 0;
+        height: auto;
+        width: 100%;
+        padding: 0;
+        margin: 0 2 1 0;
     }
     """
 
-    NICK_COLORS = [
-        Theme.BR_YELLOW, Theme.BR_GREEN, Theme.BR_BLUE,
-        Theme.BR_PURPLE, Theme.BR_AQUA, Theme.BR_ORANGE, Theme.BR_RED,
-    ]
+    def _nick_style(self) -> tuple[str, str]:
+        return nick_mark(self._nick)
 
-    def __init__(self, timestamp: str, nick: str, message: str, is_action: bool = False, **kwargs):
+    def __init__(
+        self,
+        timestamp: str,
+        nick: str,
+        message: str,
+        is_action: bool = False,
+        is_human: bool = False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._timestamp = timestamp
         self._nick = nick
         self._message = message
         self._is_action = is_action
+        self._is_human = is_human
 
-    def render(self) -> Text:
-        color = self.NICK_COLORS[hash(self._nick.lower()) % len(self.NICK_COLORS)]
+    def on_mount(self) -> None:
+        self.add_class("human" if self._is_human else "agent")
+
+    def on_resize(self) -> None:
+        self.refresh()
+
+    def _inner(self) -> Text:
+        mark, color = self._nick_style()
         ts_style = Theme.DARK4
-
         text = Text()
-        text.append(f"{self._timestamp} ", style=ts_style)
+        text.append(f"{mark} ", style=f"bold {color}")
         if self._is_action:
-            text.append(f"* {self._nick} ", style=f"italic {color}")
+            text.append(f"* {self._nick}  ", style=f"italic {color}")
             text.append(self._message, style=f"italic {Theme.FG}")
         else:
-            text.append(f"<{self._nick}> ", style=f"bold {color}")
+            text.append(f"{self._nick}  ", style=f"bold {color}")
             text.append(self._message, style=Theme.FG)
+        text.append(f"  {self._timestamp}", style=ts_style)
         return text
+
+    def render(self) -> Text:
+        total = self.size.width if self.size.width >= 40 else 80
+        mark, color = self._nick_style()
+        fill = Theme.DARK2 if self._is_human else Theme.DARK1
+        return layout_painted_bubble(
+            self._inner(), is_human=self._is_human, total=total, border=color, fill=fill
+        )
 
 class RoomSystemMessage(Static):
     """Join/part/quit messages in the room tab."""
@@ -73,21 +231,31 @@ def layout_agent_tabs(
     room_tab: str = "#room",
     show_close: bool = True,
     show_add: bool = True,
+    room_label: str | None = None,
+    show_room_add: bool = True,
+    rooms: list[str] | None = None,
 ) -> dict:
-    """Lay out agent tabs into a fixed width without mid-tab clipping.
+    """Lay out agent tabs | [+] [#] | IRC channel tabs.
 
-    Each agent tab may include a close control (×). Room has no close.
-    A trailing [+] add control is optional. Overflow uses ‹ / +N scroll hints.
-
-    Segment kinds: tab | close | left_hint | right_hint | add
+    Agents left of [+]. Channels right of [#], each with [*] and ×.
+    Overflow uses ‹ / +N scroll hints.
     """
     if width < 4:
         width = 4
+    if rooms is None:
+        agents_l = [t for t in tabs if not str(t).startswith("#")]
+        rooms_l = [t for t in tabs if str(t).startswith("#")]
+    else:
+        agents_l = [t for t in tabs if not str(t).startswith("#")]
+        rooms_l = list(rooms)
+    tabs = agents_l + rooms_l
     n = len(tabs)
     if n == 0:
         segs = []
         if show_add:
-            segs.append((None, "+", 4, "add"))  # " [+] "
+            segs.append((None, "+", 5, "add"))
+        if show_room_add:
+            segs.append((None, "#", 5, "add_room"))
         return {
             "segments": segs,
             "scroll": 0,
@@ -96,18 +264,25 @@ def layout_agent_tabs(
             "hidden_right": 0,
         }
 
+    def is_room(tab: str) -> bool:
+        return str(tab).startswith("#")
+
     def label_for(tab: str) -> str:
-        return "Room" if tab == room_tab else tab
+        if tab == room_tab:
+            return room_label or "Room"
+        return tab
 
     def unit_width(tab: str, lab: str | None = None) -> int:
         lab = label_for(tab) if lab is None else lab
         w = len(lab) + 4  # "  name  " / " [name] "
-        if show_close and tab != room_tab:
+        if is_room(tab):
+            w += 5  # " [*] "
+        if show_close:
             w += 2  # "× "
         return w
 
     scroll = max(0, min(int(scroll), n - 1))
-    add_w = 4 if show_add else 0  # " [+] "
+    add_w = (5 if show_add else 0) + (5 if show_room_add else 0)
 
     def right_hint_w(hidden: int) -> int:
         if hidden <= 0:
@@ -122,7 +297,8 @@ def layout_agent_tabs(
             lab = label_for(tabs[i])
             w = unit_width(tabs[i], lab)
             if not idxs and w > budget:
-                max_lab = max(1, budget - 4 - (2 if show_close and tabs[i] != room_tab else 0))
+                extra = (5 if is_room(tabs[i]) else 0) + (2 if show_close else 0)
+                max_lab = max(1, budget - 4 - extra)
                 if len(lab) > max_lab:
                     lab = lab[: max(1, max_lab - 1)] + "…"
                 idxs.append(i)
@@ -201,18 +377,32 @@ def layout_agent_tabs(
     segments: list[tuple] = []
     if left_hint:
         segments.append((None, "‹", 2, "left_hint"))
+    split_done = False
+
+    def emit_split() -> None:
+        nonlocal split_done
+        if split_done:
+            return
+        if show_add:
+            segments.append((None, "+", 5, "add"))
+        if show_room_add:
+            segments.append((None, "#", 5, "add_room"))
+        split_done = True
+
     for i, lab in zip(idxs, labs):
         tab = tabs[i]
-        # label portion width without close
+        if is_room(tab):
+            emit_split()
         lab_w = len(lab) + 4
         segments.append((tab, lab, lab_w, "tab"))
-        if show_close and tab != room_tab:
+        if is_room(tab):
+            segments.append((tab, "*", 5, "room_members"))
+        if show_close:
             segments.append((tab, "×", 2, "close"))
+    emit_split()
     if hidden_right > 0:
         hlab = f"+{hidden_right}"
         segments.append((None, hlab, len(hlab) + 2, "right_hint"))
-    if show_add:
-        segments.append((None, "+", 4, "add"))
 
     return {
         "segments": segments,
@@ -244,14 +434,27 @@ class AgentTabBar(Static):
     def __init__(self, agents: list[str], **kwargs):
         super().__init__(**kwargs)
         self._agents = list(agents)
-        self._tabs = list(agents) + [self.ROOM_TAB]
+        self._rooms: list[str] = []
+        self._show_room = True
+        self._tabs = list(agents)
         self._scroll = 0
         self._tab_layout_cache: dict | None = None
 
-    def set_agents(self, agents: list[str]) -> None:
-        """Replace open agent list (Room tab always last)."""
+    def set_agents(
+        self,
+        agents: list[str],
+        show_room: bool | None = None,
+        rooms: list[str] | None = None,
+    ) -> None:
+        """Replace open agent list and IRC channel tabs (right of [#])."""
         self._agents = list(agents)
-        self._tabs = list(agents) + [self.ROOM_TAB]
+        if rooms is not None:
+            self._rooms = list(rooms)
+        if show_room is not None:
+            self._show_room = bool(show_room)
+            if not self._show_room:
+                self._rooms = []
+        self._tabs = list(self._agents) + list(getattr(self, "_rooms", []) or [])
         self._scroll = min(self._scroll, max(0, len(self._tabs) - 1))
         self._tab_layout_cache = None
         self.refresh()
@@ -270,13 +473,15 @@ class AgentTabBar(Static):
 
     def _recompute(self) -> dict:
         layout = layout_agent_tabs(
-            self._tabs,
+            list(self._agents),
             self.active_agent or "",
             self._width(),
             scroll=self._scroll,
             room_tab=self.ROOM_TAB,
             show_close=True,
             show_add=True,
+            show_room_add=True,
+            rooms=list(getattr(self, "_rooms", []) or []),
         )
         self._scroll = layout["scroll"]
         self._tab_layout_cache = layout
@@ -303,6 +508,10 @@ class AgentTabBar(Static):
                 text.append("× ", style=f"bold {Theme.BR_RED} on {Theme.DARK1}")
             elif kind == "add":
                 text.append(" [+] ", style=f"bold {Theme.BR_GREEN} on {Theme.DARK1}")
+            elif kind == "add_room":
+                text.append(" [#] ", style=f"bold {Theme.BR_AQUA} on {Theme.DARK1}")
+            elif kind == "room_members":
+                text.append(" [*] ", style=f"bold {Theme.BR_YELLOW} on {Theme.DARK1}")
             elif tab == self.active_agent:
                 text.append(f" [{lab}] ", style=f"bold {Theme.FG} on {Theme.DARK2}")
             else:
@@ -336,9 +545,12 @@ class AgentTabBar(Static):
                     self._tab_layout_cache = None
                     self.refresh()
                     return
-                if kind == "close" and tab and tab != self.ROOM_TAB:
+                if kind == "close" and tab:
                     try:
-                        self.app.action_remove_agent(tab)
+                        if str(tab).startswith("#"):
+                            self.app._close_room_tab(tab)
+                        else:
+                            self.app.action_remove_agent(tab)
                     except Exception:
                         pass
                     return
@@ -348,10 +560,22 @@ class AgentTabBar(Static):
                     except Exception:
                         pass
                     return
+                if kind == "add_room":
+                    try:
+                        self.app.action_add_room_menu()
+                    except Exception:
+                        pass
+                    return
+                if kind == "room_members":
+                    try:
+                        self.app.action_room_nicks_menu(tab)
+                    except Exception:
+                        pass
+                    return
                 if kind == "tab" and tab is not None and tab != self.active_agent:
                     self.active_agent = tab
-                    if tab == self.ROOM_TAB:
-                        self.app.action_switch_to_room()
+                    if str(tab).startswith("#"):
+                        self.app.action_switch_to_room(tab)
                     else:
                         self.app.action_switch_agent(tab)
                 return
@@ -378,14 +602,20 @@ class AgentAddSelector(OptionList):
     def on_blur(self, event) -> None:
         self.display = False
 
-    def populate(self, candidates: list[str]) -> None:
+    def populate(
+        self,
+        candidates: list[str],
+        title: str | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> None:
         self.clear_options()
-        self.border_title = "Add agent — Enter · Esc"
+        self.border_title = title or "Add agent — Enter · Esc"
         if not candidates:
-            self.add_option(Option("(all agents already open)", id="__none__"))
+            self.add_option(Option("(none left)", id="__none__"))
             return
+        labels = labels or {}
         for name in candidates:
-            self.add_option(Option(name, id=name))
+            self.add_option(Option(labels.get(name, name), id=name))
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         opt_id = event.option.id if event.option else None
@@ -394,6 +624,85 @@ class AgentAddSelector(OptionList):
             return
         try:
             self.app.action_add_agent(opt_id)
+        except Exception:
+            pass
+
+
+class RoomAddSelector(OptionList):
+    """Pick an existing IRC channel or name a new one."""
+
+    DEFAULT_CSS = """
+    RoomAddSelector {
+        layer: overlay;
+        dock: top;
+        margin: 1 0 0 0;
+        width: 40;
+        max-height: 16;
+        border: solid $accent;
+        background: $surface;
+        display: none;
+        offset-x: 8;
+    }
+    """
+
+    def on_blur(self, event) -> None:
+        self.display = False
+
+    def populate(self, channels: list[str]) -> None:
+        self.clear_options()
+        self.border_title = "Add room — Enter · Esc"
+        for ch in channels:
+            self.add_option(Option(ch, id=ch))
+        self.add_option(Option("Name a new room…", id="__custom__"))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        opt_id = event.option.id if event.option else None
+        self.display = False
+        if not opt_id:
+            return
+        try:
+            self.app.action_add_room(opt_id)
+        except Exception:
+            pass
+
+
+class RoomNicksSelector(OptionList):
+    """All catalog agents: + add to current IRC room, - remove."""
+
+    DEFAULT_CSS = """
+    RoomNicksSelector {
+        layer: overlay;
+        dock: top;
+        margin: 1 0 0 0;
+        width: 44;
+        max-height: 18;
+        border: solid $accent;
+        background: $surface;
+        display: none;
+        offset-x: 12;
+    }
+    """
+
+    def on_blur(self, event) -> None:
+        self.display = False
+
+    def populate(self, rows: list[tuple[str, str]]) -> None:
+        """rows: (id, label) e.g. ('add:Squiggy', '+  Squiggy')."""
+        self.clear_options()
+        self.border_title = "Room nicks  + add  − remove"
+        if not rows:
+            self.add_option(Option("(no agents in catalog)", id="__none__"))
+            return
+        for oid, label in rows:
+            self.add_option(Option(label, id=oid))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        opt_id = event.option.id if event.option else None
+        self.display = False
+        if not opt_id or opt_id == "__none__":
+            return
+        try:
+            self.app.action_room_nick(opt_id)
         except Exception:
             pass
 

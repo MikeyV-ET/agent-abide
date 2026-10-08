@@ -29,6 +29,56 @@ from stdout_catalog import StdoutWireRecorder
 POST_TURN_DRAIN_DELAY_S = 0.15
 
 
+def _rpc_session_dump(resp: Any, limit: int = 500) -> str:
+    try:
+        dump = json.dumps(resp) if isinstance(resp, dict) else repr(resp)
+    except Exception:
+        dump = repr(resp)
+    if len(dump) > limit:
+        dump = dump[:limit] + "..."
+    return dump
+
+
+def resolve_session_after_rpc(*, requested: Optional[str], resp: Any) -> str:
+    """Pick the session id after session/load or session/new.
+
+    Roster UUID is the spine. A requested id is kept when the RPC has no
+    error (including the grok-binary case where result has models but no
+    sessionId). An RPC error, or a result sessionId that is not the
+    requested id, refuses start. Never mint a replacement.
+    """
+    err = resp.get("error") if isinstance(resp, dict) else None
+    sid = None
+    if isinstance(resp, dict):
+        sid = (resp.get("result") or {}).get("sessionId")
+
+    if requested:
+        if err:
+            raise RuntimeError(
+                f"grok session/load failed for {requested}: {err} "
+                f"response={_rpc_session_dump(resp)}"
+            )
+        if sid and sid != requested:
+            raise RuntimeError(
+                f"grok session/load returned {sid} but roster asked for {requested}"
+            )
+        if not sid:
+            print(
+                f"[asdaaas] session/load returned no sessionId; "
+                f"keeping requested {requested[:12]}... "
+                f"response={_rpc_session_dump(resp)}"
+            )
+            return requested
+        return sid
+
+    if err or not sid:
+        raise RuntimeError(
+            f"grok session/new failed: {err or 'missing sessionId'} "
+            f"response={_rpc_session_dump(resp)}"
+        )
+    return sid
+
+
 class FileEventSource:
     """Turn-window reader for updates.jsonl + events.jsonl.
 
@@ -433,9 +483,7 @@ class GrokBackend(AgentBackend):
         await self._wait_for_response(self._rpc_id, timeout=30)
         await self._send(self._rpc_notification("notifications/initialized"))
 
-        # Create or load session. Fake/stale ids (e.g. hand-minted for guest
-        # restart) make session/load return "unknown session id"; prompts then
-        # never write user_message_chunk and TUI looks dead while asdaaas is "up".
+        # Roster UUID is the spine. Load it or fail; never session/new over it.
         if session_id:
             print(f"[asdaaas] Loading session {session_id[:12]}...")
             await self._send(self._rpc_request("session/load", {
@@ -451,39 +499,21 @@ class GrokBackend(AgentBackend):
             }))
 
         resp = await self._wait_for_response(self._rpc_id, timeout=120)
-        err = resp.get("error") if isinstance(resp, dict) else None
-        sid = None
-        if isinstance(resp, dict):
-            sid = (resp.get("result") or {}).get("sessionId")
-        if err or not sid:
-            # Do NOT fall back to the requested session_id — binary rejected it
-            detail = err if err else "no sessionId in result"
-            if session_id:
-                print(
-                    f"[asdaaas] session/load failed ({detail}); "
-                    "creating new session via session/new"
+        try:
+            self._session_id = resolve_session_after_rpc(
+                requested=session_id, resp=resp
+            )
+        except RuntimeError as e:
+            hint = ""
+            err = resp.get("error") if isinstance(resp, dict) else None
+            if isinstance(err, dict) and "auth" in str(err).lower():
+                hint = (
+                    " — grok has no usable auth under this HOME "
+                    f"(need valid ~/.grok/auth.json for the agent user). "
+                    f"Citizen will look 'up' only if asdaaas stays running; "
+                    f"TUI will not work until auth is fixed."
                 )
-                await self._send(self._rpc_request("session/new", {
-                    "cwd": agent_cwd,
-                    "mcpServers": [],
-                }))
-                resp = await self._wait_for_response(self._rpc_id, timeout=120)
-                err = resp.get("error") if isinstance(resp, dict) else None
-                sid = (resp.get("result") or {}).get("sessionId") if isinstance(resp, dict) else None
-            if err or not sid:
-                msg = err or "missing sessionId"
-                hint = ""
-                if isinstance(err, dict) and "auth" in str(err).lower():
-                    hint = (
-                        " — grok has no usable auth under this HOME "
-                        f"(need valid ~/.grok/auth.json for the agent user). "
-                        f"Citizen will look 'up' only if asdaaas stays running; "
-                        f"TUI will not work until auth is fixed."
-                    )
-                raise RuntimeError(
-                    f"grok session unavailable: {msg}{hint}"
-                )
-        self._session_id = sid
+            raise RuntimeError(f"{e}{hint}") from e
 
         # Model: CLI/agents.json arg first; summary fills in if omitted
         self._model_id = model or "unknown"

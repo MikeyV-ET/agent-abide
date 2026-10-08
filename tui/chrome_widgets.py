@@ -6,6 +6,7 @@ from textual.widgets import Static
 from rich.text import Text
 
 from theme import Theme
+from nav_widgets import layout_center_band
 
 def classify_turn_trigger(text: str) -> str:
     """Classify a user_message_chunk's content into a human-readable trigger label."""
@@ -46,28 +47,50 @@ def classify_turn_trigger(text: str) -> str:
     return preview
 
 class SystemAlert(Static):
-    """System notification bar for retry, doom loop, compaction events."""
+    """Centered 15:70:15 band: continue, aa.control, localmail, retries."""
+
+    DEFAULT_CSS = """
+    SystemAlert {
+        width: 100%;
+        margin: 0 2 1 0;
+        height: auto;
+    }
+    """
 
     def __init__(self, message: str, severity: str = "warning", **kwargs):
         super().__init__(**kwargs)
         self.alert_message = message
         self.severity = severity
 
-    def render(self) -> Text:
-        text = Text()
+    def on_resize(self) -> None:
+        self.refresh()
+
+    def _icon_style(self) -> tuple[str, str]:
+        msg = (self.alert_message or "").lstrip().lower()
         if self.severity == "error":
-            text.append(" ⚠ ", style=f"bold {Theme.BR_RED}")
-            text.append(self.alert_message, style=Theme.BR_RED)
-        elif self.severity == "warning":
-            text.append(" ⚠ ", style=f"bold {Theme.BR_YELLOW}")
-            text.append(self.alert_message, style=Theme.BR_YELLOW)
-        else:
-            text.append(" ℹ ", style=f"bold {Theme.BR_BLUE}")
-            text.append(self.alert_message, style=Theme.BR_BLUE)
-        return text
+            return " ⚠ ", Theme.BR_RED
+        if self.severity == "warning":
+            return " ⚠ ", Theme.BR_YELLOW
+        if msg.startswith("[localmail") or "mail from" in msg[:80]:
+            return " ✉ ", Theme.BR_AQUA
+        return " ℹ ", Theme.BR_BLUE
+
+    def render(self) -> Text:
+        icon, color = self._icon_style()
+        inner = Text()
+        inner.append(icon, style=f"bold {color}")
+        inner.append(self.alert_message or "", style=color)
+        total = self.size.width if self.size.width >= 40 else 80
+        return layout_center_band(inner, total=total)
 
 class ContentScroll(VerticalScroll):
     """VerticalScroll for agent content. Auto-loads history on mouse scroll at top."""
+
+    DEFAULT_CSS = """
+    ContentScroll {
+        padding: 0;
+    }
+    """
 
     _follow_tail: bool = True
     _history_load_cooldown: float = 0.0  # monotonic deadline

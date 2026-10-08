@@ -34,6 +34,7 @@ import asyncio
 import datetime
 import json
 import os
+import re
 import sys
 import time
 import secrets
@@ -68,7 +69,7 @@ from paint_mount import mount_items
 from tui_env import TuiEnv
 from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme, apply_auto_if_needed, apply_theme_to_app
 from chat_widgets import (
-    ToolCallPanel, PlanPanel, UserMessage, AgentMessage, ThinkingBlock, InterjectionBlock,
+    ToolCallPanel, ToolRunStack, PlanPanel, UserMessage, AgentMessage, ThinkingBlock, InterjectionBlock,
     SystemReminderPanel, is_system_reminder,
 )
 from message_input import MessageInput
@@ -77,6 +78,7 @@ from chrome_widgets import (
 )
 from nav_widgets import (
     RoomMessage, RoomSystemMessage, AgentTabBar, AgentAddSelector,
+    RoomAddSelector, RoomNicksSelector,
     ThemeSelector, DynamicFooter,
 )
 
@@ -257,9 +259,16 @@ class Config:
 
     @classmethod
     def write_command(cls, cmd: dict) -> None:
-        """Write a command to the agent's asdaaas command queue."""
+        """Write a command to the current agent's asdaaas command queue."""
+        cls.write_command_to(cls.AGENT_NAME, cmd)
+
+    @classmethod
+    def write_command_to(cls, agent_name: str, cmd: dict) -> None:
+        """Write a command to a named agent's asdaaas command queue."""
+        if not agent_name:
+            return
         import secrets as _secrets
-        cmd_dir = cls.asdaaas_dir() / "commands"
+        cmd_dir = cls.agent_home(agent_name) / "asdaaas" / "commands"
         cmd_dir.mkdir(parents=True, exist_ok=True)
         ts = int(time.time() * 1000)
         rand = _secrets.token_hex(4)
@@ -344,12 +353,31 @@ class AgentHeader(Static):
     code_version = reactive("")
     code_version_stale = reactive(False)
     tui_version = reactive("")  # this TUI process's checkout short hash
+    room_mode = reactive(False)
+    room_nicks = reactive("")
 
     def render(self) -> Text:
         text = Text()
         # Agent name
         text.append(f" {self.agent_name} ", style=f"bold {Theme.FG} on {Theme.DARK2}")
         text.append("  ")
+
+        if self.room_mode:
+            h = self.health_status
+            if h == "connected":
+                text.append("●", style=Theme.BR_GREEN)
+                text.append(" connected", style=Theme.GRAY)
+            elif h == "disconnected":
+                text.append("○", style=Theme.BR_YELLOW)
+                text.append(" disconnected", style=Theme.GRAY)
+            else:
+                text.append("?", style=Theme.GRAY)
+                text.append(f" {h}", style=Theme.GRAY)
+            text.append("  ", style=Theme.GRAY)
+            text.append("in: ", style=Theme.GRAY)
+            nicks = self.room_nicks or "(empty)"
+            text.append(nicks, style=Theme.BR_AQUA)
+            return text
 
         # Context usage with color coding
         pct = self.context_pct
@@ -465,7 +493,9 @@ class AgentHeader(Static):
             self.refresh()
 
     def on_click(self, event) -> None:
-        """Open gaze selector dropdown when header is clicked."""
+        """Open gaze selector unless this is the IRC room header."""
+        if self.room_mode:
+            return
         self.app.action_toggle_gaze_selector()
 
 
@@ -559,12 +589,24 @@ class GazeSelector(OptionList):
 
         if room == "__custom__":
             self.display = False
-            # Put a prompt in the input bar for the user to type a room name
             try:
                 input_bar = self.app.query_one("#input-bar", MessageInput)
                 input_bar.clear()
-                input_bar.insert("/gaze ")
+                if getattr(self.app, "_room_active", False):
+                    input_bar.insert("/room ")
+                else:
+                    input_bar.insert("/gaze ")
                 input_bar.focus()
+            except NoMatches:
+                pass
+            return
+
+        # Room tab: picking #channel changes the TUI IRC view, not agent gaze
+        if getattr(self.app, "_room_active", False) and room.startswith("#"):
+            self.app._change_room_channel(room)
+            self.display = False
+            try:
+                self.app.query_one("#input-bar", MessageInput).focus()
             except NoMatches:
                 pass
             return
@@ -945,6 +987,8 @@ class AsdaaasTUI(App):
     Screen {
         layout: vertical;
         layers: default overlay;
+        padding: 0;
+        overflow: hidden;
     }
 
     #top-bar {
@@ -963,8 +1007,10 @@ class AsdaaasTUI(App):
 
     VerticalScroll {
         height: 1fr;
-        scrollbar-size: 1 1;
-        padding: 0 1;
+        padding: 0;
+        overflow-x: hidden;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 0;
     }
 
     #input-bar {
@@ -980,16 +1026,37 @@ class AsdaaasTUI(App):
         max-height: 50%;
     }
 
+    /* Chat gaps: margin is cells TRBL. Content widgets use bottom=1 (one blank
+       row after). TurnSeparator uses top=1 instead. Right=2 clears the scrollbar. */
     AgentMessage {
-        margin: 0 0 1 0;
+        margin: 0 2 1 0;
     }
 
     ToolCallPanel {
-        margin: 0 0 0 2;
+        width: 80%;
+        margin: 0 2 1 1;
+        align: left top;
+    }
+
+    ToolRunStack {
+        width: 80%;
+        height: auto;
+        margin: 0 2 1 1;
+        align: left top;
+        padding: 0;
+    }
+
+    ToolRunStack ToolCallPanel {
+        width: 100%;
+        height: auto;
+        margin: 0;
+        padding: 0;
     }
 
     PlanPanel {
-        margin: 0 0 1 0;
+        width: 80%;
+        margin: 0 2 1 1;
+        align: left top;
     }
 
     HookAnnotation {
@@ -998,7 +1065,7 @@ class AsdaaasTUI(App):
     }
 
     UserMessage {
-        margin: 0 0 1 1;
+        margin: 0 2 1 0;
     }
 
     TurnSeparator {
@@ -1007,24 +1074,25 @@ class AsdaaasTUI(App):
     }
 
     ThinkingBlock {
-        margin: 0 0 0 2;
+        margin: 0 2 0 2;
         border: round $accent-muted;
         padding: 0 1;
         border-title-align: left;
     }
 
     InterjectionBlock {
-        border: round $warning;
-        padding: 0 1;
-        border-title-align: left;
+        margin: 0 2 1 0;
+        border: none;
+        padding: 0;
     }
 
     SystemReminderPanel {
-        margin: 0 0 0 2;
+        margin: 0 2 1 2;
     }
 
     SystemAlert {
-        margin: 0 0 0 0;
+        width: 100%;
+        margin: 0 2 1 0;
         height: auto;
     }
 
@@ -1090,6 +1158,17 @@ class AsdaaasTUI(App):
         self._show_thinking: bool = True
         self._available_commands: list[dict] = []
         self._seen_interjections: set[str] = set()  # global dedup by bell id / text
+        self._input_drafts: dict[str, str] = {}
+        self._room_channel = "#standup"
+        self._room_active = False
+        self._room_tab_visible = True
+        self._open_rooms: list[str] = ["#standup"]
+        self._closed_room_tabs: set[str] = set()
+        self._room_irc_sock = None
+        self._room_irc_nick = ""
+        self._room_irc_buf = ""
+        self._room_reader_started = False
+        self._room_history_loaded_for = None
 
     @staticmethod
     def _get_abide_head() -> str:
@@ -1162,6 +1241,8 @@ class AsdaaasTUI(App):
         yield GazeSelector(id="gaze-selector")
         yield ThemeSelector(id="theme-selector")
         yield AgentAddSelector(id="agent-add-selector")
+        yield RoomAddSelector(id="room-add-selector")
+        yield RoomNicksSelector(id="room-nicks-selector")
         yield SlashMenu(id="slash-menu")
         # One content scroll per agent
         for agent in self._agents:
@@ -1265,6 +1346,14 @@ class AsdaaasTUI(App):
                 pass
             # Defer menu so layout exists
             self.set_timer(0.15, self.action_add_agent_menu)
+        try:
+            ir = self._irc_rooms_mod()
+            found = list(ir.open_tabs())
+            closed = getattr(self, "_closed_room_tabs", set())
+            self._open_rooms = [r for r in found if r not in closed]
+        except Exception:
+            pass
+        self._sync_tab_bar()
         # Start the status poller
         self.status_worker = self.run_worker(
             self._poll_status, thread=True, name="status_poller"
@@ -1284,14 +1373,8 @@ class AsdaaasTUI(App):
                     lambda a=agent: self._tail_updates_for_agent(a),
                     thread=True, name=f"updates_{agent}"
                 )
-        # Room tab (IRC) — connect on first visit; optional log tail for history
-        self._room_channel = "#meetingroom1"
-        self._room_active = False
-        self._room_irc_sock = None
+        # Room tab (IRC) — nick from operator; attrs already set in __init__
         self._room_irc_nick = Config.OPERATOR_NAME or "eric"
-        self._room_irc_buf = ""
-        self._room_reader_started = False
-        self._room_history_loaded_for = None
         self.run_worker(self._tail_room_log, thread=True, name="room_tailer")
         # Focus the input bar
         self.query_one("#input-bar", MessageInput).focus()
@@ -1352,7 +1435,7 @@ class AsdaaasTUI(App):
                 room_scroll = self.query_one("#content-room", ContentScroll)
                 room_scroll._follow_tail = True
                 ts = time.strftime("%H:%M")
-                room_scroll.mount(RoomMessage(ts, nick, text))
+                room_scroll.mount(RoomMessage(ts, nick, text, is_human=True))
                 room_scroll.scroll_end(animate=False)
             except NoMatches:
                 pass
@@ -1363,7 +1446,9 @@ class AsdaaasTUI(App):
         # Display the user message — re-enable tail following
         content = self._content_scroll()
         content._follow_tail = True
-        content.mount(UserMessage(text))
+        echo = UserMessage(text, nick="eric (tui)")
+        content.mount(echo)
+        self._pending_echo = echo
         self._scroll_to_bottom()
 
         # Reset message state for new response
@@ -1438,6 +1523,27 @@ class AsdaaasTUI(App):
                 self.action_switch_to_room()
             self._change_room_channel(arg.strip())
             return
+        elif cmd == "/who":
+            ch = self._room_channel
+            try:
+                nicks = self._irc_rooms_mod().members_of(ch)
+            except Exception:
+                nicks = []
+            listing = ", ".join(nicks) if nicks else "(empty)"
+            self.notify(f"{ch}: {listing}", severity="information", timeout=6)
+            return
+        elif cmd == "/part":
+            nick = arg.strip()
+            if not nick:
+                self.notify("Usage: /part <agent>", severity="warning")
+                return
+            try:
+                self._irc_rooms_mod().remove_member(self._room_channel, nick)
+                self.notify(f"{nick} left {self._room_channel}", severity="information")
+                self._update_room_header()
+            except Exception as e:
+                self.notify(str(e), severity="error")
+            return
         elif cmd == "/gaze":
             if arg:
                 # Set gaze to the specified room
@@ -1506,6 +1612,8 @@ class AsdaaasTUI(App):
 | `/status` | Show agent status |
 | `/gaze [room]` | Show/set gaze target |
 | `/room [#chan]` | Room tab: show/switch IRC channel |
+| `/who` | List roster nicks in the current IRC room |
+| `/part <agent>` | Remove an agent nick from the current IRC room |
 | `/awareness` | Show/edit background channels |
 | `/health` | Show health info |
 | `/todo` | Manage persistent todo list |
@@ -1991,6 +2099,7 @@ Type anything else to send a message to the agent.
             abide_head=getattr(self, "_abide_head", "") or "",
             model_fallback=Config.agent_model(agent_name),
         )
+        header.room_mode = False
         header.agent_name = tel.agent_name
         header.health_status = tel.health_status
         header.is_generating = tel.is_generating
@@ -2019,6 +2128,11 @@ Type anything else to send a message to the agent.
             return
         if agent_name == self._active_agent and not self._room_active:
             return
+
+        if self._room_active:
+            self._stash_input_draft(f"room:{self._room_channel}")
+        else:
+            self._stash_input_draft(f"agent:{self._active_agent}")
 
         # Hide room content if switching from room
         if self._room_active:
@@ -2065,21 +2179,7 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
-        # Save current draft, restore new agent's draft
-        try:
-            input_bar = self.query_one("#input-bar", MessageInput)
-            # Save current agent's draft
-            old_state = self._agent_state.get(old_agent)
-            if old_state is not None:
-                old_state["input_draft"] = input_bar.text
-            # Restore new agent's draft
-            input_bar.clear()
-            new_draft = self._agent_state[agent_name].get("input_draft", "")
-            if new_draft:
-                input_bar.insert(new_draft)
-            input_bar._placeholder = f"Message {agent_name}..."
-        except NoMatches:
-            pass
+        self._restore_input_draft(f"agent:{agent_name}", f"Message {agent_name}...")
 
         # Preserve each tab's scroll position (do not yank reader to tail/home).
         try:
@@ -2111,14 +2211,55 @@ Type anything else to send a message to the agent.
 
         # No toast — tab bar already shows the active agent
 
+    def _current_draft_key(self) -> str:
+        if getattr(self, "_room_active", False):
+            ch = getattr(self, "_room_channel", "") or ""
+            return f"room:{ch}" if ch else ""
+        name = getattr(self, "_active_agent", "") or ""
+        return f"agent:{name}" if name else ""
+
+    def _stash_input_draft(self, key: str | None = None) -> None:
+        key = key if key is not None else self._current_draft_key()
+        if not key or key.endswith(":"):
+            return
+        if not hasattr(self, "_input_drafts"):
+            self._input_drafts = {}
+        try:
+            bar = self.query_one("#input-bar", MessageInput)
+            text = bar.text
+        except NoMatches:
+            return
+        self._input_drafts[key] = text
+        if key.startswith("agent:"):
+            name = key.split(":", 1)[1]
+            st = self._agent_state.get(name)
+            if st is not None:
+                st["input_draft"] = text
+
+    def _restore_input_draft(self, key: str, placeholder: str) -> None:
+        try:
+            bar = self.query_one("#input-bar", MessageInput)
+            bar.clear()
+            draft = getattr(self, "_input_drafts", {}).get(key, "")
+            if not draft and key.startswith("agent:"):
+                name = key.split(":", 1)[1]
+                draft = (self._agent_state.get(name) or {}).get("input_draft", "") or ""
+            if draft:
+                bar.insert(draft)
+            bar._placeholder = placeholder
+        except NoMatches:
+            pass
+
     def action_next_agent(self) -> None:
         """Cycle to next agent tab (includes Room)."""
-        tabs = self._agents + [AgentTabBar.ROOM_TAB]
-        cur = AgentTabBar.ROOM_TAB if self._room_active else self._active_agent
+        tabs = list(self._agents) + list(getattr(self, "_open_rooms", []) or [])
+        if not tabs:
+            return
+        cur = self._room_channel if self._room_active else self._active_agent
         idx = tabs.index(cur) if cur in tabs else 0
         next_tab = tabs[(idx + 1) % len(tabs)]
-        if next_tab == AgentTabBar.ROOM_TAB:
-            self.action_switch_to_room()
+        if str(next_tab).startswith("#"):
+            self.action_switch_to_room(next_tab)
         else:
             self.action_switch_agent(next_tab)
 
@@ -2144,9 +2285,21 @@ Type anything else to send a message to the agent.
     def _sync_tab_bar(self) -> None:
         try:
             tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
-            tab_bar.set_agents(self._agents)
-            if self._room_active:
-                tab_bar.active_agent = AgentTabBar.ROOM_TAB
+            rooms = []
+            for r in getattr(self, "_open_rooms", []) or []:
+                if r and r not in rooms and r not in getattr(self, "_closed_room_tabs", set()):
+                    rooms.append(r)
+            self._open_rooms = rooms
+            try:
+                self._irc_rooms_mod().set_open_tabs(rooms)
+            except Exception:
+                pass
+            tab_bar.set_agents(
+                self._agents,
+                rooms=rooms,
+            )
+            if getattr(self, "_room_active", False):
+                tab_bar.active_agent = self._room_channel
             else:
                 tab_bar.active_agent = self._active_agent
         except NoMatches:
@@ -2192,34 +2345,148 @@ Type anything else to send a message to the agent.
         return self._initial_tail_row_budget(agent_name)
 
 
-    def action_add_agent_menu(self) -> None:
+    def _irc_rooms_mod(self):
+        import sys
+        ad = str(Path(__file__).resolve().parent.parent / "adapters")
+        if ad not in sys.path:
+            sys.path.insert(0, ad)
+        import irc_rooms
+        return irc_rooms
 
-        """Open picker of agents.json entries not already in the tab bar."""
-        open_set = set(self._agents)
-        candidates = [n for n in Config.list_catalog_agents() if n not in open_set]
+    def action_add_agent_menu(self) -> None:
+        """Open picker: TUI tab, or IRC nick when the Room tab is active."""
         try:
             sel = self.query_one("#agent-add-selector", AgentAddSelector)
         except NoMatches:
             self.notify("Add-agent UI missing", severity="error")
             return
-        # Hide other overlays
-        for oid, cls in (("#gaze-selector", GazeSelector), ("#theme-selector", ThemeSelector)):
+        for oid, cls in (
+            ("#gaze-selector", GazeSelector),
+            ("#theme-selector", ThemeSelector),
+            ("#room-add-selector", RoomAddSelector),
+            ("#room-nicks-selector", RoomNicksSelector),
+        ):
             try:
-                w = self.query_one(oid, cls)
-                w.display = False
+                self.query_one(oid, cls).display = False
             except NoMatches:
                 pass
+        open_set = set(self._agents)
+        candidates = [n for n in Config.list_catalog_agents() if n not in open_set]
         sel.populate(candidates)
         sel.display = True
         sel.focus()
 
+    def action_add_room_menu(self) -> None:
+        ir = self._irc_rooms_mod()
+        channels = list(ir.rooms())
+        for extra in ("#standup", getattr(self, "_room_channel", "") or ""):
+            if extra and extra not in channels:
+                channels.append(extra)
+        try:
+            sel = self.query_one("#room-add-selector", RoomAddSelector)
+        except NoMatches:
+            self.notify("Add-room UI missing", severity="error")
+            return
+        for oid, cls in (
+            ("#gaze-selector", GazeSelector),
+            ("#theme-selector", ThemeSelector),
+            ("#agent-add-selector", AgentAddSelector),
+            ("#room-nicks-selector", RoomNicksSelector),
+        ):
+            try:
+                self.query_one(oid, cls).display = False
+            except NoMatches:
+                pass
+        sel.populate(channels)
+        sel.display = True
+        sel.focus()
+
+    def action_room_nicks_menu(self, channel: str | None = None) -> None:
+        """[*] on a room tab: + add / − remove nicks in that channel."""
+        if channel and str(channel).startswith("#"):
+            if not (self._room_active and channel == self._room_channel):
+                self.action_switch_to_room(channel)
+        elif not self._room_active:
+            self.action_switch_to_room()
+        ir = self._irc_rooms_mod()
+        seated = set(ir.members_of(self._room_channel))
+        rows = []
+        for name in Config.list_catalog_agents():
+            if name in seated:
+                rows.append((f"rm:{name}", f"−  {name}"))
+            else:
+                rows.append((f"add:{name}", f"+  {name}"))
+        try:
+            sel = self.query_one("#room-nicks-selector", RoomNicksSelector)
+        except NoMatches:
+            self.notify("Room nicks UI missing", severity="error")
+            return
+        for oid, cls in (
+            ("#gaze-selector", GazeSelector),
+            ("#theme-selector", ThemeSelector),
+            ("#agent-add-selector", AgentAddSelector),
+            ("#room-add-selector", RoomAddSelector),
+        ):
+            try:
+                self.query_one(oid, cls).display = False
+            except NoMatches:
+                pass
+        sel.populate(rows)
+        sel.display = True
+        sel.focus()
+
+    def action_room_nick(self, token: str) -> None:
+        ir = self._irc_rooms_mod()
+        ch = self._room_channel
+        if token.startswith("rm:"):
+            nick = token[3:]
+            ir.remove_member(ch, nick)
+            if nick in Config.list_catalog_agents():
+                try:
+                    Config.write_command_to(nick, ir.room_awareness_cmd(ch, join=False))
+                except Exception:
+                    pass
+            self.notify(f"− {nick}  {ch}", severity="information", timeout=3)
+        elif token.startswith("add:"):
+            nick = token[4:]
+            ir.add_member(ch, nick)
+            if nick in Config.list_catalog_agents():
+                try:
+                    Config.write_command_to(nick, ir.room_awareness_cmd(ch, join=True))
+                except Exception:
+                    pass
+            self.notify(f"+ {nick}  {ch}", severity="information", timeout=3)
+        else:
+            return
+        self._update_room_header()
+
+    def action_add_room(self, name: str) -> None:
+        if name == "__custom__":
+            try:
+                input_bar = self.query_one("#input-bar", MessageInput)
+                input_bar.clear()
+                input_bar.insert("/room #")
+                input_bar.focus()
+            except NoMatches:
+                pass
+            return
+        ir = self._irc_rooms_mod()
+        ch = ir.add_room(name)
+        getattr(self, "_closed_room_tabs", set()).discard(ch)
+        if ch not in getattr(self, "_open_rooms", []):
+            self._open_rooms.append(ch)
+        self.action_switch_to_room(ch)
+        self.notify(f"Room {ch}", severity="information", timeout=2)
+
     def action_add_agent(self, agent_name: str) -> None:
-        """Open an agent tab (from catalog) and start tailing it."""
-        if not agent_name or agent_name in self._agents:
+        """Open an agent tab, or add a nick to the current IRC room."""
+        if not agent_name:
             return
         catalog = Config.list_catalog_agents()
         if agent_name not in catalog:
             self.notify(f"Unknown agent: {agent_name}", severity="warning")
+            return
+        if agent_name in self._agents:
             return
 
         self._agent_state[agent_name] = self._new_agent_state(agent_name)
@@ -2314,8 +2581,56 @@ Type anything else to send a message to the agent.
             self.set_timer(0.1, self.action_add_agent_menu)
         self.notify(f"Closed {agent_name}", severity="information", timeout=2)
 
-    def action_switch_to_room(self) -> None:
-        """Switch to the IRC room tab and ensure a live connection."""
+    def action_remove_room(self, channel: str | None = None) -> None:
+        """Close one IRC channel tab. Roster file stays; [#] can reopen it."""
+        self._close_room_tab(channel or self._room_channel)
+
+    def _close_room_tab(self, ch: str) -> None:
+        """Hide a channel tab. Does not PART nicks; [#] / /room reopens."""
+        if not ch:
+            return
+        if not hasattr(self, "_closed_room_tabs"):
+            self._closed_room_tabs = set()
+        self._closed_room_tabs.add(ch)
+        self._open_rooms = [r for r in getattr(self, "_open_rooms", []) if r != ch]
+        was_this = self._room_active and self._room_channel == ch
+        if was_this:
+            self._room_active = False
+            try:
+                room_scroll = self.query_one("#content-room", ContentScroll)
+                room_scroll.display = False
+            except NoMatches:
+                pass
+            if self._open_rooms:
+                self.action_switch_to_room(self._open_rooms[0])
+            elif self._agents:
+                self.action_switch_agent(self._agents[0])
+            else:
+                self._active_agent = ""
+                try:
+                    pick = self.query_one("#content-__pick__", ContentScroll)
+                    pick.display = True
+                except NoMatches:
+                    pass
+        self._sync_tab_bar()
+        self.notify(f"Closed {ch}", severity="information", timeout=2)
+
+    def action_switch_to_room(self, channel: str | None = None) -> None:
+        """Switch to an IRC channel tab and ensure a live connection."""
+        if channel and str(channel).startswith("#"):
+            if self._room_active and channel == self._room_channel:
+                return
+            if self._room_active and channel != self._room_channel:
+                self._change_room_channel(channel)
+                return
+            self._room_channel = channel
+        closed = getattr(self, "_closed_room_tabs", set())
+        if (
+            self._room_channel not in getattr(self, "_open_rooms", [])
+            and self._room_channel not in closed
+        ):
+            self._open_rooms.append(self._room_channel)
+        self._sync_tab_bar()
         # Hide current agent content
         if not self._room_active:
             try:
@@ -2328,15 +2643,11 @@ Type anything else to send a message to the agent.
             except NoMatches:
                 pass
 
-            try:
-                input_bar = self.query_one("#input-bar", MessageInput)
-                old_state = self._agent_state.get(self._active_agent)
-                if old_state is not None:
-                    old_state["input_draft"] = input_bar.text
-                input_bar.clear()
-                input_bar._placeholder = f"Message {self._room_channel}...  (/room #chan)"
-            except NoMatches:
-                pass
+            self._stash_input_draft(f"agent:{self._active_agent}")
+            self._restore_input_draft(
+                f"room:{self._room_channel}",
+                f"Message {self._room_channel}...  (/room #chan)",
+            )
 
         # Show room content
         self._room_active = True
@@ -2352,7 +2663,13 @@ Type anything else to send a message to the agent.
 
         try:
             tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
-            tab_bar.active_agent = AgentTabBar.ROOM_TAB
+            tab_bar.active_agent = self._room_channel
+        except NoMatches:
+            pass
+
+        try:
+            viewer = self.query_one("#ephact-viewer", EphactViewer)
+            viewer.set_active_agent("")
         except NoMatches:
             pass
 
@@ -2366,11 +2683,31 @@ Type anything else to send a message to the agent.
         """Show channel + connection status in the agent header."""
         try:
             header = self.query_one("#agent-header", AgentHeader)
+            header.room_mode = True
             header.agent_name = self._room_channel
             if status is None:
                 status = "connected" if self._room_irc_sock is not None else "disconnected"
             header.health_status = status
             header.gaze_target = f"irc/{self._room_channel}"
+            try:
+                nicks = self._irc_rooms_mod().members_of(self._room_channel)
+                header.room_nicks = ", ".join(nicks) if nicks else ""
+            except Exception:
+                header.room_nicks = ""
+            header.context_pct = 0
+            header.compaction_count = 0
+            header.compaction_phase = ""
+            header.delay_pattern = ""
+            header.model_name = ""
+            header.turn_physical = 0
+            header.turn_logical = 0
+            header.is_generating = False
+            try:
+                tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
+                tab_bar.active_agent = self._room_channel
+                tab_bar.refresh()
+            except NoMatches:
+                pass
         except NoMatches:
             pass
 
@@ -2384,9 +2721,16 @@ Type anything else to send a message to the agent.
         Returns True if socket is ready for send/recv.
         """
         if self._room_irc_sock is not None:
-            if load_history:
-                self._load_room_history()
-            return True
+            if not self._room_sock_alive():
+                try:
+                    self._room_irc_sock.close()
+                except Exception:
+                    pass
+                self._room_irc_sock = None
+            else:
+                if load_history:
+                    self._load_room_history()
+                return True
         ok = self._connect_room_irc()
         if ok and load_history:
             self._load_room_history()
@@ -2438,10 +2782,11 @@ Type anything else to send a message to the agent.
     def _connect_room_irc(self) -> bool:
         """Establish IRC connection for the Room tab. Returns success."""
         import socket as _socket
-        nick = (Config.OPERATOR_NAME or "eric").replace(" ", "_")[:16]
-        # Avoid empty / invalid nick
+        # Distinct from agent-adapter nicks and from a lingering "eric" after EOT.
+        base = (Config.OPERATOR_NAME or "eric").replace(" ", "_")[:12]
+        nick = (base + "_tui")[:16]
         if not nick or not nick[0].isalpha():
-            nick = "op_" + (nick or "user")
+            nick = "op_tui"
 
         def _open() -> "_socket.socket":
             sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
@@ -2503,6 +2848,7 @@ Type anything else to send a message to the agent.
             f"Connected as {nick} → {self._room_channel}",
         )
         self.call_from_thread(self._update_room_header, "connected")
+        self._room_joined = self._room_channel
         return True
 
     def _handle_room_irc_bytes(self, data: bytes) -> None:
@@ -2566,28 +2912,13 @@ Type anything else to send a message to the agent.
                     self.call_from_thread(self._mount_room_msg, ts, nick, action, True)
                 return
             # Skip echo of our own messages if we already local-echoed
-            own = (getattr(self, "_room_irc_nick", None) or Config.OPERATOR_NAME or "").lower()
-            if nick.lower() == own:
+            if self._is_operator_nick(nick):
                 return
             self.call_from_thread(self._mount_room_msg, ts, nick, msg)
             return
 
         if cmd in ("JOIN", "PART", "QUIT", "NICK"):
-            detail = rest
-            if cmd == "JOIN":
-                chan = parts[1].lstrip(":") if len(parts) > 1 else self._room_channel
-                if chan.lower() != self._room_channel.lower() and not chan.startswith(":"):
-                    # JOIN :#chan form
-                    if " :" in rest:
-                        chan = rest.split(" :", 1)[1]
-                if self._room_channel.lower() not in (chan.lower(), f":{self._room_channel}".lower()):
-                    if chan.lstrip(":").lower() != self._room_channel.lower():
-                        return
-                self.call_from_thread(self._mount_room_system_msg, ts, f"{nick} joined")
-            elif cmd == "PART":
-                self.call_from_thread(self._mount_room_system_msg, ts, f"{nick} left")
-            elif cmd == "QUIT":
-                self.call_from_thread(self._mount_room_system_msg, ts, f"{nick} quit")
+            # Hide presence floods (weechat smart_filter / irssi JOINS PARTS QUITS).
             return
 
         # Nickname in use → try alternate
@@ -2613,7 +2944,8 @@ Type anything else to send a message to the agent.
                 sock.settimeout(30.0)
                 data = sock.recv(4096)
                 if not data:
-                    self._room_irc_sock = None
+                    if self._room_irc_sock is sock:
+                        self._room_irc_sock = None
                     self.call_from_thread(
                         self._mount_room_system_msg,
                         time.strftime("%H:%M"),
@@ -2635,28 +2967,101 @@ Type anything else to send a message to the agent.
                 self.call_from_thread(self._update_room_header, "disconnected")
                 time.sleep(1)
 
-    def _send_to_room(self, text: str) -> None:
-        """Send a message to the IRC room via persistent socket connection."""
+    def _is_operator_nick(self, nick: str) -> bool:
+        n = (nick or "").lower().replace("-", "_")
+        own = (getattr(self, "_room_irc_nick", "") or "").lower().replace("-", "_")
+        op = (Config.OPERATOR_NAME or "eric").lower()
+        if n in {own, op, "eric", "eric_tui"}:
+            return True
+        return bool(op) and n.startswith(op + "_")
+
+    def _room_sock_alive(self) -> bool:
+        sock = self._room_irc_sock
+        if sock is None:
+            return False
+        import socket as _socket
         try:
-            if not self._ensure_room_connected(load_history=False):
-                self.call_from_thread(
-                    self._mount_room_system_msg,
-                    time.strftime("%H:%M"),
-                    "Not connected — message not sent",
-                )
-                return
+            sock.setblocking(False)
+            data = sock.recv(1, _socket.MSG_PEEK)
+            if data == b"":
+                return False
+        except BlockingIOError:
+            return True
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            return False
+        except OSError:
+            return True
+        except Exception:
+            return False
+        return True
+
+    def _send_to_room(self, text: str) -> None:
+        """Send a message to the IRC room. Fresh JOIN+PRIVMSG so a stale fd cannot swallow it."""
+        import traceback
+        chan = self._room_channel
+        dbg = Path("/tmp/tui_room_send.log")
+
+        def _log(msg: str) -> None:
+            try:
+                with dbg.open("a") as f:
+                    f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+            except Exception:
+                pass
+
+        def _privmsg() -> None:
             sock = self._room_irc_sock
             if sock is None:
-                return
-            sock.sendall(
-                f"PRIVMSG {self._room_channel} :{text}\r\n".encode()
-            )
+                raise RuntimeError("no socket")
+            sock.settimeout(5.0)
+            if getattr(self, "_room_joined", None) != chan:
+                sock.sendall(f"JOIN {chan}\r\n".encode())
+                time.sleep(0.4)
+                self._room_joined = chan
+            sock.sendall(f"PRIVMSG {chan} :{text}\r\n".encode())
+            _log(f"PRIVMSG {chan} nick={self._room_irc_nick!r} bytes={len(text)} joined={self._room_joined}")
+
+        try:
+            if not self._room_sock_alive():
+                if self._room_irc_sock is not None:
+                    try:
+                        self._room_irc_sock.close()
+                    except Exception:
+                        pass
+                    self._room_irc_sock = None
+                    time.sleep(0.2)
+                if not self._connect_room_irc():
+                    _log("connect failed")
+                    self.call_from_thread(
+                        self._mount_room_system_msg,
+                        time.strftime("%H:%M"),
+                        "Not connected — message not sent",
+                    )
+                    return
+            _privmsg()
         except Exception as e:
+            _log(f"error {e}\n{traceback.format_exc()}")
             self._room_irc_sock = None
             self.call_from_thread(
-                self._mount_room_system_msg, time.strftime("%H:%M"), f"Send error: {e}"
+                self._mount_room_system_msg,
+                time.strftime("%H:%M"),
+                f"Send error: {e}",
             )
             self.call_from_thread(self._update_room_header, "disconnected")
+
+    @staticmethod
+    def _irc_log_clock(ts: str) -> str:
+        """miniircd stamps UTC; show local HH:MM."""
+        from datetime import datetime, timezone
+        raw = (ts or "").replace(" UTC", "").replace("Z", "").strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(raw[:19], fmt).replace(tzinfo=timezone.utc)
+                return dt.astimezone().strftime("%H:%M")
+            except ValueError:
+                continue
+        if " " in ts:
+            return ts.split(" ")[1][:5]
+        return (ts or "")[:5]
 
     def _load_room_history(self) -> None:
         """Load last lines from miniircd channel log into the room pane."""
@@ -2670,15 +3075,12 @@ Type anything else to send a message to the agent.
             return
         msg_re = re.compile(r"^\[([^\]]+)\] <([^>]+)> (.*)$")
         action_re = re.compile(r"^\[([^\]]+)\] \* (\S+) (.*)$")
+        items: list[tuple] = []
         try:
             with open(log_path, "r", errors="replace") as f:
                 lines = f.readlines()
             tail_lines = lines[-80:] if len(lines) > 80 else lines
-            self.call_from_thread(
-                self._mount_room_system_msg,
-                time.strftime("%H:%M"),
-                f"— history ({len(tail_lines)} lines) —",
-            )
+            items.append(("sys", time.strftime("%H:%M"), f"— {self._room_channel} ({len(tail_lines)} lines) —"))
             for line in tail_lines:
                 line = line.rstrip()
                 if not line:
@@ -2686,23 +3088,19 @@ Type anything else to send a message to the agent.
                 m = msg_re.match(line)
                 if m:
                     ts, nick, msg = m.groups()
-                    short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
-                    self.call_from_thread(self._mount_room_msg, short_ts, nick, msg)
+                    short_ts = self._irc_log_clock(ts)
+                    items.append(("msg", short_ts, nick, msg, False))
                     continue
                 m = action_re.match(line)
                 if m:
                     ts, nick, action = m.groups()
-                    short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
-                    if any(w in action for w in ("joined", "quit", "left", "part")):
-                        self.call_from_thread(
-                            self._mount_room_system_msg, short_ts, f"{nick} {action}"
-                        )
-                    else:
-                        self.call_from_thread(
-                            self._mount_room_msg, short_ts, nick, action, True
-                        )
+                    short_ts = self._irc_log_clock(ts)
+                    if any(w in action.lower() for w in ("joined", "quit", "left", "part")):
+                        continue
+                    items.append(("msg", short_ts, nick, action, True))
         except Exception:
-            pass
+            items = [("sys", time.strftime("%H:%M"), f"— {self._room_channel} (no log) —")]
+        self.call_from_thread(self._replace_room_history, items)
         self._room_history_loaded_for = self._room_channel
 
     def _change_room_channel(self, channel: str) -> None:
@@ -2716,6 +3114,7 @@ Type anything else to send a message to the agent.
         if channel == old:
             self.notify(f"Already in {channel}", severity="information")
             return
+        self._stash_input_draft(f"room:{old}")
         sock = self._room_irc_sock
         if sock is not None:
             try:
@@ -2725,13 +3124,20 @@ Type anything else to send a message to the agent.
                 self._room_irc_sock = None
         self._room_channel = channel
         self._room_history_loaded_for = None
+        closed = getattr(self, "_closed_room_tabs", set())
+        closed.discard(channel)
+        if channel not in getattr(self, "_open_rooms", []):
+            self._open_rooms.append(channel)
         try:
-            input_bar = self.query_one("#input-bar", MessageInput)
-            input_bar._placeholder = f"Message {channel}...  (/room #chan)"
-        except NoMatches:
+            self._irc_rooms_mod().add_room(channel)
+        except Exception:
             pass
+        self._sync_tab_bar()
+        self._restore_input_draft(
+            f"room:{channel}",
+            f"Message {channel}...  (/room #chan)",
+        )
         self._update_room_header()
-        self._mount_room_system_msg(time.strftime("%H:%M"), f"Switched to {channel}")
         import threading
         threading.Thread(target=self._ensure_room_connected, args=(True,), daemon=True).start()
 
@@ -2762,19 +3168,42 @@ Type anything else to send a message to the agent.
                         if not m:
                             continue
                         ts, nick, msg = m.groups()
+                        if getattr(self, "_room_irc_sock", None) is not None:
+                            continue  # live socket already paints PRIVMSG
                         own = (getattr(self, "_room_irc_nick", None) or Config.OPERATOR_NAME or "").lower()
                         if nick.lower() == own:
                             continue
-                        short_ts = ts.split(" ")[1][:5] if " " in ts else ts[:5]
+                        short_ts = self._irc_log_clock(ts)
                         self.call_from_thread(self._mount_room_msg, short_ts, nick, msg)
             except Exception:
                 time.sleep(1)
+
+    def _replace_room_history(self, items: list) -> None:
+        """Clear the room pane and mount one channel's history (UI thread)."""
+        try:
+            room_scroll = self.query_one("#content-room", ContentScroll)
+        except NoMatches:
+            return
+        for child in list(room_scroll.children):
+            child.remove()
+        for it in items:
+            if it[0] == "sys":
+                room_scroll.mount(RoomSystemMessage(it[1], it[2]))
+            elif it[0] == "msg":
+                _kind, ts, nick, msg, is_action = it
+                human = self._is_operator_nick(nick)
+                shown = (Config.OPERATOR_NAME or "eric") if human else nick
+                room_scroll.mount(RoomMessage(ts, shown, msg, is_action, is_human=human))
+        room_scroll._follow_tail = True
+        room_scroll.scroll_end(animate=False)
 
     def _mount_room_msg(self, ts: str, nick: str, msg: str, is_action: bool = False) -> None:
         """Mount a room message widget (called from main thread via call_from_thread)."""
         try:
             room_scroll = self.query_one("#content-room", ContentScroll)
-            room_scroll.mount(RoomMessage(ts, nick, msg, is_action))
+            human = self._is_operator_nick(nick)
+            shown = (Config.OPERATOR_NAME or "eric") if human else nick
+            room_scroll.mount(RoomMessage(ts, shown, msg, is_action, is_human=human))
             if room_scroll._follow_tail:
                 room_scroll.scroll_end(animate=False)
         except NoMatches:
@@ -2966,6 +3395,10 @@ Type anything else to send a message to the agent.
         _head_refresh_counter = 0
         while not worker.is_cancelled:
             try:
+                if getattr(self, "_room_active", False):
+                    self.call_from_thread(self._update_room_header)
+                    time.sleep(2)
+                    continue
                 header = self.query_one("#agent-header", AgentHeader)
                 active = self._active_agent
                 agent_dir = Config.agent_home(active)
@@ -4271,39 +4704,21 @@ Type anything else to send a message to the agent.
     
     def _delay_control_from_tool_blob(self, text: str):
         """Derive [aa.control] delay line from tool_call payload text."""
-        import re
-        if not text or "delay" not in text:
-            return None
-        if not re.search(
-            r"commands/cmd_[^\s\"']*\.json|commands/cmd_\$\{?date|commands/cmd_\$\(",
-            text,
-        ):
-            return None
-        if not re.search(
-            r'["\']action["\']\s*:\s*["\']delay["\']|"action"\s*:\s*"delay"',
-            text,
-        ):
-            return None
-        sec = None
-        m = re.search(
-            r'["\']?seconds["\']?\s*:\s*["\']?(until_event|\d+(?:\.\d+)?)["\']?',
-            text,
-        )
-        if m:
-            sec = m.group(1)
-        txt = None
-        tm = re.search(r'["\']text["\']\s*:\s*["\']([^"\']{1,120})["\']', text)
-        if tm:
-            txt = tm.group(1)
-        if sec == "until_event":
-            detail = "until_event (standing by)"
-        elif sec is not None:
-            detail = f"{sec}s before next continue"
-        else:
-            detail = "delay registered"
-        if txt:
-            detail += f" — {txt}"
-        return f"[aa.control] delay: {detail}"
+        try:
+            from delay_control import delay_control_from_tool_blob as _d
+        except ImportError:
+            from tui.delay_control import delay_control_from_tool_blob as _d
+        return _d(text)
+
+    def _mount_tool_panel(self, panel: ToolCallPanel) -> None:
+        """Join consecutive tools into a ToolRunStack; speech/thinking break the run."""
+        content = self._content_scroll()
+        kids = list(content.children)
+        stack = kids[-1] if kids and isinstance(kids[-1], ToolRunStack) else None
+        if stack is None:
+            stack = ToolRunStack()
+            content.mount(stack)
+        stack.add_panel(panel)
 
     def _on_tool_call(self, update: dict) -> None:
         """Handle new tool call announcement (or refresh existing panel).
@@ -4337,7 +4752,7 @@ Type anything else to send a message to the agent.
             panel = ToolCallPanel(tool_id, title, kind, ts=self._event_ts_str())
             if tool_id:
                 self._tool_panels[tool_id] = panel
-            content.mount(panel)
+            self._mount_tool_panel(panel)
             cmd = self._tool_command_from_update(update)
             if cmd:
                 panel.set_command(cmd)
@@ -4441,8 +4856,8 @@ Type anything else to send a message to the agent.
             display_title = title or f"tool {tool_id[:8]}"
             panel = ToolCallPanel(tool_id, display_title, kind, ts=self._event_ts_str())
             self._tool_panels[tool_id] = panel
+            self._mount_tool_panel(panel)
             content = self._content_scroll()
-            content.mount(panel)
             content.refresh(layout=True)
 
         if kind:
@@ -4467,7 +4882,8 @@ Type anything else to send a message to the agent.
                         continue
                     self._seen_interjections.add(key)
                     panel._mounted_interjections.add(msg)
-                    content.mount(InterjectionBlock(msg), before=panel)
+                    anchor = panel._run_stack() or panel
+                    content.mount(InterjectionBlock(msg), before=anchor)
                     mounted_any = True
                 if mounted_any and self._following_tail():
                     content.refresh(layout=True)
@@ -4521,16 +4937,43 @@ Type anything else to send a message to the agent.
         content.mount(HookAnnotation(message))
         self._scroll_to_bottom()
 
+    def _is_echo_of_local_send(self, stream_text: str) -> bool:
+        sent = getattr(self, "_last_sent_text", None)
+        if not sent:
+            return False
+        a = sent.strip()
+        b = (stream_text or "").strip()
+        if a == b:
+            return True
+        from chat_widgets import operator_body
+        body = operator_body(b)
+        return bool(a) and a == body
+
     def _on_user_message_chunk(self, update: dict) -> None:
         """Handle user message display from updates stream."""
         text = self._update_text(update)
         if not text:
             return
 
-        # Skip messages we just sent from the TUI input bar (avoid double-display)
-        if hasattr(self, "_last_sent_text") and self._last_sent_text and text.strip() == self._last_sent_text.strip():
+        # Local echo is already on screen. If nothing else mounted since send,
+        # upgrade that widget with the stream text (envelope + context tag).
+        # If the agent has been working and the echo scrolled up, paint a
+        # second copy so you can see when the stream actually got it.
+        if self._is_echo_of_local_send(text):
+            echo = getattr(self, "_pending_echo", None)
+            content = self._content_scroll()
+            kids = list(content.children)
+            if echo is not None and kids and kids[-1] is echo:
+                from chat_widgets import telemetry_from_chunk
+                echo.mark_received(telemetry_from_chunk(text))
+                self._pending_echo = None
+                self._last_sent_text = None
+                if self._following_tail():
+                    content.refresh(layout=True)
+                self._scroll_to_bottom()
+                return
+            self._pending_echo = None
             self._last_sent_text = None
-            return
 
         # Harness <system-reminder> blobs: not operator turns — tool-like panel
         if is_system_reminder(text):
@@ -4538,6 +4981,16 @@ Type anything else to send a message to the agent.
             self._current_thinking = None
             content = self._content_scroll()
             content.mount(SystemReminderPanel(text))
+            if self._following_tail():
+                content.refresh(layout=True)
+            self._scroll_to_bottom()
+            return
+
+        from chat_widgets import is_control_user_line, system_alert_body
+        if is_control_user_line(text):
+            from chrome_widgets import SystemAlert
+            content = self._content_scroll()
+            content.mount(SystemAlert(system_alert_body(text), severity="info"))
             if self._following_tail():
                 content.refresh(layout=True)
             self._scroll_to_bottom()
@@ -4562,7 +5015,8 @@ Type anything else to send a message to the agent.
 
         content = self._content_scroll()
         content.mount(TurnSeparator(turn_num, trigger, ts_str))
-        content.mount(UserMessage(text))
+        from chat_widgets import make_user_message
+        content.mount(make_user_message(text))
         content.refresh(layout=True)
         self._scroll_to_bottom()
 

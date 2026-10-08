@@ -490,7 +490,8 @@ stage_launch() {
         unset SSL_CERT_FILE 2>/dev/null || true
     fi
 
-    setsid nohup python3 -u "$ASDAAAS" --agent "$agent" --cwd "$home" $extra_args >> "$log_file" 2>&1 &
+    # Close fd 8 in the child even if CLOEXEC failed.
+    setsid nohup python3 -u "$ASDAAAS" --agent "$agent" --cwd "$home" $extra_args 8>&- >> "$log_file" 2>&1 &
     local pid=$!
 
     # Wait 2 seconds and verify process is still alive
@@ -526,6 +527,8 @@ os.rename(raf + '.tmp', raf)
     # Export for later stages
     AGENT_PID=$pid
     AGENT_LOG="$log_file"
+    AGENT_ROSTER_SESSION="$session"
+    LAUNCH_TS=$(date +%s)
 }
 
 # ---- Stage 5: Backend started ----
@@ -571,8 +574,8 @@ stage_session() {
         fi
         echo "  OK   Claude session (created on first prompt)"
     else
-        if ! wait_for_log "$AGENT_LOG" "Session:" 120; then
-            echo "  FAIL: 'Session:' not seen in log after 120s"
+        if ! wait_for_log "$AGENT_LOG" '\[asdaaas\] Session: ' 120; then
+            echo "  FAIL: '[asdaaas] Session:' not seen in log after 120s"
             echo "        Possible causes: corrupted session, binary auth failure, network issue, large session load"
             show_log_tail "$AGENT_LOG"
             return 1
@@ -582,7 +585,19 @@ stage_session() {
             show_log_tail "$AGENT_LOG"
             return 1
         fi
-        echo "  OK   Session loaded"
+        local live_sid
+        live_sid=$(tail -n +"${LOG_START_LINE:-1}" "$AGENT_LOG" 2>/dev/null | grep '\[asdaaas\] Session: ' | tail -1 | awk '{print $NF}')
+        local roster_sid="${AGENT_ROSTER_SESSION:-}"
+        if [ -z "$roster_sid" ]; then
+            roster_sid=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent'].get('session',''))" 2>/dev/null || true)
+        fi
+        if [ -n "$roster_sid" ] && [ -n "$live_sid" ] && [ "$live_sid" != "$roster_sid" ]; then
+            echo "  FAIL: Session $live_sid != roster $roster_sid"
+            echo "        asdaaas must load the operator-chosen spine, not mint a replacement"
+            show_log_tail "$AGENT_LOG"
+            return 1
+        fi
+        echo "  OK   Session loaded ($live_sid)"
     fi
 }
 
@@ -615,26 +630,64 @@ stage_health() {
     local home
     home=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent']['home'])")
     local health_file="$home/asdaaas/health.json"
+    local roster_sid="${AGENT_ROSTER_SESSION:-}"
+    if [ -z "$roster_sid" ]; then
+        roster_sid=$(python3 -c "import json; print(json.load(open('$CONFIG'))['agents']['$agent'].get('session',''))" 2>/dev/null || true)
+    fi
 
-    # Wait up to 5s for health file to appear/update
+    # Wait for health.json that belongs to THIS launch (pid + ts), not stale.
     local elapsed=0
-    while [ $elapsed -lt 5 ]; do
+    while [ $elapsed -lt 15 ]; do
         if [ -f "$health_file" ]; then
-            local status
-            status=$(python3 -c "import json; print(json.load(open('$health_file')).get('status',''))" 2>/dev/null || true)
-            if [ "$status" = "ready" ] || [ "$status" = "idle" ] || [ "$status" = "working" ]; then
-                local tokens ctx
-                tokens=$(python3 -c "import json; print(json.load(open('$health_file')).get('totalTokens', '?'))" 2>/dev/null || echo "?")
-                ctx=$(python3 -c "import json; print(json.load(open('$health_file')).get('contextWindow', '?'))" 2>/dev/null || echo "?")
-                echo "  OK   Health: status=$status, tokens=$tokens, context=$ctx"
+            local report rc
+            set +e
+            report=$(LAUNCH_TS="${LAUNCH_TS:-0}" AGENT_PID="$AGENT_PID" ROSTER_SID="$roster_sid" HEALTH_FILE="$health_file" python3 - << 'PY'
+import json, os, sys
+path = os.environ["HEALTH_FILE"]
+want_pid = int(os.environ.get("AGENT_PID") or 0)
+launch = float(os.environ.get("LAUNCH_TS") or 0)
+roster = os.environ.get("ROSTER_SID") or ""
+try:
+    h = json.load(open(path))
+except Exception as e:
+    print(f"unreadable {e}")
+    sys.exit(2)
+pid = int(h.get("pid") or 0)
+ts = float(h.get("ts") or 0)
+status = h.get("status") or ""
+sid = h.get("session_id") or ""
+tokens = h.get("totalTokens", "?")
+ctx = h.get("contextWindow", "?")
+ok_status = status in ("ready", "idle", "working", "active")
+ok_pid = (want_pid == 0) or (pid == want_pid)
+ok_ts = (launch <= 0) or (ts >= launch - 2)
+if ok_status and ok_pid and ok_ts:
+    if roster and sid and sid != roster:
+        print(f"FAIL session={sid} != roster={roster} status={status} tokens={tokens} context={ctx} pid={pid}")
+        sys.exit(3)
+    print(f"OK status={status} tokens={tokens} context={ctx} session={sid} pid={pid}")
+    sys.exit(0)
+print(f"stale status={status} tokens={tokens} context={ctx} session={sid} pid={pid} want_pid={want_pid}")
+sys.exit(1)
+PY
+)
+            rc=$?
+            set -e
+            if [ $rc -eq 0 ]; then
+                echo "  OK   Health: $report"
                 return 0
+            fi
+            if [ $rc -eq 3 ]; then
+                echo "  FAIL: Health session mismatch: $report"
+                return 1
             fi
         fi
         sleep 1
         elapsed=$((elapsed + 1))
     done
 
-    echo "  WARN: Health file not updated (may be normal on first run)"
+    echo "  FAIL: Health file not from this launch (pid $AGENT_PID after ${LAUNCH_TS:-?})"
+    return 1
 }
 
 # ---- Run all stages for one agent ----
@@ -649,6 +702,32 @@ restart_one_agent() {
 
     stage_config "$agent" || { echo "  ABORT: Config validation failed"; write_startup_record "$agent" "fail" "config" "config validation failed"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=config ==="; return 1; }
     stage_clean "$agent"  # clean never fails fatally
+
+    # Serialize the whole stop+launch. If the lock is held by this agent's
+    # asdaaas (fd leak from an older flock), kill ihm and retry once.
+    _lock_cloexec() {
+        python3 -c "import fcntl,os; fcntl.fcntl(8, fcntl.F_SETFD, fcntl.FD_CLOEXEC)" 2>/dev/null || true
+    }
+    local lock="/tmp/restart_agent_${agent}.lock"
+    exec 8>"$lock"
+    _lock_cloexec
+    if ! flock -n 8; then
+        exec 8>&-
+        echo "  Lock busy — stopping existing $agent (may be sitting on the lock) and retrying"
+        stage_stop "$agent" || true
+        sleep 1
+        exec 8>"$lock"
+        _lock_cloexec
+        if ! flock -n 8; then
+            exec 8>&-
+            echo "  ABORT: another restart_agent.sh already running for $agent (lock $lock)"
+            write_startup_record "$agent" "fail" "lock" "concurrent restart_agent.sh"
+            echo "=== END ATTEMPT $attempt_ts outcome=fail stage=lock ==="
+            return 1
+        fi
+    fi
+    trap 'exec 8>&-' RETURN
+
     stage_stop "$agent"   || { echo "  ABORT: Could not stop existing process"; write_startup_record "$agent" "fail" "stop" "could not stop existing process"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=stop ==="; return 1; }
 
     # Post-stop cleanup: remove shutdown commands that stage_stop wrote.
@@ -678,6 +757,11 @@ restart_one_agent() {
 
     stage_launch "$agent" || { echo "  ABORT: Launch failed"; write_startup_record "$agent" "fail" "launch" "process died within 2s"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=launch ==="; return 1; }
 
+    _rollback_launch() {
+        echo "  Rolling back this launch (kill asdaaas.py --agent $agent)"
+        pkill -KILL -f "asdaaas.py --agent $agent" 2>/dev/null || true
+    }
+
     if [ "$NO_CHECK" = true ]; then
         echo "  (skipping startup checks -- --no-check)"
         write_startup_record "$agent" "ok" "" "no-check mode"
@@ -685,10 +769,10 @@ restart_one_agent() {
         return 0
     fi
 
-    stage_backend "$agent" || { echo "  ABORT: Backend failed to start"; write_startup_record "$agent" "fail" "backend" "Starting backend not seen in log"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=backend ==="; return 1; }
-    stage_session "$agent" || { echo "  ABORT: Session failed to load"; write_startup_record "$agent" "fail" "session" "Session: not seen in log"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=session ==="; return 1; }
-    stage_ready "$agent"   || { echo "  ABORT: Agent failed to reach ready state"; write_startup_record "$agent" "fail" "ready" "Ready. not seen in log"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=ready ==="; return 1; }
-    stage_health "$agent"  # health is a warning, not fatal
+    stage_backend "$agent" || { echo "  ABORT: Backend failed to start"; _rollback_launch; write_startup_record "$agent" "fail" "backend" "Starting backend not seen in log"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=backend ==="; return 1; }
+    stage_session "$agent" || { echo "  ABORT: Session failed to load"; _rollback_launch; write_startup_record "$agent" "fail" "session" "Session: not seen in log"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=session ==="; return 1; }
+    stage_ready "$agent"   || { echo "  ABORT: Agent failed to reach ready state"; _rollback_launch; write_startup_record "$agent" "fail" "ready" "Ready. not seen in log"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=ready ==="; return 1; }
+    stage_health "$agent"  || { echo "  ABORT: Health does not match this launch"; _rollback_launch; write_startup_record "$agent" "fail" "health" "health.json pid/session not this launch"; echo "=== END ATTEMPT $attempt_ts outcome=fail stage=health ==="; return 1; }
 
     write_startup_record "$agent" "ok" "" "all 8 stages passed"
     echo "  === $agent UP ==="

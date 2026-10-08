@@ -16,6 +16,7 @@ from full_stream import (  # noqa: E402
     HOT_NAME,
     agent_history_dir,
     resolve_history_dir,
+    check_archive_ts_monotonic,
     chunks_covering_ts,
     ensure_layout,
     find_live_updates,
@@ -188,6 +189,20 @@ def cmd_list(args):
     return 0
 
 
+def cmd_check_continuity(args):
+    home = _home(args)
+    fs = resolve_history_dir(home)
+    from aa_stream import check_history_continuity
+
+    result = check_history_continuity(fs)
+    if args.full:
+        result["archive_full"] = check_archive_ts_monotonic(fs)
+        if result["archive_full"].get("status") == "error":
+            result["status"] = "error"
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result.get("status") == "ok" else 2
+
+
 def cmd_verify(args):
     home = _home(args)
     fs = resolve_history_dir(home)
@@ -261,6 +276,17 @@ def main(argv=None):
 
     p = sub.add_parser("verify", help="Verify sealed chunks")
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser(
+        "check-continuity",
+        help="hot.jsonl ts monotonic; chunks with until_ts < from_ts. --full decompresses.",
+    )
+    p.add_argument(
+        "--full",
+        action="store_true",
+        help="Decompress every chunk and scan line ts (slow on fat archives)",
+    )
+    p.set_defaults(func=cmd_check_continuity)
 
     p = sub.add_parser("cat-range", help="Emit archived JSONL for ts range")
     p.add_argument("--t0", type=float, required=True)

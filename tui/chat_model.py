@@ -201,7 +201,13 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
                 state.tools[tid] = idx
             changes.append("tool_open_late")
         item = state.items[idx]
-        assert isinstance(item, ToolItem)
+        if not isinstance(item, ToolItem):
+            item = ToolItem(tool_id=tid, title=update.get("title") or f"tool {(tid or '?')[:8]}", kind=update.get("kind") or "", collapsed=True)
+            state.items.append(item)
+            idx = len(state.items) - 1
+            if tid:
+                state.tools[tid] = idx
+            changes.append("tool_open_recovered")
         if update.get("kind"):
             item.kind = update["kind"]
         if update.get("title"):
@@ -256,9 +262,16 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
             (e if isinstance(e, dict) else {"content": str(e), "status": "pending"})
             for e in entries
         ]
-        # Replace previous plan unit (one live plan panel)
-        state.items = [it for it in state.items if not isinstance(it, PlanItem)]
-        state.items.append(PlanItem(entries=entries))
+        new_plan = PlanItem(entries=entries)
+        idxs = [i for i, it in enumerate(state.items) if isinstance(it, PlanItem)]
+        if not idxs:
+            state.items.append(new_plan)
+        else:
+            state.items[idxs[0]] = new_plan
+            if len(idxs) > 1:
+                for i in reversed(idxs[1:]):
+                    del state.items[i]
+                _rebuild_indices(state)
         changes.append("plan")
         return changes
 
@@ -294,6 +307,22 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
 # Soft cap for dual-path model memory. TUI scrollback has its own widget cap;
 # keep ChatState in the same ballpark so long sessions do not retain multi-day text.
 DEFAULT_MAX_ITEMS = 500
+
+
+def _rebuild_indices(state: ChatState) -> None:
+    """Recompute tools map and open-stream indices after items were deleted."""
+    open_speech = state.items[state.open_speech_idx] if state.open_speech_idx is not None and 0 <= state.open_speech_idx < len(state.items) else None
+    open_think = state.items[state.open_thinking_idx] if state.open_thinking_idx is not None and 0 <= state.open_thinking_idx < len(state.items) else None
+    state.tools = {}
+    state.open_speech_idx = None
+    state.open_thinking_idx = None
+    for i, item in enumerate(state.items):
+        if isinstance(item, ToolItem) and item.tool_id:
+            state.tools[item.tool_id] = i
+        if open_speech is not None and item is open_speech:
+            state.open_speech_idx = i
+        if open_think is not None and item is open_think:
+            state.open_thinking_idx = i
 
 
 def prune_items(state: ChatState, max_items: int = DEFAULT_MAX_ITEMS) -> int:

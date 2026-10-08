@@ -181,12 +181,41 @@ class HotSpine:
         with self._lock:
             self._start_watcher_unlocked()
             self._start_reconcile_unlocked()
-        # Immediate catch-up
+        try:
+            from aa_stream import (
+                check_history_continuity,
+                maybe_prune_hot,
+                resolve_history_dir,
+            )
+
+            hist = resolve_history_dir(self.agent_home)
+            cont = check_history_continuity(hist)
+            if cont.get("status") == "error":
+                log.error(
+                    "HotSpine ts continuity error agent=%s hot=%s chunks=%s",
+                    self.agent_name,
+                    (cont.get("hot") or {}).get("status"),
+                    len(cont.get("chunk_inversions") or []),
+                )
+        except Exception as e:
+            log.warning("HotSpine continuity check: %s", e)
+            hist = None
+        # Immediate catch-up (append refuses ts < tip)
         try:
             self.sync_fn()
         except Exception as e:
             log.warning("HotSpine initial sync: %s", e)
         st = self.reconcile(catch_up=True)
+        try:
+            if hist is None:
+                from aa_stream import maybe_prune_hot, resolve_history_dir
+
+                hist = resolve_history_dir(self.agent_home)
+            from aa_stream import maybe_prune_hot
+
+            maybe_prune_hot(hist, agent=self.agent_name)
+        except Exception as e:
+            log.warning("HotSpine prune: %s", e)
         log.info(
             "HotSpine start agent=%s backend=%s path=%s behind=%s",
             self.agent_name,

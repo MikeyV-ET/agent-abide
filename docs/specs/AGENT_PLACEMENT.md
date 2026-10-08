@@ -33,7 +33,7 @@ The hard problem is **sync**, not travel:
 | V3 continuity | Who has which epoch; converge |
 | Native grok/claude/codex journals | **Do not sync.** Disposable per replica. Carry/compact-prior is how a replica that was behind infers. |
 
-Token generation is still one-writer at a time (two groks on one V1 will fork). That is an **election on synced state**, not “es only exists on one host.” Because every machine already has a current replica, switching who infers is cheap — no 3.4G `session/load`, no packing ceremony if home is already caught up.
+Token generation is still one-writer at a time (two groks on one V1 will fork). **Which replica is inferring is under the agent’s control** — same class of decision as gaze and delay, not a hidden scheduler. Because every machine already has a current replica, switching seat is cheap: no 3.4G `session/load`, no packing ceremony if home is already caught up.
 
 Thiasai already has the collab pattern for documents (Yjs / change-log ladder). Agent-as-peer on that kind of store is the same idea with V1 as the shared tape.
 

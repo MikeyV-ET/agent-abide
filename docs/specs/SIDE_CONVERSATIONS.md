@@ -21,13 +21,25 @@ Eric’s pattern: talk to a **naive** agent for a particular analysis, then have
 | `memory_query` | Packs **the caller’s** record. Cross-agent is “message them,” the opposite of review. |
 | Grok `spawn_subagent` | Child of one binary session. Eric does not sit with it in a TUI tab the same way. |
 
+## Scratch does not need memory_service
+
+No `memory_query`, no packs, no workers. The naive seat is a short V1. Squiggy reviews **the transcript** (speech.jsonl / a `v1_transcript` dump). That is the handoff.
+
+## Why do it in this TUI
+
+Once the scratch agent is a real asdaaas seat:
+
+- **Review** — simple: Squiggy is given the tape (path, or a doorbell with the transcript). Not embodiment memory.
+- **Clarify** — scratch and Squiggy already have **localmail**. A point of confusion is an email, not a new product.
+- **Three-way** — Eric, scratch, and Squiggy join a **channel** (TUI room / IRC). Rooms already exist (`irc_rooms.json`, `[#]` tabs). The missing piece is treating a scratch agent as a first-class nick in that room.
+
+Doing the naive analysis in a throwaway grok.com chat loses those two for free.
+
 ## What is not baked in
 
-- Spawn from TUI: name, model, empty epoch, tab — **scratch**, not a forever citizen.
-- **Handoff**: pack the side V1 (token-budgeted) into Squiggy’s turn, painted as “conversation with *Analyst-…*,” not as Squiggy’s own speech.
-- Squiggy may then talk with Eric at the mill layer, with the tape in context.
-
-Live `updates.jsonl` of the side can stay tiny (aa history + light tip). The naive organ is disposable; the tape is what Squiggy keeps.
+- Spawn scratch from TUI: name, model, empty epoch, tab. No memory MCP.
+- **Transcript review**: one action that puts that V1 in front of Squiggy (doorbell, open-as-doc, or “review this tab”).
+- Invite scratch + Squiggy + Eric into one room when the review wants a three-way.
 
 ## Why not “just another Squiggy tab”
 

@@ -99,7 +99,7 @@ Claude/Codex: find that backend’s compact artifact (or first-turn inject of an
 | **Codex** | existing thread id | new thread / new rollout file | first turn on the thread |
 | **Next** | whatever that binary’s resume handle is | mint | first-turn inject |
 
-Native files stay **sources** for V2 mappers (already the L1/L2 contract). They are not the continuity SoR.
+Native files stay **sources** for V2 mappers (already the L1/L2 contract). They are not the continuity SoR. Live `updates.jsonl` still **moves** with an instantiation (a seat needs a hot tip); L1 chunks (10–30MB ≈ 300MB prior) are why that tip can stay small without losing the agent. See [`../AGENT_PLACEMENT.md`](../AGENT_PLACEMENT.md).
 
 ---
 

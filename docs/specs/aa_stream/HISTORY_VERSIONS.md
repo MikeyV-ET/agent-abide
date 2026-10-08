@@ -2,6 +2,8 @@
 
 *2026-09-10. Codify after continuity + USB audits. Eric: “codify what versions we want to construct.”*
 
+**2026-10-08:** backend session ids are **epochs**, not a life. Carry across discrete sessions: [`SESSION_EPOCHS.md`](./SESSION_EPOCHS.md). V1/V2/V3 stay the durable planes.
+
 ## Do we have enough to decide?
 
 **Yes.** Evidence in hand:

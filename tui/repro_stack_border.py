@@ -33,9 +33,9 @@ class Line(Static):
 class Stack(Vertical):
     DEFAULT_CSS = """
     Stack {
-        width: 80%;
+        width: 100%;
         height: auto;
-        margin: 1 2 1 1;
+        margin: 1 1 1 1;
         background: #f7f7f8;
     }
     """

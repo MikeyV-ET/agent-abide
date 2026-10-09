@@ -192,14 +192,16 @@ class Repro(App):
 
     def on_mount(self) -> None:
         stack = self.query_one(ToolRunStack)
-        # Knob 2: real stack chrome, dummy lines (no ToolCallPanel.render)
-        try:
-            body = stack.query_one(".tool-run-body")
-            for i, title in enumerate(TOOL_LINES):
-                prefix = "▸ " if i == 0 else "  "
-                body.mount(Line(f"{prefix}✓  {title}  id:demo{i}  ▸"))
-        except Exception as e:
-            self.query_one("#banner").update(f"knob2 mount fail {e}")
+
+        class PlainPanel(ToolCallPanel):
+            def render(self):
+                return Text(f"✓  {self.tool_title}  id:{self.tool_id}  ▸")
+
+        for i, title in enumerate(TOOL_LINES):
+            pan = PlainPanel(f"demo{i}", title, kind="read")
+            pan.density = "one"
+            pan.set_status("completed")
+            stack.add_panel(pan)
         stack.styles.width = "100%"
         self._apply_stack_border(self.border_kind)
         self._paint_banner()

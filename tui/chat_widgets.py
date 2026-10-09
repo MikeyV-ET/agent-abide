@@ -544,7 +544,22 @@ class ToolRunStack(Horizontal):
         overflow: hidden;
         margin: 0 2 1 1;
         align: left top;
+        padding: 0;
+        border: none;
+    }
+    ToolRunStack > .tool-run-frame {
+        width: 1fr;
+        height: auto;
+        overflow: hidden;
         padding: 0 1;
+    }
+    ToolRunStack > .spill-pad {
+        width: 1;
+        height: 1fr;
+        min-width: 1;
+        padding: 0;
+        margin: 0;
+        border: none;
     }
     ToolRunStack ToolCallPanel {
         width: 100%;
@@ -579,20 +594,35 @@ class ToolRunStack(Horizontal):
 
     def compose(self):
         self._gutter = ToolRunGutter(self)
-        yield self._gutter
-        self._body = Vertical(classes="tool-run-body")
         self._overflow = ToolRunOverflow(self)
-        with self._body:
-            yield self._overflow
+        self._body = Vertical(classes="tool-run-body")
+        # Frame holds gutter+body and owns the square border. spill-pad is a
+        # sibling so it sits OUTSIDE ┐│┘ and covers xterm.js raster spill.
+        with Horizontal(classes="tool-run-frame"):
+            yield self._gutter
+            yield self._body
+        yield Static(" ", classes="spill-pad")
 
     def on_mount(self) -> None:
+        from textual.color import Color as TextualColor
+        self.styles.border = "none"
+        self.styles.padding = (0, 0)
         try:
-            from textual.color import Color as TextualColor
-            # square corners: round ╮ spills 1–2 cells on xterm.js (Linux and Windows)
-            self.styles.border = ("solid", TextualColor.parse(Theme.DARK3))
+            if self._overflow not in self._body.children:
+                self._body.mount(self._overflow)
         except Exception:
-            self.styles.border = ("solid", "gray")
-        self.styles.padding = (0, 1)
+            pass
+        try:
+            color = TextualColor.parse(Theme.DARK3)
+            frame = self.query_one(".tool-run-frame")
+            frame.styles.border = ("solid", color)
+            frame.styles.padding = (0, 1)
+        except Exception:
+            pass
+        try:
+            self.query_one(".spill-pad").styles.background = Theme.BG
+        except Exception:
+            pass
         self._flush_pending()
 
     def panel_count(self) -> int:

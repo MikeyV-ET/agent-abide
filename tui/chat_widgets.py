@@ -568,14 +568,6 @@ class ToolRunStack(Horizontal):
         overflow: hidden;
         padding: 0 1;
     }
-    ToolRunStack > .spill-pad {
-        width: 1;
-        height: 1fr;
-        min-width: 1;
-        padding: 0;
-        margin: 0;
-        border: none;
-    }
     ToolRunStack ToolCallPanel {
         width: 100%;
         height: auto;
@@ -611,12 +603,10 @@ class ToolRunStack(Horizontal):
         self._gutter = ToolRunGutter(self)
         self._overflow = ToolRunOverflow(self)
         self._body = Vertical(classes="tool-run-body")
-        # Frame holds gutter+body and owns the square border. spill-pad is a
-        # sibling so it sits OUTSIDE ┐│┘ and covers xterm.js raster spill.
+        # Frame holds gutter+body and owns the square border.
         with Horizontal(classes="tool-run-frame"):
             yield self._gutter
             yield self._body
-        yield Static(" ", classes="spill-pad")
 
     def on_mount(self) -> None:
         from textual.color import Color as TextualColor
@@ -632,10 +622,6 @@ class ToolRunStack(Horizontal):
             frame = self.query_one(".tool-run-frame")
             frame.styles.border = ("solid", color)
             frame.styles.padding = (0, 1)
-        except Exception:
-            pass
-        try:
-            self.query_one(".spill-pad").styles.background = Theme.BG
         except Exception:
             pass
         self._flush_pending()

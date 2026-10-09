@@ -618,10 +618,11 @@ class ToolRunStack(Horizontal):
         except Exception:
             pass
         try:
+            from textual.color import Color as TextualColor
             frame = self.query_one(".tool-run-frame")
-            # no side border: vkey/ascii/solid all painted extra | on Windows glass
-            frame.styles.border = "none"
-            frame.styles.padding = (0, 0)
+            # Recreate the extra-bar: original solid box (┌┐│┘)
+            frame.styles.border = ("solid", TextualColor.parse("#a1a1aa"))
+            frame.styles.padding = (0, 1)
         except Exception:
             pass
         self._flush_pending()

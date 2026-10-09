@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Minimal Textual border repro for xterm.js / Electron.
+"""Minimal Textual/xterm.js repro: mixed row types + 1-cell scrollbar.
 
-One 80%-wide Vertical, eight one-line rows, a border. Nothing else.
 Keys: s solid, a ascii, v vkey, n none, q quit.
 """
 from __future__ import annotations
@@ -14,7 +13,7 @@ from textual.widgets import Static
 from textual.color import Color
 
 
-LINES = [
+TOOL_LINES = [
     "Read health.json",
     "Read startup_history.json",
     "List doorbells",
@@ -23,7 +22,7 @@ LINES = [
     "Read conversation.jsonl",
     "List interjections",
     "Execute python3 -c import",
-] + [f"pad line {i}" for i in range(40)]
+]
 
 
 class Line(Static):
@@ -32,6 +31,65 @@ class Line(Static):
 
 class Gutter(Static):
     DEFAULT_CSS = "Gutter { width: 3; height: auto; }"
+
+
+class AgentBubble(Static):
+    DEFAULT_CSS = """
+    AgentBubble {
+        width: 70%;
+        height: auto;
+        margin: 1 8 1 1;
+        padding: 0 1;
+        color: #1a1a1e;
+        background: #f5f3ff;
+    }
+    """
+
+    def on_mount(self) -> None:
+        self.styles.border = ("round", Color.parse("#7c3aed"))
+
+
+class UserBubble(Static):
+    DEFAULT_CSS = """
+    UserBubble {
+        width: 70%;
+        height: auto;
+        margin: 1 2 1 8;
+        padding: 0 1;
+        align: right middle;
+        color: #1a1a1e;
+        background: #fff7ed;
+    }
+    """
+
+    def on_mount(self) -> None:
+        self.styles.border = ("round", Color.parse("#ea580c"))
+
+
+class ContinueLine(Static):
+    DEFAULT_CSS = """
+    ContinueLine {
+        width: 100%;
+        height: auto;
+        margin: 1 1;
+        color: #2563eb;
+    }
+    """
+
+
+class ExpandedTool(Static):
+    DEFAULT_CSS = """
+    ExpandedTool {
+        width: 100%;
+        height: auto;
+        margin: 0 1 1 1;
+        padding: 0 1;
+        color: #1a1a1e;
+    }
+    """
+
+    def on_mount(self) -> None:
+        self.styles.border = ("solid", Color.parse("#a1a1aa"))
 
 
 class Stack(Horizontal):
@@ -48,7 +106,7 @@ class Stack(Horizontal):
     def compose(self) -> ComposeResult:
         yield Gutter("  8")
         with Vertical(classes="body"):
-            for i, title in enumerate(LINES):
+            for i, title in enumerate(TOOL_LINES):
                 prefix = "▸ " if i == 0 else "  "
                 yield Line(f"{prefix}✓  {title}  id:demo{i}  ▸")
 
@@ -84,7 +142,21 @@ class Repro(App):
     def compose(self) -> ComposeResult:
         yield Static("", id="banner")
         with VerticalScroll():
+            yield ContinueLine(
+                "T4 continue ────  [continue id=demo] Your turn ended."
+            )
+            yield AgentBubble("Overnight continue. I'll check whether this is a restart.")
             yield Stack()
+            yield AgentBubble("Morning restart. Inboxes empty. Standing by.")
+            yield UserBubble("@ eric (tui) Smoke test: what is 20 times 19?")
+            yield ExpandedTool(
+                "▶ Execute python3 …\n"
+                "  click to expand\n"
+                "  output: 380"
+            )
+            # keep the view overflowing so the 1-cell scrollbar stays
+            for i in range(24):
+                yield Line(f"  pad line {i}")
 
     def on_mount(self) -> None:
         self.query_one(Stack).apply_border(self.border_kind)
@@ -92,7 +164,7 @@ class Repro(App):
 
     def _paint_banner(self) -> None:
         self.query_one("#banner").update(
-            f"repro_stack_border  border={self.border_kind}  "
+            f"repro_stack_border  stack={self.border_kind}  "
             f"keys: s=solid a=ascii v=vkey n=none q=quit"
         )
 

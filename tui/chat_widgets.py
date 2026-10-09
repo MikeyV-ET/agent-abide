@@ -539,10 +539,10 @@ class ToolRunStack(Horizontal):
 
     DEFAULT_CSS = """
     ToolRunStack {
-        width: 100%;
+        width: 80%;
         height: auto;
         overflow: hidden;
-        margin: 0 3 1 1;
+        margin: 0 2 1 1;
         align: left top;
         padding: 0 1;
     }

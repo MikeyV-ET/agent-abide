@@ -5231,7 +5231,7 @@ Type anything else to send a message to the agent.
                 fold_tui_events_oldest_first,
                 count_meaningful_paint,
             )
-            from paint_mount import widget_for_item
+            from paint_mount import mount_items
 
             batch_state = ChatState()
             if lines:
@@ -5261,13 +5261,7 @@ Type anything else to send a message to the agent.
                 if isinstance(it, _TI) and it.tool_id:
                     cs.tools[it.tool_id] = i
 
-            widgets = []
-            for it in items:
-                w = widget_for_item(it)
-                if w is not None:
-                    widgets.append(w)
-
-            if not widgets:
+            if not items:
                 self.notify(
                     f"History: 0 widgets (lines={len(lines)} paint={c})",
                     severity="warning",
@@ -5277,24 +5271,14 @@ Type anything else to send a message to the agent.
 
             content._follow_tail = False
             anchor = first_child
-            n_tools = sum(1 for w in widgets if getattr(w, "tool_id", None))
-            self._debug(f"PAGEUP_MOUNT n={len(widgets)} tools={n_tools}")
+            n_tools = sum(1 for it in items if isinstance(it, _TI))
+            self._debug(f"PAGEUP_MOUNT items={len(items)} tools={n_tools}")
             try:
-                if anchor is not None:
-                    content.mount(*widgets, before=anchor)
-                else:
-                    for w in widgets:
-                        content.mount(w)
+                n = mount_items(content, items, before=anchor)
             except Exception as e:
                 self.notify(f"Mount error: {e}", severity="error")
-                for w in widgets:
-                    try:
-                        if anchor is not None:
-                            content.mount(w, before=anchor)
-                        else:
-                            content.mount(w)
-                    except Exception:
-                        pass
+                n = 0
+            widgets = list(range(n))  # count only, for notify below
 
             def _restore_anchor(a=anchor) -> None:
                 try:
@@ -5312,7 +5296,7 @@ Type anything else to send a message to the agent.
             else:
                 try:
                     self.notify(
-                        f"History +{len(widgets)} ({n_tools} tools)",
+                        f"History +{n} ({n_tools} tools)",
                         severity="information",
                         timeout=2,
                     )

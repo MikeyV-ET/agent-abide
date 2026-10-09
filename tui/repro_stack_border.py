@@ -11,6 +11,43 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 from textual.color import Color
+from rich.text import Text
+
+
+def painted_bubble(inner: str, *, is_human: bool, total: int, border: str, fill: str) -> Text:
+    """Same recipe as nav_widgets.layout_painted_bubble: ╭─╮ and fill every cell."""
+    from rich.console import Console
+    total = total if total >= 40 else 80
+    gutter = max(4, total * 15 // 100)
+    edge = 1
+    col = max(12, total - gutter - edge)
+    inner_col = max(8, col - 2)
+    console = Console(width=inner_col, force_terminal=True, color_system="truecolor")
+    body = Text(inner)
+    wrapped = [ln.copy() for ln in (body.wrap(console, inner_col) or [Text()])]
+    content_w = min(inner_col, max(1, max((ln.cell_len for ln in wrapped), default=1)))
+    box_w = content_w + 2
+    left = max(0, total - box_w - edge) if is_human else edge
+    fill_style = f"on {fill}"
+    out = Text()
+    out.append(" " * left)
+    out.append("╭" + "─" * content_w + "╮", style=border)
+    for ln in wrapped:
+        out.append("\n")
+        out.append(" " * left)
+        out.append("│", style=border)
+        piece = ln.copy()
+        padn = max(0, content_w - piece.cell_len)
+        piece.stylize(fill_style)
+        out.append(piece)
+        if padn:
+            out.append(" " * padn, style=fill_style)
+        out.append("│", style=border)
+    out.append("\n")
+    out.append(" " * left)
+    out.append("╰" + "─" * content_w + "╯", style=border)
+    return out
+
 
 
 TOOL_LINES = [
@@ -34,36 +71,27 @@ class Gutter(Static):
 
 
 class AgentBubble(Static):
-    DEFAULT_CSS = """
-    AgentBubble {
-        width: 70%;
-        height: auto;
-        margin: 1 8 1 1;
-        padding: 0 1;
-        color: #1a1a1e;
-        background: #f5f3ff;
-    }
-    """
+    DEFAULT_CSS = "AgentBubble { width: 100%; height: auto; margin: 1 0; }"
 
-    def on_mount(self) -> None:
-        self.styles.border = ("round", Color.parse("#7c3aed"))
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self._speech = text
+
+    def render(self) -> Text:
+        w = int(self.size.width or 80)
+        return painted_bubble(self._speech, is_human=False, total=w, border="#7c3aed", fill="#f5f3ff")
 
 
 class UserBubble(Static):
-    DEFAULT_CSS = """
-    UserBubble {
-        width: 70%;
-        height: auto;
-        margin: 1 2 1 8;
-        padding: 0 1;
-        align: right middle;
-        color: #1a1a1e;
-        background: #fff7ed;
-    }
-    """
+    DEFAULT_CSS = "UserBubble { width: 100%; height: auto; margin: 1 0; }"
 
-    def on_mount(self) -> None:
-        self.styles.border = ("round", Color.parse("#ea580c"))
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self._speech = text
+
+    def render(self) -> Text:
+        w = int(self.size.width or 80)
+        return painted_bubble(self._speech, is_human=True, total=w, border="#ea580c", fill="#fff7ed")
 
 
 class ContinueLine(Static):

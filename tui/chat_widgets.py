@@ -543,7 +543,7 @@ class ToolRunStack(Horizontal):
         height: auto;
         margin: 0 2 1 1;
         align: left top;
-        padding: 0;
+        padding: 0 1;
     }
     ToolRunStack ToolCallPanel {
         width: 100%;
@@ -590,7 +590,7 @@ class ToolRunStack(Horizontal):
             self.styles.border = ("round", TextualColor.parse(Theme.DARK3))
         except Exception:
             self.styles.border = ("round", "gray")
-        self.styles.padding = (0, 0, 0, 0)
+        self.styles.padding = (0, 1)
         self._flush_pending()
 
     def panel_count(self) -> int:

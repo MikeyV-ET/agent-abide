@@ -588,10 +588,10 @@ class ToolRunStack(Horizontal):
     def on_mount(self) -> None:
         try:
             from textual.color import Color as TextualColor
-            # experiment: no CSS border — is the extra │ this border spilling?
-            self.styles.border = ("none", TextualColor.parse(Theme.DARK3))
+            # square corners: round ╮ spills 1–2 cells on xterm.js (Linux and Windows)
+            self.styles.border = ("solid", TextualColor.parse(Theme.DARK3))
         except Exception:
-            self.styles.border = "none"
+            self.styles.border = ("solid", "gray")
         self.styles.padding = (0, 1)
         self._flush_pending()
 

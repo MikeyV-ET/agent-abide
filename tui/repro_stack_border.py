@@ -192,25 +192,31 @@ class Repro(App):
 
     def on_mount(self) -> None:
         stack = self.query_one(ToolRunStack)
-        for i, title in enumerate(TOOL_LINES):
-            pan = ToolCallPanel(f"demo{i}", title, kind="read")
-            pan.density = "one"
-            pan.set_status("completed")
-            stack.add_panel(pan)
+        # Knob 2: real stack chrome, dummy lines (no ToolCallPanel.render)
+        try:
+            body = stack.query_one(".tool-run-body")
+            for i, title in enumerate(TOOL_LINES):
+                prefix = "▸ " if i == 0 else "  "
+                body.mount(Line(f"{prefix}✓  {title}  id:demo{i}  ▸"))
+        except Exception as e:
+            self.query_one("#banner").update(f"knob2 mount fail {e}")
+        stack.styles.width = "100%"
         self._apply_stack_border(self.border_kind)
         self._paint_banner()
 
     def _apply_stack_border(self, kind: str) -> None:
+        # Knob 1: clone was clean with border on the OUTER horizontal.
         stack = self.query_one(ToolRunStack)
         try:
             frame = stack.query_one(".tool-run-frame")
-        except Exception:
-            frame = stack
-        if kind == "none":
             frame.styles.border = "none"
+        except Exception:
+            pass
+        if kind == "none":
+            stack.styles.border = "none"
         else:
             from textual.color import Color as C
-            frame.styles.border = (kind, C.parse("#a1a1aa"))
+            stack.styles.border = (kind, C.parse("#a1a1aa"))
 
     def _paint_banner(self) -> None:
         self.query_one("#banner").update(

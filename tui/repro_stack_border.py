@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 
 from textual.app import App, ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 from textual.color import Color
 
@@ -30,7 +30,11 @@ class Line(Static):
     DEFAULT_CSS = "Line { height: 1; width: 100%; }"
 
 
-class Stack(Vertical):
+class Gutter(Static):
+    DEFAULT_CSS = "Gutter { width: 3; height: auto; }"
+
+
+class Stack(Horizontal):
     DEFAULT_CSS = """
     Stack {
         width: 100%;
@@ -38,12 +42,15 @@ class Stack(Vertical):
         margin: 1 1 1 1;
         background: #f7f7f8;
     }
+    Stack > .body { width: 1fr; height: auto; }
     """
 
     def compose(self) -> ComposeResult:
-        for i, title in enumerate(LINES):
-            prefix = "▸ " if i == 0 else "  "
-            yield Line(f"{prefix}✓  {title}  id:demo{i}  ▸")
+        yield Gutter("  8")
+        with Vertical(classes="body"):
+            for i, title in enumerate(LINES):
+                prefix = "▸ " if i == 0 else "  "
+                yield Line(f"{prefix}✓  {title}  id:demo{i}  ▸")
 
     def apply_border(self, kind: str) -> None:
         if kind == "none":

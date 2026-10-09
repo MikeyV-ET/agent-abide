@@ -452,7 +452,13 @@ class ToolCallPanel(Static):
             if ref:
                 line.append(f"  {ref}", style=Theme.DARK4)
             line.append("  ▸", style=Theme.DARK4)
-            fill_line_to_width(line, self._one_line_inner_width(), Theme.DARK1)
+            inner = self._one_line_inner_width()
+            if inner < 40:
+                try:
+                    inner = max(40, int(self.app.size.width * 0.78) - 6)
+                except Exception:
+                    inner = 80
+            fill_line_to_width(line, inner, Theme.DARK1)
             return line
 
         if self.density != "full":

@@ -356,6 +356,32 @@ class ToolCallPanel(Static):
             return f"{kind_icon} {label} · {ref} {status_icon}"
         return f"{kind_icon} {label} {status_icon}"
 
+    def _one_line_inner_width(self) -> int:
+        try:
+            w = int(self.size.width)
+            if w > 1:
+                return w
+        except Exception:
+            pass
+        stack = self._run_stack()
+        if stack is not None:
+            try:
+                sw = int(stack.size.width)
+                if sw > 8:
+                    return max(1, sw - 5)
+            except Exception:
+                pass
+        return 0
+
+    def on_mount(self) -> None:
+        def _again():
+            if self.density == "one":
+                self.refresh()
+        try:
+            self.call_after_refresh(_again)
+        except Exception:
+            pass
+
     def on_resize(self, event=None) -> None:
         if self.density == "one":
             self.refresh()
@@ -417,12 +443,7 @@ class ToolCallPanel(Static):
             if ref:
                 line.append(f"  {ref}", style=Theme.DARK4)
             line.append("  ▸", style=Theme.DARK4)
-            inner = 0
-            try:
-                inner = int(self.size.width)
-            except Exception:
-                inner = 0
-            fill_line_to_width(line, inner, Theme.DARK1)
+            fill_line_to_width(line, self._one_line_inner_width(), Theme.DARK1)
             return line
 
         if self.density != "full":

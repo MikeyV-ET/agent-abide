@@ -25,21 +25,6 @@ def operator_body(text: str) -> str:
     return t.strip()
 
 
-def fill_line_to_width(line: Text, inner: int, fill: str) -> Text:
-    """Paint remaining cells so the compositor cannot skip-to-border.
-
-    Collapsed tool one-liners were a short string then a cursor skip to
-    the round-box │. Windows xterm indexed that skip wrong; speech
-    bubbles (every cell has bg) never did. Expanded tools are dense.
-    """
-    if inner <= 0:
-        return line
-    padn = max(0, int(inner) - line.cell_len)
-    if padn:
-        line.append(" " * padn, style=f"on {fill}")
-    return line
-
-
 def telemetry_from_chunk(text: str) -> str:
     m = re.search(r"\[Context left[^\]]*\]", text or "")
     if not m:
@@ -356,45 +341,6 @@ class ToolCallPanel(Static):
             return f"{kind_icon} {label} · {ref} {status_icon}"
         return f"{kind_icon} {label} {status_icon}"
 
-    def _one_line_inner_width(self) -> int:
-        """Width of the stack body, not the short one-liner content box."""
-        stack = self._run_stack()
-        if stack is not None:
-            body = getattr(stack, "_body", None)
-            if body is not None:
-                try:
-                    w = int(body.size.width)
-                    if w > 1:
-                        return w
-                except Exception:
-                    pass
-            try:
-                sw = int(stack.size.width)
-                if sw > 8:
-                    return max(1, sw - 7)
-            except Exception:
-                pass
-        try:
-            w = int(self.size.width)
-            if w > 1:
-                return w
-        except Exception:
-            pass
-        return 0
-
-    def on_mount(self) -> None:
-        def _again():
-            if self.density == "one":
-                self.refresh()
-        try:
-            self.call_after_refresh(_again)
-        except Exception:
-            pass
-
-    def on_resize(self, event=None) -> None:
-        if self.density == "one":
-            self.refresh()
-
     def render(self):
         if self.tool_status == "completed":
             status_icon = "✓"
@@ -452,13 +398,6 @@ class ToolCallPanel(Static):
             if ref:
                 line.append(f"  {ref}", style=Theme.DARK4)
             line.append("  ▸", style=Theme.DARK4)
-            # Widget size is the short content box; use the app band so we
-            # actually paint to the round-border │ instead of skipping.
-            try:
-                inner = max(40, int(self.app.size.width * 0.78) - 6)
-            except Exception:
-                inner = self._one_line_inner_width() or 80
-            fill_line_to_width(line, inner, Theme.DARK1)
             return line
 
         if self.density != "full":
@@ -604,7 +543,7 @@ class ToolRunStack(Horizontal):
         height: auto;
         margin: 0 2 1 1;
         align: left top;
-        padding: 0 1;
+        padding: 0;
     }
     ToolRunStack ToolCallPanel {
         width: 100%;
@@ -651,7 +590,7 @@ class ToolRunStack(Horizontal):
             self.styles.border = ("round", TextualColor.parse(Theme.DARK3))
         except Exception:
             self.styles.border = ("round", "gray")
-        self.styles.padding = (0, 1)
+        self.styles.padding = (0, 0, 0, 0)
         self._flush_pending()
 
     def panel_count(self) -> int:

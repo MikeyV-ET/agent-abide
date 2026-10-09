@@ -357,20 +357,29 @@ class ToolCallPanel(Static):
         return f"{kind_icon} {label} {status_icon}"
 
     def _one_line_inner_width(self) -> int:
+        """Width of the stack body, not the short one-liner content box."""
+        stack = self._run_stack()
+        if stack is not None:
+            body = getattr(stack, "_body", None)
+            if body is not None:
+                try:
+                    w = int(body.size.width)
+                    if w > 1:
+                        return w
+                except Exception:
+                    pass
+            try:
+                sw = int(stack.size.width)
+                if sw > 8:
+                    return max(1, sw - 7)
+            except Exception:
+                pass
         try:
             w = int(self.size.width)
             if w > 1:
                 return w
         except Exception:
             pass
-        stack = self._run_stack()
-        if stack is not None:
-            try:
-                sw = int(stack.size.width)
-                if sw > 8:
-                    return max(1, sw - 5)
-            except Exception:
-                pass
         return 0
 
     def on_mount(self) -> None:

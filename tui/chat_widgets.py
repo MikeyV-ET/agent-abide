@@ -398,6 +398,21 @@ class ToolCallPanel(Static):
             if ref:
                 line.append(f"  {ref}", style=Theme.DARK4)
             line.append("  ▸", style=Theme.DARK4)
+            # Paint every cell of the inner width so xterm.js cannot keep
+            # stale glyphs (blue e/i) in the right-hand padding.
+            width = int(self.size.width or 0)
+            if width < 4:
+                try:
+                    width = int(self.parent.size.width or 0)
+                except Exception:
+                    width = 0
+            if width < 4:
+                width = 72
+            if line.cell_len > width:
+                line.truncate(width, overflow="crop")
+            padn = width - line.cell_len
+            if padn > 0:
+                line.append(" " * padn)
             return line
 
         if self.density != "full":

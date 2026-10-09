@@ -618,11 +618,10 @@ class ToolRunStack(Horizontal):
         except Exception:
             pass
         try:
-            color = TextualColor.parse(Theme.DARK3)
             frame = self.query_one(".tool-run-frame")
-            # vkey: ▏/▕ half-blocks, no ┐/┘ and no ascii | to overflow on ClearType
-            frame.styles.border = ("vkey", color)
-            frame.styles.padding = (0, 1)
+            # no side border: vkey/ascii/solid all painted extra | on Windows glass
+            frame.styles.border = "none"
+            frame.styles.padding = (0, 0)
         except Exception:
             pass
         self._flush_pending()

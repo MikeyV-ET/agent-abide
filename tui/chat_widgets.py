@@ -25,6 +25,21 @@ def operator_body(text: str) -> str:
     return t.strip()
 
 
+def fill_line_to_width(line: Text, inner: int, fill: str) -> Text:
+    """Paint remaining cells so the compositor cannot skip-to-border.
+
+    Collapsed tool one-liners were a short string then a cursor skip to
+    the round-box │. Windows xterm indexed that skip wrong; speech
+    bubbles (every cell has bg) never did. Expanded tools are dense.
+    """
+    if inner <= 0:
+        return line
+    padn = max(0, int(inner) - line.cell_len)
+    if padn:
+        line.append(" " * padn, style=f"on {fill}")
+    return line
+
+
 def telemetry_from_chunk(text: str) -> str:
     m = re.search(r"\[Context left[^\]]*\]", text or "")
     if not m:
@@ -341,6 +356,10 @@ class ToolCallPanel(Static):
             return f"{kind_icon} {label} · {ref} {status_icon}"
         return f"{kind_icon} {label} {status_icon}"
 
+    def on_resize(self, event=None) -> None:
+        if self.density == "one":
+            self.refresh()
+
     def render(self):
         if self.tool_status == "completed":
             status_icon = "✓"
@@ -398,6 +417,12 @@ class ToolCallPanel(Static):
             if ref:
                 line.append(f"  {ref}", style=Theme.DARK4)
             line.append("  ▸", style=Theme.DARK4)
+            inner = 0
+            try:
+                inner = int(self.size.width)
+            except Exception:
+                inner = 0
+            fill_line_to_width(line, inner, Theme.DARK1)
             return line
 
         if self.density != "full":
@@ -543,7 +568,7 @@ class ToolRunStack(Horizontal):
         height: auto;
         margin: 0 2 1 1;
         align: left top;
-        padding: 0;
+        padding: 0 1;
     }
     ToolRunStack ToolCallPanel {
         width: 100%;
@@ -590,7 +615,7 @@ class ToolRunStack(Horizontal):
             self.styles.border = ("round", TextualColor.parse(Theme.DARK3))
         except Exception:
             self.styles.border = ("round", "gray")
-        self.styles.padding = (0, 0, 0, 0)
+        self.styles.padding = (0, 1)
         self._flush_pending()
 
     def panel_count(self) -> int:

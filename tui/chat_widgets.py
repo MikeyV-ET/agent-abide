@@ -620,8 +620,8 @@ class ToolRunStack(Horizontal):
         try:
             color = TextualColor.parse(Theme.DARK3)
             frame = self.query_one(".tool-run-frame")
-            # ascii +-| avoids ┐/┘ which overflow one canvas cell
-            frame.styles.border = ("ascii", color)
+            # vkey: ▏/▕ half-blocks, no ┐/┘ and no ascii | to overflow on ClearType
+            frame.styles.border = ("vkey", color)
             frame.styles.padding = (0, 1)
         except Exception:
             pass

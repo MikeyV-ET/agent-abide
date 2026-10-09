@@ -452,12 +452,12 @@ class ToolCallPanel(Static):
             if ref:
                 line.append(f"  {ref}", style=Theme.DARK4)
             line.append("  ▸", style=Theme.DARK4)
-            inner = self._one_line_inner_width()
-            if inner < 40:
-                try:
-                    inner = max(40, int(self.app.size.width * 0.78) - 6)
-                except Exception:
-                    inner = 80
+            # Widget size is the short content box; use the app band so we
+            # actually paint to the round-border │ instead of skipping.
+            try:
+                inner = max(40, int(self.app.size.width * 0.78) - 6)
+            except Exception:
+                inner = self._one_line_inner_width() or 80
             fill_line_to_width(line, inner, Theme.DARK1)
             return line
 

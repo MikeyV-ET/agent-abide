@@ -23,7 +23,7 @@ LINES = [
     "Read conversation.jsonl",
     "List interjections",
     "Execute python3 -c import",
-]
+] + [f"pad line {i}" for i in range(40)]
 
 
 class Line(Static):
@@ -63,6 +63,11 @@ class Repro(App):
     CSS = """
     Screen { background: #f7f7f8; color: #1a1a1e; }
     #banner { height: 1; color: #71717a; }
+    VerticalScroll {
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 0;
+        height: 1fr;
+    }
     """
     BINDINGS = [
         ("s", "border('solid')", "solid"),

@@ -12,6 +12,10 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 from textual.color import Color
 from rich.text import Text
+from pathlib import Path as _P
+import sys as _sys
+_sys.path.insert(0, str(_P(__file__).resolve().parent))
+from chat_widgets import ToolRunStack, ToolCallPanel
 
 
 def painted_bubble(inner: str, *, is_human: bool, total: int, border: str, fill: str) -> Text:
@@ -174,7 +178,7 @@ class Repro(App):
                 "T4 continue ────  [continue id=demo] Your turn ended."
             )
             yield AgentBubble("Overnight continue. I'll check whether this is a restart.")
-            yield Stack()
+            yield ToolRunStack()
             yield AgentBubble("Morning restart. Inboxes empty. Standing by.")
             yield UserBubble("@ eric (tui) Smoke test: what is 20 times 19?")
             yield ExpandedTool(
@@ -187,8 +191,26 @@ class Repro(App):
                 yield Line(f"  pad line {i}")
 
     def on_mount(self) -> None:
-        self.query_one(Stack).apply_border(self.border_kind)
+        stack = self.query_one(ToolRunStack)
+        for i, title in enumerate(TOOL_LINES):
+            pan = ToolCallPanel(f"demo{i}", title, kind="read")
+            pan.density = "one"
+            pan.set_status("completed")
+            stack.add_panel(pan)
+        self._apply_stack_border(self.border_kind)
         self._paint_banner()
+
+    def _apply_stack_border(self, kind: str) -> None:
+        stack = self.query_one(ToolRunStack)
+        try:
+            frame = stack.query_one(".tool-run-frame")
+        except Exception:
+            frame = stack
+        if kind == "none":
+            frame.styles.border = "none"
+        else:
+            from textual.color import Color as C
+            frame.styles.border = (kind, C.parse("#a1a1aa"))
 
     def _paint_banner(self) -> None:
         self.query_one("#banner").update(
@@ -198,7 +220,7 @@ class Repro(App):
 
     def action_border(self, kind: str) -> None:
         self.border_kind = kind
-        self.query_one(Stack).apply_border(kind)
+        self._apply_stack_border(kind)
         self._paint_banner()
 
 

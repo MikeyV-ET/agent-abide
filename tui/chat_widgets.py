@@ -541,7 +541,8 @@ class ToolRunStack(Horizontal):
     ToolRunStack {
         width: 80%;
         height: auto;
-        margin: 0 2 1 1;
+        overflow: hidden;
+        margin: 0 3 1 1;
         align: left top;
         padding: 0 1;
     }

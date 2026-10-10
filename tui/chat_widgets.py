@@ -386,18 +386,20 @@ class ToolCallPanel(Static):
             cmd = " ".join(cmd.split())
             if len(cmd) > 56:
                 cmd = cmd[:55] + "…"
+            # ASCII marks: emoji/▸ paint wider than one cell in xterm.js
             kind_icons = {
-                "read": "📖", "execute": "⚡", "edit": "✏️",
-                "search": "🔍", "think": "💭", "other": "📋",
+                "read": "r", "execute": "x", "edit": "e",
+                "search": "s", "think": "t", "other": "o",
             }
-            kicon = kind_icons.get(self.tool_kind, "🔧")
+            kicon = kind_icons.get(self.tool_kind, "*")
+            mark = {"✓": "v", "✗": "x", "⟳": "~"}.get(status_icon, ".")
             ref = short_ref(self.tool_id)
             line = Text()
-            line.append(f"{status_icon} ", style=f"bold {border_style}")
+            line.append(f"{mark} ", style=f"bold {border_style}")
             line.append(f"{kicon} {cmd}", style=Theme.FG)
             if ref:
                 line.append(f"  {ref}", style=Theme.DARK4)
-            line.append("  ▸", style=Theme.DARK4)
+            line.append("  >", style=Theme.DARK4)
             # Paint every cell of the inner width so xterm.js cannot keep
             # stale glyphs (blue e/i) in the right-hand padding.
             width = int(self.size.width or 0)

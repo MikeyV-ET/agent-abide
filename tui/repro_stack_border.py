@@ -193,24 +193,8 @@ class Repro(App):
     def on_mount(self) -> None:
         stack = self.query_one(ToolRunStack)
 
-        class NoPadPanel(ToolCallPanel):
-            def render(self):
-                from theme import Theme
-                from chat_widgets import short_ref
-                status_icon, border_style = "✓", Theme.BR_GREEN
-                # Knob: no styles.* writes in render()
-                cmd = (self.tool_title or "tool").strip()
-                if len(cmd) > 56:
-                    cmd = cmd[:55] + "…"
-                kicon = {"read": "📖", "execute": "⚡"}.get(self.tool_kind, "🔧")
-                line = Text()
-                line.append(f"{status_icon} ", style=f"bold {border_style}")
-                line.append(f"{kicon} {cmd}", style=Theme.FG)
-                line.append(f"  {short_ref(self.tool_id)}  ▸", style=Theme.DARK4)
-                return line
-
         for i, title in enumerate(TOOL_LINES):
-            pan = NoPadPanel(f"demo{i}", title, kind="read")
+            pan = ToolCallPanel(f"demo{i}", title, kind="read")
             pan.density = "one"
             pan.set_status("completed")
             stack.add_panel(pan)

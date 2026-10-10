@@ -1011,6 +1011,9 @@ class AsdaaasTUI(App):
         overflow-x: hidden;
         scrollbar-size-vertical: 1;
         scrollbar-size-horizontal: 0;
+        scrollbar-background: transparent;
+        scrollbar-background-hover: transparent;
+        scrollbar-background-active: transparent;
     }
 
     #input-bar {

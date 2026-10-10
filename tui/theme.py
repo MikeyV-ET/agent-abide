@@ -320,6 +320,12 @@ Screen {{
 VerticalScroll {{
     background: {Theme.BG};
     color: {Theme.FG};
+    scrollbar-background: {Theme.BG};
+    scrollbar-background-hover: {Theme.BG};
+    scrollbar-background-active: {Theme.BG};
+    scrollbar-color: {Theme.BLUE};
+    scrollbar-color-hover: {Theme.BR_BLUE};
+    scrollbar-color-active: {Theme.BR_BLUE};
 }}
 #bottom-bar {{
     background: {Theme.DARK1};
@@ -371,14 +377,14 @@ SlashMenu {{
 def apply_theme_to_app(app) -> None:
     """Push current Theme colors into the running Textual app stylesheet."""
     css = theme_css()
-    # Replace previous dynamic block if present
     try:
-        # Textual: stylesheet.add_source with a path-like name we can re-add
-        app.stylesheet.add_source(css, path="asdaaas-dynamic-theme.tcss")
+        # Textual 8.2: add_source(css, read_from=(path, class_var))
+        app.stylesheet.add_source(
+            css, read_from=("asdaaas-dynamic-theme.tcss", "")
+        )
         app.stylesheet.reparse()
         app.refresh_css(animate=False)
     except Exception:
-        # Fallback: set screen background directly
         try:
             app.screen.styles.background = Theme.BG
             app.screen.styles.color = Theme.FG

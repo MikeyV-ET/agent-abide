@@ -35,6 +35,22 @@ def test_tool_panel_snippet_render():
     assert r is not None
 
 
+def test_density_one_ascii_marks():
+    """Collapsed one-liners stay in-cell in xterm.js (no ✓📖▸)."""
+    p = ToolCallPanel("id", "Web search", kind="search")
+    p.density = "one"
+    p.set_status("completed")
+    p.tool_command = "Web search"
+    r = p.render()
+    plain = r.plain
+    assert "▸" not in plain
+    assert "📖" not in plain
+    assert "🔍" not in plain
+    assert "✓" not in plain
+    assert plain.lstrip()[:1] == "v"
+    assert ">" in plain
+
+
 def test_asdaaas_tui_imports():
     """Full module import — workers not started without App run."""
     import asdaaas_tui

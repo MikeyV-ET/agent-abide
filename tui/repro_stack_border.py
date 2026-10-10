@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Minimal Textual/xterm.js repro: mixed row types + 1-cell scrollbar.
 
-Keys: s solid, a ascii, v vkey, n none, q quit.
+Keys: s solid, a ascii, v vkey, n none,
+      d ascii-marks, e emoji, g gutter, l left-emoji, q quit.
 """
 from __future__ import annotations
 
@@ -15,7 +16,8 @@ from rich.text import Text
 from pathlib import Path as _P
 import sys as _sys
 _sys.path.insert(0, str(_P(__file__).resolve().parent))
-from chat_widgets import ToolRunStack, ToolCallPanel
+from chat_widgets import ToolRunStack, ToolCallPanel, short_ref
+from theme import Theme
 
 
 def painted_bubble(inner: str, *, is_human: bool, total: int, border: str, fill: str) -> Text:
@@ -68,6 +70,75 @@ TOOL_LINES = [
 
 class Line(Static):
     DEFAULT_CSS = "Line { height: 1; width: 100%; }"
+
+
+class OnePanel(ToolCallPanel):
+    """density=one with selectable marks for the extra-| isolation.
+
+    ascii  — product path (super().render)
+    emoji  — ✓ 📖 ▸ padded to full inner width (dirty control)
+    gutter — same glyphs, last 2 inner cells always space
+    left   — left emoji, ASCII '>' at the right, no reserve
+    """
+
+    EMOJI_KIND = {
+        "read": "📖", "execute": "⚡", "edit": "✏️",
+        "search": "🔍", "think": "💭", "other": "📋",
+    }
+
+    def __init__(self, *args, marks: str = "ascii", reserve: int = 0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.marks = marks
+        self.reserve = reserve
+
+    def render(self):
+        if self.density != "one" or self.marks == "ascii":
+            return super().render()
+        if self.tool_status == "completed":
+            status_icon = "✓"
+            border_style = Theme.BR_GREEN
+        elif self.tool_status == "failed":
+            status_icon = "✗"
+            border_style = Theme.BR_RED
+        elif self.tool_status == "in_progress":
+            status_icon = "⟳"
+            border_style = Theme.BR_YELLOW
+        else:
+            status_icon = "…"
+            border_style = Theme.BR_BLUE
+        cmd = (self.tool_command or self.tool_title or self.tool_kind or "tool").strip()
+        cmd = " ".join(cmd.split())
+        if len(cmd) > 56:
+            cmd = cmd[:55] + "…"
+        kicon = self.EMOJI_KIND.get(self.tool_kind, "🔧")
+        ref = short_ref(self.tool_id)
+        line = Text()
+        line.append(f"{status_icon} ", style=f"bold {border_style}")
+        line.append(f"{kicon} {cmd}", style=Theme.FG)
+        if ref:
+            line.append(f"  {ref}", style=Theme.DARK4)
+        if self.marks == "left":
+            line.append("  >", style=Theme.DARK4)
+        else:
+            line.append("  ▸", style=Theme.DARK4)
+        width = int(self.size.width or 0)
+        if width < 4:
+            try:
+                width = int(self.parent.size.width or 0)
+            except Exception:
+                width = 0
+        if width < 4:
+            width = 72
+        reserve = self.reserve if self.marks == "gutter" else 0
+        inner = max(4, width - reserve)
+        if line.cell_len > inner:
+            line.truncate(inner, overflow="crop")
+        padn = inner - line.cell_len
+        if padn > 0:
+            line.append(" " * padn)
+        if reserve > 0:
+            line.append(" " * reserve)
+        return line
 
 
 class Gutter(Static):
@@ -164,12 +235,17 @@ class Repro(App):
         ("a", "border('ascii')", "ascii"),
         ("v", "border('vkey')", "vkey"),
         ("n", "border('none')", "none"),
+        ("d", "marks('ascii')", "ascii-marks"),
+        ("e", "marks('emoji')", "emoji"),
+        ("g", "marks('gutter')", "gutter"),
+        ("l", "marks('left')", "left-emoji"),
         ("q", "quit", "quit"),
     ]
 
-    def __init__(self, border: str = "solid") -> None:
+    def __init__(self, border: str = "solid", marks: str = "ascii") -> None:
         super().__init__()
         self.border_kind = border
+        self.marks_kind = marks
 
     def compose(self) -> ComposeResult:
         yield Static("", id="banner")
@@ -194,9 +270,10 @@ class Repro(App):
         stack = self.query_one(ToolRunStack)
 
         for i, title in enumerate(TOOL_LINES):
-            pan = ToolCallPanel(f"demo{i}", title, kind="read")
+            pan = OnePanel(f"demo{i}", title, kind="read", marks=self.marks_kind, reserve=2)
             pan.density = "one"
             pan.set_status("completed")
+            pan.tool_command = title
             stack.add_panel(pan)
         stack.styles.width = "100%"
         self._apply_stack_border(self.border_kind)
@@ -218,8 +295,8 @@ class Repro(App):
 
     def _paint_banner(self) -> None:
         self.query_one("#banner").update(
-            f"repro_stack_border  stack={self.border_kind}  "
-            f"keys: s=solid a=ascii v=vkey n=none q=quit"
+            f"repro_stack_border  stack={self.border_kind} marks={self.marks_kind}  "
+            f"keys: s/a/v/n border  d=ascii e=emoji g=gutter l=left q=quit"
         )
 
     def action_border(self, kind: str) -> None:
@@ -227,12 +304,21 @@ class Repro(App):
         self._apply_stack_border(kind)
         self._paint_banner()
 
+    def action_marks(self, kind: str) -> None:
+        self.marks_kind = kind
+        for pan in self.query(OnePanel):
+            pan.marks = kind
+            pan.reserve = 2 if kind == "gutter" else 0
+            pan.refresh()
+        self._paint_banner()
+
 
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--border", default="solid", choices=("solid", "ascii", "vkey", "none"))
+    p.add_argument("--marks", default="ascii", choices=("ascii", "emoji", "gutter", "left"))
     args = p.parse_args()
-    Repro(border=args.border).run()
+    Repro(border=args.border, marks=args.marks).run()
 
 
 if __name__ == "__main__":

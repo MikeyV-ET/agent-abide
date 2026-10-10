@@ -317,29 +317,45 @@ class ToolCallPanel(Static):
         return piece, more
 
     def _title_line(self, status_icon: str) -> str:
+        # ASCII: emoji in the border title overflow into the 1-cell scrollbar.
         kind_icons = {
-            "read": "📖", "execute": "⚡", "edit": "✏️",
-            "search": "🔍", "think": "💭", "other": "📋",
+            "read": "r", "execute": "x", "edit": "e",
+            "search": "s", "think": "t", "other": "o",
         }
-        kind_icon = kind_icons.get(self.tool_kind, "🔧")
-        # Prefer sticky command in the border when we have it
+        kind_icon = kind_icons.get(self.tool_kind, "*")
+        mark = {"✓": "v", "✗": "x", "⟳": "~"}.get(status_icon, status_icon)
         label = (self.tool_command or self.tool_title or "").strip() or (
             self.tool_kind or "tool"
         )
         if label.lower() in ("tool", "unknown tool", "unknown", "run_terminal_command"):
             label = self.tool_command or self.tool_kind or "tool"
-        # Keep border readable
-        if len(label) > 60:
-            label = label[:57] + "…"
+        if len(label) > 48:
+            label = label[:47] + "…"
         ref = short_ref(self.tool_id)
         ts = self.tool_ts or ""
         if ts and ref:
-            return f"{kind_icon} {label} · {ts} · {ref} {status_icon}"
+            return f"{kind_icon} {label} · {ts} · {ref} {mark}"
         if ts:
-            return f"{kind_icon} {label} · {ts} {status_icon}"
+            return f"{kind_icon} {label} · {ts} {mark}"
         if ref:
-            return f"{kind_icon} {label} · {ref} {status_icon}"
-        return f"{kind_icon} {label} {status_icon}"
+            return f"{kind_icon} {label} · {ref} {mark}"
+        return f"{kind_icon} {label} {mark}"
+
+    def _fit_border_title(self, title: str) -> str:
+        """Keep ┐ / title out of the parent's 1-cell scrollbar column."""
+        width = int(self.size.width or 0)
+        if width < 8:
+            try:
+                width = int(self.parent.size.width or 0)
+            except Exception:
+                width = 0
+        if width < 8:
+            width = 72
+        budget = max(4, width - 4)
+        t = Text(title)
+        if t.cell_len > budget:
+            t.truncate(budget, overflow="ellipsis")
+        return t.plain
 
     def render(self):
         if self.tool_status == "completed":
@@ -428,7 +444,7 @@ class ToolCallPanel(Static):
                 self.styles.margin = (0, 0, 0, 0)
                 self.styles.border = ("none", color)
                 self.styles.padding = (0, 0)
-            self.border_title = title.replace("[", "\\[")
+            self.border_title = self._fit_border_title(title).replace("[", "\\[")
             body = Text()
             src = self.tool_command or self.tool_output or ""
             if src:
@@ -458,7 +474,10 @@ class ToolCallPanel(Static):
 
         self.styles.border = ("round", color)
         self.styles.padding = (0, 1)
-        self.border_title = (title + " [expanded — click to collapse]").replace("[", "\\[")
+        if self._run_stack() is not None:
+            # 1-cell right gutter: ┐ stays left of the VerticalScroll bar
+            self.styles.margin = (0, 1, 0, 0)
+        self.border_title = self._fit_border_title(title + " [expanded]").replace("[", "\\[")
 
         body = Text()
         _prepend_command(body)

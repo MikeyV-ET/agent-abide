@@ -228,6 +228,8 @@ class Repro(App):
         scrollbar-size-vertical: 1;
         scrollbar-size-horizontal: 0;
         height: 1fr;
+        scrollbar-background: #f7f7f8;
+        scrollbar-color: #3b6ea5;
     }
     """
     BINDINGS = [

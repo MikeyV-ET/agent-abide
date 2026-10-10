@@ -198,16 +198,7 @@ class Repro(App):
                 from theme import Theme
                 from chat_widgets import short_ref
                 status_icon, border_style = "✓", Theme.BR_GREEN
-                try:
-                    self.styles.border = "none"
-                except Exception:
-                    pass
-                self.styles.padding = (0, 0)
-                self.styles.margin = (0, 0, 0, 0)
-                try:
-                    self.styles.height = 1
-                except Exception:
-                    pass
+                # Knob: no styles.* writes in render()
                 cmd = (self.tool_title or "tool").strip()
                 if len(cmd) > 56:
                     cmd = cmd[:55] + "…"
@@ -216,7 +207,7 @@ class Repro(App):
                 line.append(f"{status_icon} ", style=f"bold {border_style}")
                 line.append(f"{kicon} {cmd}", style=Theme.FG)
                 line.append(f"  {short_ref(self.tool_id)}  ▸", style=Theme.DARK4)
-                return line  # no pad-to-width
+                return line
 
         for i, title in enumerate(TOOL_LINES):
             pan = NoPadPanel(f"demo{i}", title, kind="read")

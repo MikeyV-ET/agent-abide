@@ -1018,8 +1018,6 @@ class AgentMessage(Static):
         inner_col = max(24, col - 2)
         # Prose: flatten wide so markdown does not pre-wrap. Tables in ephacts
         # must flatten at bubble width or Rich pads them to thousands of cells.
-        md_width = inner_col if "📌" in text or "|" in text else 4000
-        md = _flatten_to_text(RichMarkdown(text), width=md_width)
         nick = self._nick
         if not nick:
             try:
@@ -1027,6 +1025,16 @@ class AgentMessage(Static):
             except Exception:
                 nick = "agent"
         mark, color = nick_mark(nick)
+        prefix = f"{mark} {nick}  "
+        prefix_w = Text(prefix).cell_len
+        # Tables need a real width or Rich pads them to thousands of cells.
+        # Reserve the nick prefix: flatten used to wrap at inner_col, then we
+        # prepended "△ Trip-G  " and wrapped again, so "adding up" split.
+        if "📌" in text or "|" in text:
+            md_width = max(24, inner_col - prefix_w)
+        else:
+            md_width = 4000
+        md = _flatten_to_text(RichMarkdown(text), width=md_width)
         inner = Text()
         inner.append(f"{mark} ", style=f"bold {color}")
         inner.append(f"{nick}  ", style=f"bold {color}")

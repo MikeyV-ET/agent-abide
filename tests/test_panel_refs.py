@@ -198,6 +198,36 @@ def test_compaction_complete_is_control_not_eric():
     assert not is_control_user_line("<eric (via tui)> you're compacting as well at 205k")
 
 
+def test_prose_plus_table_does_not_split_adding_up():
+    """A later markdown table must not pre-wrap prose ignoring the nick prefix."""
+    from rich.markdown import Markdown as RichMarkdown
+    from rich.text import Text
+    from chat_widgets import _flatten_to_text
+    from nav_widgets import layout_painted_bubble, nick_mark, bubble_metrics
+
+    body = (
+        "20G guest root, packed. Nothing exotic — several large trees adding "
+        "up until writes failed.\n\n"
+        "| Tree | Size |\n| --- | --- |\n| vault | 2.3G |\n"
+    )
+    total = 80
+    _, _, _, col = bubble_metrics(total)
+    inner_col = max(24, col - 2)
+    mark, color = nick_mark("Trip-G")
+    prefix = f"{mark} Trip-G  "
+    prefix_w = Text(prefix).cell_len
+    md_width = max(24, inner_col - prefix_w)
+    md = _flatten_to_text(RichMarkdown(body), width=md_width)
+    inner = Text()
+    inner.append(prefix)
+    inner.append(md)
+    plain = layout_painted_bubble(
+        inner, is_human=False, total=total, border=color
+    ).plain
+    assert "adding\nup" not in plain
+    assert "adding up" in plain.replace("\n", " ")
+
+
 def test_ephact_table_does_not_balloon_at_bubble_width():
     from rich.markdown import Markdown as RichMarkdown
     from chat_widgets import _flatten_to_text, AgentMessage

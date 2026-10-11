@@ -498,8 +498,9 @@ class ToolCallPanel(Static):
 def tool_run_window(panels, *, max_rows: int = 8, snippet_cost: int = 5):
     """Which tools are visible in a run. Oldest finished hide behind +N.
 
-    Live tools are always visible (snippet). Finished fill leftover rows as
-    one-liners (cost 1). panels is chronological (oldest first).
+    At most one live snippet (the newest in-flight). Older in-flight
+    (backgrounded) paint as one-liners with the finished tools.
+    panels is chronological (oldest first).
     """
     live, done = [], []
     for p in panels:
@@ -508,6 +509,8 @@ def tool_run_window(panels, *, max_rows: int = 8, snippet_cost: int = 5):
             done.append(p)
         else:
             live.append(p)
+    parked, live = (live[:-1], live[-1:]) if live else ([], [])
+    done = done + parked
     live_cost = snippet_cost if live else 0
     fin_slots = max_rows if not live else max(0, max_rows - live_cost)
     hidden = max(0, len(done) - fin_slots)
@@ -699,16 +702,24 @@ class ToolRunStack(Horizontal):
             )
         self._hidden = hidden
         vis = set(id(p) for p in visible)
+        newest_live = next(
+            (
+                q
+                for q in reversed(visible)
+                if (q.tool_status or "") not in ("completed", "failed")
+            ),
+            None,
+        )
         for p in panels:
             show = id(p) in vis
             p.display = show
             if not show:
                 continue
             st = p.tool_status or ""
-            live = st not in ("completed", "failed")
+            in_flight = st not in ("completed", "failed")
             if p.density == "full":
                 continue
-            if live:
+            if in_flight and newest_live is p:
                 p.density = "snippet"
             else:
                 p.density = "snippet" if self._run_open else "one"

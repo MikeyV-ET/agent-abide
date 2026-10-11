@@ -124,6 +124,19 @@ def test_tool_run_window_keeps_live_and_hides_oldest():
     assert vis[-1].tool_status == "in_progress"
 
 
+def test_tool_run_window_parks_older_in_flight():
+    """Backgrounded in-progress tools are one-liners; only the newest is snippet."""
+    class P:
+        def __init__(self, st):
+            self.tool_status = st
+    older = [P("in_progress") for _ in range(4)]
+    newest = P("in_progress")
+    hidden, vis = tool_run_window(older + [newest], max_rows=8, snippet_cost=5)
+    assert hidden == 1
+    assert vis[-1] is newest
+    assert vis[:-1] == older[1:]
+
+
 def test_mount_items_groups_consecutive_tools():
     from chat_model import ToolItem, SpeechItem
     from paint_mount import mount_items

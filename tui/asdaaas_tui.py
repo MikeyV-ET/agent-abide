@@ -67,7 +67,7 @@ from tui_env import TuiEnv
 from theme import Theme, THEMES, set_theme, _save_theme, _load_saved_theme, apply_auto_if_needed, apply_theme_to_app
 from chat_widgets import (
     ToolCallPanel, PlanPanel, UserMessage, AgentMessage, ThinkingBlock, InterjectionBlock,
-    SystemReminderPanel, is_system_reminder,
+    SystemReminderPanel, is_system_reminder, is_control_user_line,
 )
 from message_input import MessageInput
 from chrome_widgets import (
@@ -4015,6 +4015,15 @@ Type anything else to send a message to the agent.
             self._current_thinking = None
             content = self._content_scroll()
             content.mount(SystemReminderPanel(text))
+            if self._following_tail():
+                content.refresh(layout=True)
+            self._scroll_to_bottom()
+            return
+
+        if is_control_user_line(text):
+            from chrome_widgets import SystemAlert
+            content = self._content_scroll()
+            content.mount(SystemAlert(text[:800], severity="info"))
             if self._following_tail():
                 content.refresh(layout=True)
             self._scroll_to_bottom()

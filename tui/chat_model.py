@@ -203,6 +203,14 @@ def apply_event(state: ChatState, event: dict) -> list[str]:
             state.items.append(SystemItem(text=text, kind="system_reminder"))
             changes.append("system_reminder")
             return changes
+        try:
+            from chat_widgets import is_control_user_line
+            if is_control_user_line(text):
+                state.items.append(SystemItem(text=text, kind="compact"))
+                changes.append("system")
+                return changes
+        except Exception:
+            pass
         state.logical_turn += 1
         state.items.append(TurnMark(number=state.logical_turn, trigger=classify_turn_trigger(text)))
         state.items.append(SpeechItem(text=text, kind="user"))

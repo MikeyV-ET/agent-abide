@@ -280,6 +280,43 @@ def is_system_reminder(text: str) -> bool:
     return s.startswith("<system-reminder>") or s.startswith("<system_reminder>")
 
 
+def is_control_user_line(text: str) -> bool:
+    """Harness doorbells that arrive as user_message_chunk (continue, compact, mail)."""
+    import re
+    if not text:
+        return False
+    s = text.lstrip()
+    body = s
+    footer_re = re.compile(r"\n?\[context left[^\]]*\]\s*$", re.IGNORECASE)
+    while True:
+        nxt = footer_re.sub("", body).rstrip()
+        if nxt == body:
+            break
+        body = nxt
+    if not body:
+        return True
+    blow = body.lower()
+    if blow.startswith("[continue") or blow.startswith("[delay") or blow.startswith("[aa.control"):
+        return True
+    if blow.startswith("[localmail") or blow.startswith("[from:"):
+        return True
+    if "mail from" in blow[:80] and "localmail" in blow[:80]:
+        return True
+    if blow.startswith("[session:compact") or blow.startswith("[compaction"):
+        return True
+    if blow.startswith("[compaction complete") or "follow your boot protocol" in blow[:240]:
+        return True
+    if blow.startswith("this session is being continued"):
+        return True
+    if "your turn ended" in blow and "stand by" in blow:
+        return True
+    if re.match(r"^you(?:'ve| have) hit your session limit\b", blow):
+        return True
+    if blow.startswith("[context left"):
+        return True
+    return False
+
+
 class SystemReminderPanel(Static):
     """Collapsed-by-default panel for <system-reminder> blobs (like tool panels).
 

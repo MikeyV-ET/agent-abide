@@ -1042,6 +1042,7 @@ class TurnEngine:
 
         agent_name = self.agent_name
         result = IdleResult()
+        delay_expired = False
 
         awareness = read_awareness(agent_name, env=self.env)
         default_doorbell_enabled = awareness.get("default_doorbell", False)
@@ -1082,6 +1083,8 @@ class TurnEngine:
                     )
                     self.next_turn_delay = 0
                     self.last_was_foreground = True
+                    if not interrupted:
+                        delay_expired = True
                     if interrupted:
                         print(f"[asdaaas] Delay interrupted by {reason}")
                         result.delay_interrupted = True
@@ -1140,9 +1143,12 @@ class TurnEngine:
                 obs_st = obs.get("state")
                 result.observer_state = obs_st
                 if obs_st == "BUSY":
-                    print(f"[asdaaas] Observer: binary BUSY — skipping continue")
-                    await asyncio.sleep(2.0)
-                    return result
+                    if delay_expired:
+                        print(f"[asdaaas] Observer: binary BUSY — delay expired, queueing continue")
+                    else:
+                        print(f"[asdaaas] Observer: binary BUSY — skipping continue")
+                        await asyncio.sleep(2.0)
+                        return result
                 elif obs_st == "GONE":
                     exit_code = obs.get("exit_code")
                     print(f"[asdaaas] Observer: binary GONE (exit_code={exit_code}) — stopping continues")
@@ -1168,11 +1174,17 @@ class TurnEngine:
                 elif obs_st == "STUCK":
                     since = obs.get("since", 0)
                     stuck_dur = time.time() - since if since else 0
-                    print(f"[asdaaas] Observer: binary STUCK ({stuck_dur:.0f}s) — skipping continue")
-                    write_health(agent_name, "active", f"observer_stuck ({stuck_dur:.0f}s)",
-                                self.total_tokens, self.context_window, env=self.env)
-                    await asyncio.sleep(5.0)
-                    return result
+                    if delay_expired:
+                        print(
+                            f"[asdaaas] Observer: binary STUCK ({stuck_dur:.0f}s) "
+                            f"— delay expired, queueing continue"
+                        )
+                    else:
+                        print(f"[asdaaas] Observer: binary STUCK ({stuck_dur:.0f}s) — skipping continue")
+                        write_health(agent_name, "active", f"observer_stuck ({stuck_dur:.0f}s)",
+                                    self.total_tokens, self.context_window, env=self.env)
+                        await asyncio.sleep(5.0)
+                        return result
 
             if queue_continue_doorbell(agent_name, text=self.delay_text, env=self.env):
                 print(f"[asdaaas] Default doorbell queued for {agent_name}")

@@ -63,6 +63,9 @@ def is_control_user_line(text: str) -> bool:
     if not body:
         return True
     blow = body.lower()
+    # asdaaas session/prompt: "/compact {compaction_instructions.txt}"
+    if blow.startswith("/compact") or re.match(r"^<eric[^>]*>\s*/compact\b", blow):
+        return True
     if blow.startswith("[continue") or blow.startswith("[delay") or blow.startswith("[aa.control"):
         return True
     if blow.startswith("[localmail") or blow.startswith("[from:"):

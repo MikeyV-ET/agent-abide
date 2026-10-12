@@ -195,14 +195,29 @@ def _resolve_pack(agent: str, shape: str, run_dir: str | None = None) -> Path | 
         ]:
             if cand.exists():
                 return cand
-    runs = ROOT / "runs"
-    if runs.exists():
+    def _scan(runs: Path) -> Path | None:
+        if not runs.exists():
+            return None
         cands = sorted(runs.glob(f"*_{agent}"), key=lambda p: p.stat().st_mtime, reverse=True)
         for rd in cands:
             for name in (f"{shape}_users_only.txt", f"{shape}_users_and_agents.txt", f"{shape}.txt"):
                 p = rd / "corpus" / name
                 if p.exists():
                     return p
+        return None
+
+    hit = _scan(ROOT / "runs")
+    if hit:
+        return hit
+    try:
+        cfg = Path.home() / "agents/config/agents.json"
+        agents = json.loads(cfg.read_text()).get("agents") or {} if cfg.exists() else {}
+        home = Path((agents.get(agent) or {}).get("home") or Path.home() / "agents" / agent)
+        hit = _scan(home / "memory" / "runs")
+        if hit:
+            return hit
+    except Exception:
+        pass
     if shape == "S03":
         p = ROOT / "experiments/s03_word_dist/S03_users_and_agents.txt"
         if p.exists():
@@ -332,7 +347,9 @@ def memory_query(
     if strategy not in ("simple", "n_runs", "turn_strata"):
         return {"error": "strategy must be simple | n_runs | turn_strata"}
     # Schema defaults match simple (n=1, peer=false). Heavy strategies upgrade bare defaults.
-    eff_strategy = "n_runs" if strategy == "simple" else strategy
+    # Keep strategy=simple in the CLI so reports and skip-peer/skip-judge agree.
+    # (Previously simple was rewritten to n_runs, then phase C ran without JUDGE_PROMPT.)
+    eff_strategy = strategy
     if strategy == "simple":
         n = 1
         peer = False

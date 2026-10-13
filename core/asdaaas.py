@@ -2503,6 +2503,21 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                     else:
                         print(f"[asdaaas] AWARENESS: error for {agent_name} -- {desc}")
 
+                elif action == "flag":
+                    try:
+                        from operator_flag import write_flag
+                        st = cmd.get("status") or cmd.get("flag") or "waiting"
+                        note = cmd.get("note") or cmd.get("text") or ""
+                        write_flag(
+                            config.agent_asdaaas_dir(agent_name),
+                            st,
+                            note=note,
+                            agent=agent_name,
+                        )
+                        print(f"[asdaaas] FLAG: {agent_name} -- {st} {note[:80]}")
+                    except Exception as e:
+                        print(f"[asdaaas] FLAG: error for {agent_name} -- {e}")
+
             # ---- 1b. Start cancel watcher for this iteration ----
             # Watches for cancel_turn.flag during collect_response calls.
             # Started fresh each iteration, cancelled at end.

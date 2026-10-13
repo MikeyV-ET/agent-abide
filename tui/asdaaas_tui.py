@@ -126,24 +126,50 @@ class Config:
         return cls._agents_cfg
 
     @classmethod
-    def list_catalog_agents(cls) -> list[str]:
-        """Agents from agents.json that have an asdaaas directory (openable in TUI)."""
+    def reload_agents_cfg(cls) -> dict:
+        cls._agents_cfg = {}
+        return cls.load_agents_cfg()
+
+    @classmethod
+    def list_catalog_entries(cls):
+        """Family-aware catalog rows (asdaaas present)."""
+        from agent_family import catalog_entries
         cfg = cls.load_agents_cfg()
+        rows = catalog_entries(cfg.get("agents") or {}, agents_dir=cls.AGENTS_HOME)
+        if rows:
+            return rows
+        # filesystem fallback
         agents_home = Path(cls.AGENTS_HOME)
         names: list[str] = []
-        for name, acfg in (cfg.get("agents") or {}).items():
-            if not isinstance(acfg, dict):
-                continue
-            home = Path(acfg.get("home", str(agents_home / name)))
-            if (home / "asdaaas").exists():
-                names.append(name)
-        if not names:
-            # filesystem fallback
-            if agents_home.exists():
-                for d in sorted(agents_home.iterdir()):
-                    if d.is_dir() and (d / "asdaaas").exists():
-                        names.append(d.name)
-        return names
+        if agents_home.exists():
+            for d in sorted(agents_home.iterdir()):
+                if d.is_dir() and (d / "asdaaas").exists():
+                    names.append(d.name)
+        from agent_family import CatalogEntry, family_from_home
+        return [
+            CatalogEntry(
+                name=n,
+                family=family_from_home(agents_home / n, agents_dir=agents_home),
+                home=agents_home / n,
+                has_asdaaas=True,
+            )
+            for n in names
+        ]
+
+    @classmethod
+    def list_catalog_agents(cls) -> list[str]:
+        """Agents from agents.json that have an asdaaas directory (openable in TUI)."""
+        return [e.name for e in cls.list_catalog_entries()]
+
+    @classmethod
+    def agent_display_name(cls, agent_name: str) -> str:
+        from agent_family import catalog_label, family_from_home
+        cfg = cls.load_agents_cfg().get("agents", {}).get(agent_name) or {}
+        home = Path(cfg.get("home") or (Path(cls.AGENTS_HOME) / agent_name))
+        fam = str(cfg.get("family") or "").strip() or family_from_home(
+            home, agents_dir=cls.AGENTS_HOME
+        )
+        return catalog_label(fam, agent_name)
 
     @classmethod
     def agent_backend(cls, agent_name: str) -> str:
@@ -699,6 +725,7 @@ class SlashMenu(OptionList):
         {"name": "/mail all", "description": "Broadcast to all agents"},
         {"name": "/whoami", "description": "Show/change operator name"},
         {"name": "/theme", "description": "Change color theme"},
+        {"name": "/start", "description": "Start family agent (/start LeviSmith Name [uuid])"},
         {"name": "/help", "description": "Show help"},
         {"name": "/exit", "description": "Quit the TUI"},
     ]
@@ -1494,7 +1521,54 @@ class AsdaaasTUI(App):
         with open(msg_path, "w") as f:
             json.dump(msg, f)
 
+    def _handle_start_command(self, arg: str) -> None:
+        """Create a family agent home from the TUI. Never mints a session id."""
+        parts = (arg or "").split()
+        if len(parts) < 2:
+            self.notify(
+                "Usage: /start <family> <name> [session-uuid]",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        family, name = parts[0], parts[1]
+        session = parts[2] if len(parts) >= 3 else None
+        try:
+            core = str(Path(__file__).resolve().parent.parent / "core")
+            if core not in sys.path:
+                sys.path.insert(0, core)
+            from start_agent import start_agent
+            result = start_agent(family, name, session=session, launch=False)
+        except Exception as e:
+            self.notify(f"start failed: {e}", severity="error", timeout=10)
+            return
+        Config.reload_agents_cfg()
+        label = f"{result['family']} / {result['name']}"
+        if session:
+            self.notify(f"{label} attached {session[:13]}… — launching", severity="information", timeout=6)
+        else:
+            self.notify(
+                f"{label} home ready. Pass a session UUID to launch (will not mint).",
+                severity="information",
+                timeout=8,
+            )
+        if name not in self._agents:
+            try:
+                self.action_add_agent(name)
+            except Exception:
+                pass
+        if session:
+            script = Path(__file__).resolve().parent.parent / "scripts" / "restart_agent.sh"
+            self.run_worker(
+                lambda n=name, s=script: __import__("subprocess").run(
+                    ["bash", str(s), n], check=False
+                ),
+                thread=True,
+                name=f"launch_{name}",
+            )
+
     def _handle_slash_command(self, text: str):
+
         """Handle local slash commands."""
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower()
@@ -1606,6 +1680,9 @@ class AsdaaasTUI(App):
         elif cmd == "/theme":
             self.action_toggle_theme_selector()
             return
+        elif cmd == "/start":
+            self._handle_start_command(arg)
+            return
         elif cmd == "/help":
             help_text = """## TUI Commands
 
@@ -1627,6 +1704,7 @@ class AsdaaasTUI(App):
 | `/mail all <msg>` | Broadcast to all agents |
 | `/whoami` | Show/change operator name |
 | `/theme` | Change color theme |
+| `/start <family> <name> [session]` | Create family home + history ingest; attach existing UUID |
 | `/help` | Show this help |
 | `Ctrl+C` | Interrupt agent |
 | `Ctrl+Q` | Quit TUI |
@@ -2103,7 +2181,7 @@ Type anything else to send a message to the agent.
             model_fallback=Config.agent_model(agent_name),
         )
         header.room_mode = False
-        header.agent_name = tel.agent_name
+        header.agent_name = Config.agent_display_name(agent_name)
         header.health_status = tel.health_status
         header.is_generating = tel.is_generating
         header.context_pct = tel.context_pct
@@ -2374,8 +2452,11 @@ Type anything else to send a message to the agent.
             except NoMatches:
                 pass
         open_set = set(self._agents)
-        candidates = [n for n in Config.list_catalog_agents() if n not in open_set]
-        sel.populate(candidates)
+        entries = [e for e in Config.list_catalog_entries() if e.name not in open_set]
+        candidates = ["__start__"] + [e.name for e in entries]
+        labels = {e.name: e.label for e in entries}
+        labels["__start__"] = "+ Start new agent…"
+        sel.populate(candidates, title="Add / start — Enter · Esc", labels=labels)
         sel.display = True
         sel.focus()
 
@@ -2484,6 +2565,15 @@ Type anything else to send a message to the agent.
     def action_add_agent(self, agent_name: str) -> None:
         """Open an agent tab, or add a nick to the current IRC room."""
         if not agent_name:
+            return
+        if agent_name == "__start__":
+            try:
+                input_bar = self.query_one("#input-bar", MessageInput)
+                input_bar.clear()
+                input_bar.insert("/start ")
+                input_bar.focus()
+            except NoMatches:
+                self.notify("Usage: /start <family> <name> [session-uuid]", severity="information")
             return
         catalog = Config.list_catalog_agents()
         if agent_name not in catalog:

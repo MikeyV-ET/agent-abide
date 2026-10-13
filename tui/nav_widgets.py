@@ -590,8 +590,8 @@ class AgentAddSelector(OptionList):
         layer: overlay;
         dock: top;
         margin: 1 0 0 0;
-        width: 40;
-        max-height: 16;
+        width: 48;
+        max-height: 18;
         border: solid $accent;
         background: $surface;
         display: none;

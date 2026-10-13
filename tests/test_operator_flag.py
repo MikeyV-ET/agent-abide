@@ -11,10 +11,14 @@ def test_priority_error_beats_waiting():
     assert (
         derive_tab_status(
             flag={"status": "waiting"},
-            binary_state={"state": "STUCK"},
+            binary_state={"doom_loop": True},
         )
         == "error"
     )
+
+
+def test_stuck_is_not_error():
+    assert derive_tab_status(binary_state={"state": "STUCK"}) == "idle"
 
 
 def test_waiting_beats_working():

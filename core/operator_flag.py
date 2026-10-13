@@ -70,8 +70,7 @@ def _auto_from_health(health: Optional[dict], bstate: Optional[dict]) -> str:
     st = str(b.get("state") or obs.get("state") or "").upper()
     if b.get("doom_loop") or obs.get("doom_loop"):
         return "error"
-    if st == "STUCK":
-        return "error"
+    # STUCK is observer-quiet during a long tool turn, not "something is wrong."
     hstatus = str(h.get("status") or "").lower()
     if hstatus in ("error", "fail", "failed", "dead"):
         return "error"

@@ -1,4 +1,7 @@
-"""Create a family agent home and roster row. Never mint a session id."""
+"""Create a family agent home and roster row.
+
+Citizen families never mint a session id. The testagent family may session/new.
+"""
 from __future__ import annotations
 
 import json
@@ -7,6 +10,8 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
+
+MINT_OK_FAMILIES = {"testagent", "test"}
 
 HISTORY_CONFIG = {
     "tail_grok": True,
@@ -31,6 +36,27 @@ AWARENESS = {
 def _agents_dir(cfg: dict) -> Path:
     settings = cfg.get("settings") or {}
     return Path(settings.get("agents_dir") or Path.home() / "agents").expanduser()
+
+
+
+def parse_start_tokens(arg: str) -> dict:
+    """Parse `/start` tail: family name [session-uuid] [model]."""
+    import re
+    parts = (arg or "").split()
+    if len(parts) < 2:
+        raise ValueError("need family and name")
+    family, name = parts[0], parts[1]
+    session = None
+    model = None
+    uuid_re = re.compile(
+        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )
+    for tok in parts[2:]:
+        if uuid_re.match(tok):
+            session = tok
+        else:
+            model = tok
+    return {"family": family, "name": name, "session": session, "model": model}
 
 
 def planned_home(family: str, name: str, *, agents_dir: Path) -> Path:
@@ -108,6 +134,7 @@ def upsert_roster(
     family: str,
     home: Path,
     session: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict:
     cfg = json.loads(cfg_path.read_text())
     agents = cfg.setdefault("agents", {})
@@ -124,9 +151,10 @@ def upsert_roster(
         row["session"] = sid
         row["short_id"] = sid[-4:]
     elif "session" not in row:
-        # Do not mint. Leave session absent so restart_agent.sh will not invent one silently
-        # if we refuse to launch without a session.
+        # Citizen families: leave session absent (do not mint).
         pass
+    if model:
+        row["model"] = str(model).strip()
     agents[name] = row
     cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
     return row
@@ -168,8 +196,12 @@ def start_agent(
     launch: bool = False,
     restart_script: Optional[Path] = None,
     grok_sessions: Optional[Path] = None,
+    model: Optional[str] = None,
 ) -> dict:
-    """Create home + roster. Attach existing session if given. Never mint."""
+    """Create home + roster. Attach existing session if given.
+
+    Minting (session/new) is allowed only for MINT_OK_FAMILIES.
+    """
     cfg_path = Path(agents_json or Path.home() / "agents" / "config" / "agents.json")
     cfg = json.loads(cfg_path.read_text())
     agents_dir = _agents_dir(cfg)
@@ -177,10 +209,13 @@ def start_agent(
     sid = (session or "").strip() or None
     if sid:
         attach_session(home, sid, grok_sessions=grok_sessions)
-    row = upsert_roster(cfg_path, name=name, family=family, home=home, session=sid)
+    row = upsert_roster(
+        cfg_path, name=name, family=family, home=home, session=sid, model=model
+    )
     launched = False
     if launch:
-        if not sid:
+        mint_ok = family.strip().lower() in MINT_OK_FAMILIES
+        if not sid and not mint_ok:
             raise ValueError("refusing to launch without an existing session id (will not mint)")
         script = restart_script or (
             Path(__file__).resolve().parent.parent / "scripts" / "restart_agent.sh"

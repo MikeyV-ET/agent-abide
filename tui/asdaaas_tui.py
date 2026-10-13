@@ -725,7 +725,7 @@ class SlashMenu(OptionList):
         {"name": "/mail all", "description": "Broadcast to all agents"},
         {"name": "/whoami", "description": "Show/change operator name"},
         {"name": "/theme", "description": "Change color theme"},
-        {"name": "/start", "description": "Start family agent (/start LeviSmith Name [uuid])"},
+        {"name": "/start", "description": "Start family agent (/start testagent Name [uuid] [model])"},
         {"name": "/help", "description": "Show help"},
         {"name": "/exit", "description": "Quit the TUI"},
     ]
@@ -1523,29 +1523,36 @@ class AsdaaasTUI(App):
 
     def _handle_start_command(self, arg: str) -> None:
         """Create a family agent home from the TUI. Never mints a session id."""
-        parts = (arg or "").split()
-        if len(parts) < 2:
-            self.notify(
-                "Usage: /start <family> <name> [session-uuid]",
-                severity="warning",
-                timeout=8,
-            )
-            return
-        family, name = parts[0], parts[1]
-        session = parts[2] if len(parts) >= 3 else None
         try:
             core = str(Path(__file__).resolve().parent.parent / "core")
             if core not in sys.path:
                 sys.path.insert(0, core)
-            from start_agent import start_agent
-            result = start_agent(family, name, session=session, launch=False)
+            from start_agent import MINT_OK_FAMILIES, parse_start_tokens, start_agent
+            spec = parse_start_tokens(arg or "")
+        except ValueError:
+            self.notify(
+                "Usage: /start <family> <name> [session-uuid] [model]",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        family, name = spec["family"], spec["name"]
+        session, model = spec["session"], spec["model"]
+        mint_ok = family.strip().lower() in MINT_OK_FAMILIES
+        try:
+            result = start_agent(
+                family, name, session=session, model=model, launch=False
+            )
         except Exception as e:
             self.notify(f"start failed: {e}", severity="error", timeout=10)
             return
         Config.reload_agents_cfg()
         label = f"{result['family']} / {result['name']}"
+        do_launch = bool(session) or mint_ok
         if session:
             self.notify(f"{label} attached {session[:13]}… — launching", severity="information", timeout=6)
+        elif mint_ok:
+            self.notify(f"{label} naive start (session/new allowed) — launching", severity="information", timeout=6)
         else:
             self.notify(
                 f"{label} home ready. Pass a session UUID to launch (will not mint).",
@@ -1557,7 +1564,7 @@ class AsdaaasTUI(App):
                 self.action_add_agent(name)
             except Exception:
                 pass
-        if session:
+        if do_launch:
             script = Path(__file__).resolve().parent.parent / "scripts" / "restart_agent.sh"
             self.run_worker(
                 lambda n=name, s=script: __import__("subprocess").run(
@@ -1704,7 +1711,7 @@ class AsdaaasTUI(App):
 | `/mail all <msg>` | Broadcast to all agents |
 | `/whoami` | Show/change operator name |
 | `/theme` | Change color theme |
-| `/start <family> <name> [session]` | Create family home + history ingest; attach existing UUID |
+| `/start <family> <name> [session] [model]` | Create family home; testagent may session/new |
 | `/help` | Show this help |
 | `Ctrl+C` | Interrupt agent |
 | `Ctrl+Q` | Quit TUI |
@@ -2570,7 +2577,7 @@ Type anything else to send a message to the agent.
             try:
                 input_bar = self.query_one("#input-bar", MessageInput)
                 input_bar.clear()
-                input_bar.insert("/start ")
+                input_bar.insert("/start testagent ")
                 input_bar.focus()
             except NoMatches:
                 self.notify("Usage: /start <family> <name> [session-uuid]", severity="information")

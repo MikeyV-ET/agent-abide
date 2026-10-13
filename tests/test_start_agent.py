@@ -63,3 +63,30 @@ def test_start_attaches_existing_uuid(tmp_path, monkeypatch):
     assert moved.is_dir()
     assert not old.exists()
     assert json.loads((moved / "summary.json").read_text())["info"]["cwd"] == str(dest)
+
+
+def test_parse_start_tokens_model_and_uuid():
+    from start_agent import parse_start_tokens
+    a = parse_start_tokens("testagent scratch grok-4.7-build-fast")
+    assert a["family"] == "testagent" and a["name"] == "scratch"
+    assert a["session"] is None and a["model"] == "grok-4.7-build-fast"
+    b = parse_start_tokens("LeviSmith Holt 01a1366b-0432-7220-8079-8311f4c98e81 grok-4.6")
+    assert b["session"].startswith("01a1366b") and b["model"] == "grok-4.6"
+
+
+def test_testagent_may_launch_without_session(tmp_path):
+    from start_agent import MINT_OK_FAMILIES, start_agent
+    assert "testagent" in MINT_OK_FAMILIES
+    roster = tmp_path / "agents.json"
+    roster.write_text(json.dumps({"settings": {"agents_dir": str(tmp_path)}, "agents": {}}) + "\n")
+    r = start_agent(
+        "testagent",
+        "scratch",
+        agents_json=roster,
+        model="grok-4.7-build-fast",
+        launch=False,
+    )
+    row = json.loads(roster.read_text())["agents"]["scratch"]
+    assert "session" not in row
+    assert row["model"] == "grok-4.7-build-fast"
+    assert row["family"] == "testagent"

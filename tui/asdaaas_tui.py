@@ -726,6 +726,7 @@ class SlashMenu(OptionList):
         {"name": "/whoami", "description": "Show/change operator name"},
         {"name": "/theme", "description": "Change color theme"},
         {"name": "/start", "description": "Start family agent (/start testagent Name [uuid] [model])"},
+        {"name": "/flag", "description": "waiting|error|clear — color this agent tab"},
         {"name": "/help", "description": "Show help"},
         {"name": "/exit", "description": "Quit the TUI"},
     ]
@@ -1458,6 +1459,21 @@ class AsdaaasTUI(App):
             self._handle_slash_command(text)
             return
 
+        # Eric showed up: clear waiting flag on this agent
+        if self._active_agent and not getattr(self, "_room_active", False):
+            try:
+                core = str(Path(__file__).resolve().parent.parent / "core")
+                if core not in sys.path:
+                    sys.path.insert(0, core)
+                from operator_flag import read_flag, write_flag
+                aa = Config.agent_home(self._active_agent) / "asdaaas"
+                fl = read_flag(aa)
+                if fl and str(fl.get("status") or "").lower() == "waiting":
+                    write_flag(aa, "clear")
+                    self._refresh_tab_statuses()
+            except Exception:
+                pass
+
         # Room mode: send to IRC channel instead of agent
         if self._room_active:
             nick = Config.OPERATOR_NAME or "eric"
@@ -1521,7 +1537,56 @@ class AsdaaasTUI(App):
         with open(msg_path, "w") as f:
             json.dump(msg, f)
 
+    def _handle_flag_command(self, arg: str) -> None:
+        """Set this tab's operator flag: waiting | error | clear."""
+        status = (arg or "waiting").split()[0].strip().lower()
+        note = ""
+        parts = (arg or "").split(None, 1)
+        if len(parts) > 1:
+            note = parts[1]
+        if not self._active_agent:
+            self.notify("No agent tab", severity="warning")
+            return
+        try:
+            core = str(Path(__file__).resolve().parent.parent / "core")
+            if core not in sys.path:
+                sys.path.insert(0, core)
+            from operator_flag import write_flag
+            write_flag(
+                Config.agent_home(self._active_agent) / "asdaaas",
+                status,
+                note=note,
+                agent=self._active_agent,
+            )
+        except Exception as e:
+            self.notify(f"flag failed: {e}", severity="error")
+            return
+        self._refresh_tab_statuses()
+        self.notify(f"{self._active_agent} flag {status}", severity="information", timeout=4)
+
+    def _refresh_tab_statuses(self) -> None:
+        """Read operator_flag + health for every open agent tab."""
+        try:
+            core = str(Path(__file__).resolve().parent.parent / "core")
+            if core not in sys.path:
+                sys.path.insert(0, core)
+            from operator_flag import tab_status_for
+        except Exception:
+            return
+        statuses = {}
+        for name in list(self._agents or []):
+            try:
+                statuses[name] = tab_status_for(Config.agent_home(name) / "asdaaas")
+            except Exception:
+                statuses[name] = "idle"
+        try:
+            bar = self.query_one("#agent-tab-bar", AgentTabBar)
+            bar.set_statuses(statuses)
+        except NoMatches:
+            pass
+
     def _handle_start_command(self, arg: str) -> None:
+
         """Create a family agent home from the TUI. Never mints a session id."""
         try:
             core = str(Path(__file__).resolve().parent.parent / "core")
@@ -1690,6 +1755,9 @@ class AsdaaasTUI(App):
         elif cmd == "/start":
             self._handle_start_command(arg)
             return
+        elif cmd == "/flag":
+            self._handle_flag_command(arg)
+            return
         elif cmd == "/help":
             help_text = """## TUI Commands
 
@@ -1712,6 +1780,7 @@ class AsdaaasTUI(App):
 | `/whoami` | Show/change operator name |
 | `/theme` | Change color theme |
 | `/start <family> <name> [session] [model]` | Create family home; testagent may session/new |
+| `/flag waiting\|error\|clear` | Color this tab (orange/red/auto) |
 | `/help` | Show this help |
 | `Ctrl+C` | Interrupt agent |
 | `Ctrl+Q` | Quit TUI |
@@ -3495,6 +3564,7 @@ Type anything else to send a message to the agent.
         _head_refresh_counter = 0
         while not worker.is_cancelled:
             try:
+                self.call_from_thread(self._refresh_tab_statuses)
                 if getattr(self, "_room_active", False):
                     self.call_from_thread(self._update_room_header)
                     time.sleep(2)

@@ -439,6 +439,7 @@ class AgentTabBar(Static):
         self._tabs = list(agents)
         self._scroll = 0
         self._tab_layout_cache: dict | None = None
+        self._tab_status: dict[str, str] = {}
 
     def set_agents(
         self,
@@ -458,6 +459,25 @@ class AgentTabBar(Static):
         self._scroll = min(self._scroll, max(0, len(self._tabs) - 1))
         self._tab_layout_cache = None
         self.refresh()
+
+    def set_statuses(self, statuses: dict[str, str] | None) -> None:
+        """operator flag / auto health: idle|working|waiting|error per agent tab."""
+        self._tab_status = dict(statuses or {})
+        self.refresh()
+
+    def _tab_name_style(self, tab: str, active: bool) -> str:
+        st = (self._tab_status.get(tab) or "idle").lower()
+        if st == "error":
+            fg = Theme.BR_RED
+        elif st == "waiting":
+            fg = Theme.BR_ORANGE
+        elif st == "working":
+            fg = Theme.BR_GREEN
+        else:
+            fg = Theme.FG if active else Theme.GRAY
+        bg = Theme.DARK2 if active else Theme.DARK1
+        weight = "bold " if (active or st in ("error", "waiting", "working")) else ""
+        return f"{weight}{fg} on {bg}"
 
     def _width(self) -> int:
         try:
@@ -513,7 +533,9 @@ class AgentTabBar(Static):
             elif kind == "room_members":
                 text.append(" [*] ", style=f"bold {Theme.BR_YELLOW} on {Theme.DARK1}")
             elif tab == self.active_agent:
-                text.append(f" [{lab}] ", style=f"bold {Theme.FG} on {Theme.DARK2}")
+                text.append(f" [{lab}] ", style=self._tab_name_style(tab, True))
+            elif kind == "tab":
+                text.append(f"  {lab}  ", style=self._tab_name_style(tab, False))
             else:
                 text.append(f"  {lab}  ", style=f"{Theme.GRAY} on {Theme.DARK1}")
         try:

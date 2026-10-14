@@ -14,6 +14,67 @@ from nav_widgets import layout_bubble, layout_painted_bubble, nick_mark, bubble_
 import re
 
 
+
+_PIPE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_PIPE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}")
+
+
+def _split_pipe_row(line: str) -> list[str]:
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def expand_pipe_tables(text: str) -> str:
+    """Turn markdown pipe-tables into wrapped bullets.
+
+    Rich markdown tables use overflow=ellipsis, so a UUID list in a table
+    hits the bubble edge as ``01a1366b-0432-72…``. Lists wrap; tables do not.
+    """
+    lines = (text or "").split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if (
+            _PIPE_ROW.match(lines[i] or "")
+            and i + 1 < n
+            and _PIPE_SEP.match(lines[i + 1] or "")
+        ):
+            headers = _split_pipe_row(lines[i])
+            i += 2
+            rows: list[list[str]] = []
+            while i < n and _PIPE_ROW.match(lines[i] or ""):
+                rows.append(_split_pipe_row(lines[i]))
+                i += 1
+            single = len(headers) == 1 or (
+                headers and all(not h for h in headers[1:])
+            )
+            for row in rows:
+                if not any(row):
+                    continue
+                if single:
+                    cell = row[0] if row else ""
+                    out.append(f"- `{cell}`" if cell else "-")
+                else:
+                    bits = []
+                    for h, c in zip(headers, row):
+                        if not c:
+                            continue
+                        bits.append(f"**{h}:** {c}" if h else c)
+                    extra = row[len(headers):]
+                    bits.extend(extra)
+                    out.append("- " + "; ".join(bits) if bits else "-")
+            out.append("")
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
 def operator_body(text: str) -> str:
     """Strip envelope/context tag for paint. Does not change the record."""
     t = (text or "").strip()
@@ -1038,6 +1099,8 @@ class AgentMessage(Static):
     def render(self):
         text = self._format_interjections(self._text)
         text = self._format_ephacts(text)
+        if "|" in text:
+            text = expand_pipe_tables(text)
         total = self.size.width if self.size.width >= 40 else 80
         _, _, _, col = bubble_metrics(total)
         inner_col = max(24, col - 2)

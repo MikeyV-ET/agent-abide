@@ -23,6 +23,7 @@ NICK_MARKS = {
     "q": ("▣", Theme.BR_PURPLE),
     "cinco": ("⬟", Theme.BR_ORANGE),
     "wend": ("✶", Theme.BR_PURPLE),
+    "holt": ("⬡", Theme.BR_YELLOW),
     "astro": ("✦", Theme.BR_AQUA),
 }
 

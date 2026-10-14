@@ -76,6 +76,7 @@ from message_input import MessageInput
 from chrome_widgets import (
     SystemAlert, ContentScroll, HookAnnotation, TurnSeparator, classify_turn_trigger,
 )
+from multiway import is_mw_tab, new_jsonl_records, parse_members, tab_id as mw_tab_id
 from nav_widgets import (
     RoomMessage, RoomSystemMessage, AgentTabBar, AgentAddSelector,
     RoomAddSelector, RoomNicksSelector,
@@ -1191,6 +1192,9 @@ class AsdaaasTUI(App):
         self._seen_interjections: set[str] = set()  # global dedup by bell id / text
         self._input_drafts: dict[str, str] = {}
         self._room_channel = "#standup"
+        self._mw_active = False
+        self._mw_rooms: dict[str, list[str]] = {}
+        self._mw_speech_off: dict[str, int] = {}
         self._room_active = False
         self._room_tab_visible = True
         self._open_rooms: list[str] = ["#standup"]
@@ -1459,6 +1463,11 @@ class AsdaaasTUI(App):
             self._handle_slash_command(text)
             return
 
+        # Multiway TUI room: fan-out to each member's tui inbox (not IRC)
+        if getattr(self, "_mw_active", False):
+            self._send_multiway(text)
+            return
+
         # Room mode: send to IRC channel instead of agent
         if self._room_active:
             nick = Config.OPERATOR_NAME or "eric"
@@ -1521,6 +1530,136 @@ class AsdaaasTUI(App):
         msg_path = inbox / f"msg_{ts}_{rand}.json"
         with open(msg_path, "w") as f:
             json.dump(msg, f)
+
+    def _send_to_named_agent(self, agent_name: str, text: str, *, room: str = "tui", members: list[str] | None = None) -> None:
+        agent_dir = Config.agent_home(agent_name)
+        inbox = agent_dir / "asdaaas" / "adapters" / "tui" / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time() * 1000)
+        rand = secrets.token_hex(4)
+        operator = Config.OPERATOR_NAME or "tui"
+        msg = {
+            "from": operator,
+            "adapter": "tui",
+            "text": text,
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "meta": {
+                "room": room,
+                "operator": operator,
+                "roomMembers": list(members or []),
+            },
+        }
+        with open(inbox / f"msg_{ts}_{rand}.json", "w") as f:
+            json.dump(msg, f)
+
+    def _send_multiway(self, text: str) -> None:
+        ch = self._room_channel
+        members = list(self._mw_rooms.get(ch) or parse_members(ch))
+        try:
+            room_scroll = self.query_one("#content-room", ContentScroll)
+            room_scroll._follow_tail = True
+            ts = time.strftime("%H:%M")
+            nick = Config.OPERATOR_NAME or "eric"
+            room_scroll.mount(RoomMessage(ts, nick, text, is_human=True))
+            room_scroll.scroll_end(animate=False)
+        except NoMatches:
+            pass
+        for name in members:
+            try:
+                self._send_to_named_agent(name, text, room=ch, members=members)
+            except Exception as e:
+                self.notify(f"{name}: {e}", severity="error", timeout=4)
+        self.notify("→ " + ", ".join(members), severity="information", timeout=3)
+
+    def _enter_mw(self, channel: str) -> None:
+        members = list(self._mw_rooms.get(channel) or parse_members(channel))
+        self._mw_rooms[channel] = members
+        self._mw_active = True
+        if channel not in getattr(self, "_open_rooms", []):
+            self._open_rooms.append(channel)
+        if not self._room_active:
+            try:
+                current_scroll = self._content_scroll()
+                current_scroll.display = False
+            except NoMatches:
+                pass
+            self._stash_input_draft(f"agent:{self._active_agent}")
+        self._room_channel = channel
+        self._room_active = True
+        self._sync_tab_bar()
+        try:
+            room_scroll = self.query_one("#content-room", ContentScroll)
+            room_scroll.display = True
+            room_scroll._follow_tail = True
+        except NoMatches:
+            pass
+        self._restore_input_draft(
+            f"room:{channel}",
+            f"Multiway {', '.join(members)}  (/mw Name Name)",
+        )
+        try:
+            header = self.query_one("#agent-header", AgentHeader)
+            header.room_mode = True
+            header.agent_name = channel
+            header.health_status = "multiway"
+            header.gaze_target = "tui/" + channel
+            header.room_nicks = ", ".join(members)
+            header.is_generating = False
+        except NoMatches:
+            pass
+        try:
+            tab_bar = self.query_one("#agent-tab-bar", AgentTabBar)
+            tab_bar.active_agent = channel
+        except NoMatches:
+            pass
+        # Start tails at EOF so we only show speech after joining
+        for name in members:
+            sp = Config.agent_home(name) / "asdaaas" / "history" / "speech.jsonl"
+            try:
+                self._mw_speech_off[name] = sp.stat().st_size if sp.is_file() else 0
+            except OSError:
+                self._mw_speech_off[name] = 0
+        try:
+            room_scroll = self.query_one("#content-room", ContentScroll)
+            room_scroll.mount(
+                RoomSystemMessage(
+                    time.strftime("%H:%M"),
+                    f"multiway: {', '.join(members)} — new replies after this line",
+                )
+            )
+        except Exception:
+            pass
+
+    def _poll_mw_speech(self) -> None:
+        if not getattr(self, "_mw_active", False):
+            return
+        ch = self._room_channel
+        members = list(self._mw_rooms.get(ch) or [])
+        from datetime import datetime as _dt
+
+        def _mount(nick: str, content: str, ts: str) -> None:
+            try:
+                room_scroll = self.query_one("#content-room", ContentScroll)
+                room_scroll.mount(RoomMessage(ts, nick, content, is_human=False))
+                if getattr(room_scroll, "_follow_tail", True):
+                    room_scroll.scroll_end(animate=False)
+            except NoMatches:
+                pass
+
+        for name in members:
+            sp = Config.agent_home(name) / "asdaaas" / "history" / "speech.jsonl"
+            off = int(self._mw_speech_off.get(name) or 0)
+            rows, new_off = new_jsonl_records(sp, off)
+            self._mw_speech_off[name] = new_off
+            for o in rows:
+                if str(o.get("role") or "") != "assistant":
+                    continue
+                content = str(o.get("content") or "").strip()
+                if not content:
+                    continue
+                raw_ts = str(o.get("ts") or "")
+                hhmm = raw_ts[11:16] if len(raw_ts) >= 16 else time.strftime("%H:%M")
+                self.call_from_thread(_mount, name, content, hhmm)
 
     def _handle_flag_command(self, arg: str) -> None:
         """Set this tab's operator flag: waiting | error | clear."""
@@ -1648,6 +1787,16 @@ class AsdaaasTUI(App):
         elif cmd == "/status":
             self._show_status_info(content)
             return
+        elif cmd == "/mw":
+            names = parse_members(arg)
+            if len(names) < 2:
+                self.notify("Usage: /mw Name Name [Name…]", severity="warning", timeout=6)
+                return
+            ch = mw_tab_id(names)
+            self._mw_rooms[ch] = names
+            self._enter_mw(ch)
+            self.notify(f"Multiway {', '.join(names)}", severity="information", timeout=4)
+            return
         elif cmd == "/room":
             # Room tab: change IRC channel (/room #meetingroom1)
             if not arg.strip():
@@ -1752,6 +1901,7 @@ class AsdaaasTUI(App):
 | `/status` | Show agent status |
 | `/gaze [room]` | Show/set gaze target |
 | `/room [#chan]` | Room tab: show/switch IRC channel |
+| `/mw Name Name` | Multiway TUI chat (fan-out + labeled replies) |
 | `/who` | List roster nicks in the current IRC room |
 | `/part <agent>` | Remove an agent nick from the current IRC room |
 | `/awareness` | Show/edit background channels |
@@ -2771,6 +2921,10 @@ Type anything else to send a message to the agent.
 
     def action_switch_to_room(self, channel: str | None = None) -> None:
         """Switch to an IRC channel tab and ensure a live connection."""
+        if channel and is_mw_tab(channel):
+            self._enter_mw(channel)
+            return
+        self._mw_active = False
         if channel and str(channel).startswith("#"):
             if self._room_active and channel == self._room_channel:
                 return
@@ -2839,6 +2993,12 @@ Type anything else to send a message to the agent.
             header = self.query_one("#agent-header", AgentHeader)
             header.room_mode = True
             header.agent_name = self._room_channel
+            if is_mw_tab(self._room_channel):
+                members = list(self._mw_rooms.get(self._room_channel) or parse_members(self._room_channel))
+                header.health_status = status or "multiway"
+                header.gaze_target = "tui/" + self._room_channel
+                header.room_nicks = ", ".join(members)
+                return
             if status is None:
                 status = "connected" if self._room_irc_sock is not None else "disconnected"
             header.health_status = status
@@ -3550,7 +3710,9 @@ Type anything else to send a message to the agent.
         while not worker.is_cancelled:
             try:
                 self.call_from_thread(self._refresh_tab_statuses)
-                if getattr(self, "_room_active", False):
+                if getattr(self, "_mw_active", False):
+                    self._poll_mw_speech()
+                if getattr(self, "_room_active", False) and not getattr(self, "_mw_active", False):
                     self.call_from_thread(self._update_room_header)
                     time.sleep(2)
                     continue

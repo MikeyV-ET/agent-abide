@@ -231,3 +231,101 @@ def start_agent(
         "launched": launched,
         "history_config": str(home / "asdaaas" / "history" / "config.json"),
     }
+
+def grok_sessions_parent(home: Path) -> Path:
+    encoded = str(Path(home).expanduser().resolve()).replace("/", "%2F")
+    return Path.home() / ".grok" / "sessions" / encoded
+
+
+def list_sessions_for_home(home: Path, *, skip: str | None = None) -> list[dict]:
+    """UUIDs under this home's grok session dir."""
+    parent = grok_sessions_parent(home)
+    out = []
+    if not parent.is_dir():
+        return out
+    skip = (skip or "").strip()
+    for d in sorted(parent.iterdir()):
+        if not d.is_dir():
+            continue
+        name = d.name
+        if len(name) < 8:
+            continue
+        if skip and name == skip:
+            kind = "spine"
+        else:
+            kind = "extra"
+        live = session_is_live(name)
+        out.append({"session": name, "kind": kind, "live": live, "path": str(d)})
+    return out
+
+
+def session_is_live(session_id: str) -> bool:
+    needle = (session_id or "").strip()
+    if len(needle) < 8:
+        return False
+    import os
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            cmd = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace")
+        except Exception:
+            continue
+        if needle in cmd and ("grok" in cmd or "asdaaas" in cmd):
+            return True
+    return False
+
+
+def ingest_session_history(home: Path, session_id: str, *, source_home: Path) -> dict:
+    """Project parent-encoded updates.jsonl into this seat's hot.jsonl. Does not move files."""
+    from stream_adapters.grok import tail_grok_once
+    src = grok_sessions_parent(source_home) / session_id / "updates.jsonl"
+    if not src.is_file():
+        raise FileNotFoundError(f"no updates.jsonl for {session_id} under {source_home}")
+    write_history_config(home)
+    return tail_grok_once(home, Path(home).name, session_id=session_id, source=src)
+
+
+def seat_subagent(
+    parent: str,
+    session: str,
+    name: str | None = None,
+    *,
+    agents_json: Path | None = None,
+    launch: bool = True,
+) -> dict:
+    """Temporary sub family seat. Does not move the grok session. Does not mint."""
+    sid = (session or "").strip()
+    if not sid:
+        raise ValueError("session uuid required")
+    cfg_path = Path(agents_json or Path.home() / "agents" / "config" / "agents.json")
+    cfg = json.loads(cfg_path.read_text())
+    agents = cfg.get("agents") or {}
+    parent_row = agents.get(parent) or {}
+    parent_home = Path(parent_row.get("home") or (Path.home() / "agents" / parent))
+    short = sid.replace("-", "")[-6:]
+    seat_name = (name or f"{parent}-{short}").strip()
+    agents_dir = _agents_dir(cfg)
+    home = ensure_home("sub", seat_name, agents_dir=agents_dir)
+    ingest = ingest_session_history(home, sid, source_home=parent_home)
+    row = upsert_roster(
+        cfg_path, name=seat_name, family="sub", home=home, session=sid
+    )
+    live = session_is_live(sid)
+    launched = False
+    if launch and not live:
+        script = Path(__file__).resolve().parent.parent / "scripts" / "restart_agent.sh"
+        subprocess.run(["bash", str(script), seat_name], check=False)
+        launched = True
+    return {
+        "name": seat_name,
+        "family": "sub",
+        "home": str(home),
+        "session": sid,
+        "parent": parent,
+        "live_child": live,
+        "launched": launched,
+        "ingest": ingest,
+        "roster": row,
+    }
+

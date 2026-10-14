@@ -1709,7 +1709,72 @@ class AsdaaasTUI(App):
         except NoMatches:
             pass
 
+    def _handle_subs_command(self, arg: str) -> None:
+        """List grok session UUIDs under a parent home."""
+        parent = (arg or self._active_agent or "").split()[0].strip()
+        if not parent:
+            self.notify("Usage: /subs Holt", severity="warning")
+            return
+        try:
+            core = str(Path(__file__).resolve().parent.parent / "core")
+            if core not in sys.path:
+                sys.path.insert(0, core)
+            from start_agent import list_sessions_for_home
+            home = Config.agent_home(parent)
+            spine = str((Config.load_agents_cfg().get("agents") or {}).get(parent, {}).get("session") or "")
+            rows = list_sessions_for_home(home, skip=spine)
+        except Exception as e:
+            self.notify(f"/subs failed: {e}", severity="error")
+            return
+        if not rows:
+            self.notify(f"No grok sessions under {parent}", severity="warning")
+            return
+        lines = [f"{r['kind']} {'LIVE' if r['live'] else '    '} {r['session']}" for r in rows]
+        self.notify(parent + "\n" + "\n".join(lines), severity="information", timeout=12)
+        try:
+            room = self.query_one("#content-room", ContentScroll)
+        except Exception:
+            room = None
+        # also dump into active agent scroll as a system line
+        try:
+            from chrome_widgets import SystemAlert
+            scroll = self._content_scroll()
+            scroll.mount(SystemAlert("subs " + parent + "\n" + "\n".join(lines), severity="info"))
+            scroll.scroll_end(animate=False)
+        except Exception:
+            pass
+
+    def _handle_attach_command(self, arg: str) -> None:
+        """Temporary sub seat: /attach Holt <uuid> [name]. Does not move the tape."""
+        parts = (arg or "").split()
+        if len(parts) < 2:
+            self.notify("Usage: /attach Holt <uuid> [name]", severity="warning", timeout=8)
+            return
+        parent, sid = parts[0], parts[1]
+        name = parts[2] if len(parts) >= 3 else None
+        try:
+            core = str(Path(__file__).resolve().parent.parent / "core")
+            if core not in sys.path:
+                sys.path.insert(0, core)
+            from start_agent import seat_subagent
+            result = seat_subagent(parent, sid, name, launch=True)
+        except Exception as e:
+            self.notify(f"attach failed: {e}", severity="error", timeout=10)
+            return
+        Config.reload_agents_cfg()
+        label = f"sub / {result['name']}"
+        extra = " (live grok holds stdin — history ingested, not launched)" if result.get("live_child") else ""
+        if result.get("launched"):
+            extra = " — launched asdaaas"
+        self.notify(label + extra, severity="information", timeout=8)
+        if result["name"] not in self._agents:
+            try:
+                self.action_add_agent(result["name"])
+            except Exception:
+                pass
+
     def _handle_start_command(self, arg: str) -> None:
+
 
         """Create a family agent home from the TUI. Never mints a session id."""
         try:
@@ -1786,6 +1851,12 @@ class AsdaaasTUI(App):
             return
         elif cmd == "/status":
             self._show_status_info(content)
+            return
+        elif cmd == "/subs":
+            self._handle_subs_command(arg)
+            return
+        elif cmd == "/attach":
+            self._handle_attach_command(arg)
             return
         elif cmd == "/mw":
             names = parse_members(arg)
@@ -1902,6 +1973,8 @@ class AsdaaasTUI(App):
 | `/gaze [room]` | Show/set gaze target |
 | `/room [#chan]` | Room tab: show/switch IRC channel |
 | `/mw Name Name` | Multiway TUI chat (fan-out + labeled replies) |
+| `/subs [parent]` | Extra grok UUIDs under that home |
+| `/attach parent uuid [name]` | Temporary sub TUI seat (does not move tape) |
 | `/who` | List roster nicks in the current IRC room |
 | `/part <agent>` | Remove an agent nick from the current IRC room |
 | `/awareness` | Show/edit background channels |

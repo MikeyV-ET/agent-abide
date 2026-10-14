@@ -1459,21 +1459,6 @@ class AsdaaasTUI(App):
             self._handle_slash_command(text)
             return
 
-        # Eric showed up: clear waiting flag on this agent
-        if self._active_agent and not getattr(self, "_room_active", False):
-            try:
-                core = str(Path(__file__).resolve().parent.parent / "core")
-                if core not in sys.path:
-                    sys.path.insert(0, core)
-                from operator_flag import read_flag, write_flag
-                aa = Config.agent_home(self._active_agent) / "asdaaas"
-                fl = read_flag(aa)
-                if fl and str(fl.get("status") or "").lower() == "waiting":
-                    write_flag(aa, "clear")
-                    self._refresh_tab_statuses()
-            except Exception:
-                pass
-
         # Room mode: send to IRC channel instead of agent
         if self._room_active:
             nick = Config.OPERATOR_NAME or "eric"

@@ -502,6 +502,28 @@ async def _sync_irc_roster(connections, agents, default_channel, host, port, lis
             await conn.part(ch)
 
 
+
+def _fan_channel_to_peers(batcher, connections, from_agent, nick, channel, text):
+    """Listener poll drops self-echo, so peers never hear this nick on IRC.
+
+    Copy the just-sent channel line into other room members' inboxes.
+    """
+    if not text or not str(channel).startswith("#"):
+        return
+    room_members = set(irc_rooms.members_of(channel))
+    fake = {
+        "sender": nick,
+        "target": channel,
+        "text": text,
+        "is_pm": False,
+    }
+    for name in connections:
+        if name == from_agent:
+            continue
+        if room_members and name not in room_members:
+            continue
+        batcher.add(name, fake)
+
 async def run_adapter(agents, channel, host, port):
     adapter_api.ensure_dirs(ADAPTER_NAME)
     batcher = MessageBatcher()
@@ -763,6 +785,9 @@ async def run_adapter(agents, channel, host, port):
                                 await conn.join_if_needed(gaze_room)
                                 await conn.send(remaining, target=gaze_room)
                                 tprint(f"[irc-adapter] {agent_name} -> {gaze_room} ({len(remaining)} chars)")
+                                _fan_channel_to_peers(
+                                    batcher, connections, agent_name, conn.nick, gaze_room, remaining
+                                )
                             else:
                                 # Legacy fallback: use channel param or default channel
                                 target_channel = resp.get("channel", channel)
@@ -774,6 +799,9 @@ async def run_adapter(agents, channel, host, port):
                                 else:
                                     await conn.send(remaining, target=target_channel)
                                     tprint(f"[irc-adapter] {agent_name} -> {target_channel} ({len(remaining)} chars)")
+                                    _fan_channel_to_peers(
+                                        batcher, connections, agent_name, conn.nick, target_channel, remaining
+                                    )
                 else:
                     for fb in connections.values():
                         if fb.connected:

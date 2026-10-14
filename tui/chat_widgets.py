@@ -32,6 +32,24 @@ def telemetry_from_chunk(text: str) -> str:
     return m.group(0).strip("[]").replace("Context left ", "")
 
 
+def speaker_from_chunk(text: str) -> str:
+    """Who spoke. IRC/background envelopes name Squiggy; do not default them to eric."""
+    t = text or ""
+    m = re.search(r"^\[background\]\s+(\S+)\s+in\s+", t, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"\[IRC\s+[^\]]*\s+from\s+(\S+)\]", t, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"^\[(\S+)\s+\(via\s+irc\)", t, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"^<eric\b", t, re.I)
+    if m:
+        return "eric"
+    return "eric"
+
+
 def via_from_chunk(text: str) -> str:
     t = text or ""
     m = re.search(r"reply_via=([a-z0-9_-]+)", t, re.I)
@@ -99,7 +117,11 @@ def system_alert_body(text: str, cap: int = 800) -> str:
 def make_user_message(text: str, *, echo: bool = False) -> "UserMessage":
     """Paint-only: eric (tui|irc) + body + dim telemetry. Record stays raw."""
     via = via_from_chunk(text) if not echo else "tui"
-    nick = f"eric ({via})"
+    who = speaker_from_chunk(text) if not echo else "eric"
+    if who.lower() in ("eric", "eric_tui", "eterry"):
+        nick = f"eric ({via})"
+    else:
+        nick = f"{who} ({via})"
     body = operator_body(text) if not echo else (text or "").strip()
     um = UserMessage(body or (text or "").strip(), nick=nick, via=via)
     tel = telemetry_from_chunk(text)

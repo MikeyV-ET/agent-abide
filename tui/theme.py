@@ -385,14 +385,20 @@ def rich_console_theme():
     return RichTheme({
         "markdown.link": Theme.BR_BLUE,
         "markdown.link_url": Theme.BLUE,
-        "markdown.code": Theme.FG,
+        "markdown.code": f"{Theme.FG} on {Theme.DARK1}",
+        "markdown.code_block": f"{Theme.FG} on {Theme.DARK1}",
         "markdown.item.bullet": Theme.BR_BLUE,
         "markdown.item.number": Theme.BR_BLUE,
+        "markdown.list": Theme.BR_BLUE,
+        "markdown.table.border": Theme.DARK3,
+        "markdown.table.header": f"bold {Theme.FG}",
         "repr.url": Theme.BR_BLUE,
         "repr.hash": Theme.GRAY,
+        "repr.number": Theme.FG,
         "cyan": Theme.BR_BLUE,
         "bold cyan": f"bold {Theme.BR_BLUE}",
         "dim cyan": f"dim {Theme.BR_BLUE}",
+        "code": f"{Theme.FG} on {Theme.DARK1}",
     })
 
 

@@ -61,6 +61,7 @@ from rich.table import Table
 from rich.console import Console as RichConsole, Group
 
 from ephact_parser import extract_ephacts, has_partial_ephact
+from hot_tail_policy import offset_after_stat
 from ephact_viewer import EphactViewer, archive_ephact, EphactEntry
 from event_coalesce import coalesce_events
 from chat_model import extract_interjections as _cm_extract_interjections, ChatState, apply_event, interjection_key, prune_items
@@ -4072,7 +4073,7 @@ Type anything else to send a message to the agent.
                         except json.JSONDecodeError:
                             pass
                 elif current_size < offset:
-                    offset = 0
+                    offset = offset_after_stat(offset, current_size)
             except FileNotFoundError:
                 pass
             except Exception:
@@ -4471,7 +4472,7 @@ Type anything else to send a message to the agent.
                 elif current_size < offset:
                     # hot prune is archive-then-keep-tail. Replay from 0 remounts
                     # the whole remaining file and the pane jumps. Tip is already painted.
-                    state["updates_offset"] = current_size
+                    state["updates_offset"] = offset_after_stat(offset, current_size)
 
             except FileNotFoundError:
                 new_kind, new_path = self._resolve_display_history(agent_name)

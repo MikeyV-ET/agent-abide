@@ -792,7 +792,7 @@ class ThemeSelector(OptionList):
         bg = getattr(palette, "BG", "#000000")
         fg = getattr(palette, "FG", "#ffffff")
         gray = getattr(palette, "GRAY", "#888888")
-        aqua = getattr(palette, "BR_AQUA", "#00ffff")
+        aqua = getattr(palette, "BR_AQUA", getattr(palette, "BLUE", "#076678"))
         green = getattr(palette, "BR_GREEN", "#00ff00")
         orange = getattr(palette, "BR_ORANGE", "#ff8800")
         red = getattr(palette, "BR_RED", "#ff0000")

@@ -301,6 +301,8 @@ def theme_css() -> str:
     # Use concrete hex so we are not stuck on Textual $surface dark defaults
     return f"""
 /* dynamic theme — injected on set_theme / startup */
+$accent: {Theme.BR_BLUE};
+$accent-muted: {Theme.BLUE};
 Screen {{
     background: {Theme.BG};
     color: {Theme.FG};
@@ -371,7 +373,27 @@ SlashMenu {{
     color: {Theme.FG};
     border: solid {Theme.BR_AQUA};
 }}
+EphactViewer {{
+    border: solid {Theme.BR_BLUE};
+}}
 """
+
+
+def rich_console_theme():
+    """Rich Console theme so markdown/links are palette colors, not ANSI cyan."""
+    from rich.theme import Theme as RichTheme
+    return RichTheme({
+        "markdown.link": Theme.BR_BLUE,
+        "markdown.link_url": Theme.BLUE,
+        "markdown.code": Theme.FG,
+        "markdown.item.bullet": Theme.BR_BLUE,
+        "markdown.item.number": Theme.BR_BLUE,
+        "repr.url": Theme.BR_BLUE,
+        "repr.hash": Theme.GRAY,
+        "cyan": Theme.BR_BLUE,
+        "bold cyan": f"bold {Theme.BR_BLUE}",
+        "dim cyan": f"dim {Theme.BR_BLUE}",
+    })
 
 
 def apply_theme_to_app(app) -> None:

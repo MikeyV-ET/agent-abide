@@ -43,7 +43,7 @@ class EphactViewer(Vertical):
         height: 40%;
         max-height: 50%;
         min-height: 10;
-        border: solid cyan;
+        border: solid $accent;
         background: transparent;
         padding: 0 0;
     }
@@ -265,7 +265,7 @@ class EphactViewer(Vertical):
 
         pos = left_pos
         if has_left:
-            subtitle.append("◀ ", style="bold cyan")
+            subtitle.append("◀ ", style=f"bold {Theme.BR_BLUE}")
             regions.append((pos, pos + arrow_width, ("scroll", -1)))
         else:
             subtitle.append("  ", style="dim")
@@ -275,14 +275,14 @@ class EphactViewer(Vertical):
             if ti == idx:
                 subtitle.append(label, style="bold white on blue")
             else:
-                subtitle.append(label, style="cyan")
+                subtitle.append(label, style=Theme.BR_BLUE)
             regions.append((pos, pos + len(label), ("tab", ti)))
             pos += len(label)
             subtitle.append(" ×", style="bold red")
             regions.append((pos, pos + 2, ("close_one", ti)))
             pos += 2
             if ti < visible_end - 1:
-                subtitle.append("│", style="dim cyan")
+                subtitle.append("│", style=f"dim {Theme.BR_BLUE}")
                 pos += 1
 
         right_pos = left_pos + arrow_width + avail
@@ -292,7 +292,7 @@ class EphactViewer(Vertical):
             pos = right_pos
 
         if has_right:
-            subtitle.append(" ▶", style="bold cyan")
+            subtitle.append(" ▶", style=f"bold {Theme.BR_BLUE}")
             regions.append((pos, pos + arrow_width, ("scroll", 1)))
         else:
             subtitle.append("  ", style="dim")

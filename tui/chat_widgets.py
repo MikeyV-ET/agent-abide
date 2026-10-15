@@ -215,7 +215,14 @@ def _flatten_to_text(renderable, width: int = 120) -> Text:
     from io import StringIO
     from rich.style import Style as RichStyle
     buf = StringIO()
-    console = RichConsole(file=buf, force_terminal=True, width=width, no_color=False)
+    from theme import rich_console_theme
+    console = RichConsole(
+        file=buf,
+        force_terminal=True,
+        width=width,
+        no_color=False,
+        theme=rich_console_theme(),
+    )
     console.print(renderable, end="")
     result = Text.from_ansi(buf.getvalue())
     lines = result.split("\n")

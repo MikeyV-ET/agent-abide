@@ -1662,14 +1662,21 @@ class AsdaaasTUI(App):
                 self.call_from_thread(_mount, name, content, hhmm)
 
     def _handle_flag_command(self, arg: str) -> None:
-        """Set this tab's operator flag: waiting | error | clear."""
-        status = (arg or "waiting").split()[0].strip().lower()
+        """Eric clears; agents raise waiting/error."""
+        status = (arg or "clear").split()[0].strip().lower()
         note = ""
         parts = (arg or "").split(None, 1)
         if len(parts) > 1:
             note = parts[1]
         if not self._active_agent:
             self.notify("No agent tab", severity="warning")
+            return
+        if status in ("waiting", "error"):
+            self.notify(
+                "Agents raise waiting/error. You /flag clear on this tab.",
+                severity="warning",
+                timeout=6,
+            )
             return
         try:
             core = str(Path(__file__).resolve().parent.parent / "core")

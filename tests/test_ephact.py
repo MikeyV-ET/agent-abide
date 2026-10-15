@@ -233,3 +233,12 @@ class TestArchive:
             assert path.exists()
             # Must not create flat ~/agents-style sibling under tmpdir
             assert not (Path(tmpdir) / "Squiggy" / "ephacts").exists()
+
+def test_push_same_card_does_not_duplicate():
+    from ephact_parser import EphactData
+    from ephact_viewer import EphactViewer
+    v = EphactViewer()
+    e = EphactData(type="table", content="| a |\n|---|\n| 1 |", title="T")
+    assert v.push("Squiggy", e) is True
+    assert v.push("Squiggy", e) is False
+    assert len(v._stacks["Squiggy"]) == 1

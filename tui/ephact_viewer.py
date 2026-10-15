@@ -101,11 +101,23 @@ class EphactViewer(Vertical):
     def on_mount(self) -> None:
         self._refresh_display()
 
-    def push(self, agent: str, ephact: EphactData) -> None:
-        """Add a new ephact to an agent's stack. Shows viewer only if agent is active."""
+    @staticmethod
+    def _fingerprint(ephact: EphactData) -> str:
+        return f"{ephact.type}\0{ephact.title or ''}\0{ephact.content}"
+
+    def push(self, agent: str, ephact: EphactData) -> bool:
+        """Add a new ephact. False if this exact card is already on the stack.
+
+        History replay / hot.jsonl prune used to re-push every card and
+        redraw the viewer (scroll_home) for each one.
+        """
         if agent not in self._stacks:
             self._stacks[agent] = []
             self._view_index[agent] = 0
+
+        fp = self._fingerprint(ephact)
+        if any(self._fingerprint(e.data) == fp for e in self._stacks[agent]):
+            return False
 
         entry = EphactEntry(data=ephact, agent=agent)
         self._stacks[agent].append(entry)
@@ -119,6 +131,7 @@ class EphactViewer(Vertical):
                 self.query_one("#ephact-scroll", VerticalScroll).scroll_home(animate=False)
             except Exception:
                 pass
+        return True
 
     def close(self) -> None:
         """Hide the viewer (keeps stack intact)."""

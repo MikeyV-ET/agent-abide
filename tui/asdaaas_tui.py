@@ -4834,7 +4834,9 @@ Type anything else to send a message to the agent.
             try:
                 viewer = self.query_one("#ephact-viewer", EphactViewer)
                 for eph in new_ephacts:
-                    viewer.push(self._active_agent, eph)
+                    added = viewer.push(self._active_agent, eph)
+                    if not added:
+                        continue
                     entry = EphactEntry(data=eph, agent=self._active_agent)
                     archive_ephact(
                         self._active_agent,

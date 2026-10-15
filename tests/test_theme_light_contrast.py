@@ -28,3 +28,25 @@ def test_theme_css_sets_accent_to_br_blue():
     css = theme_css()
     assert Theme.BR_BLUE in css
     assert "$accent:" in css
+
+
+def test_light_inline_code_is_cream_on_dark_not_black_on_tan():
+    from theme import set_theme, Theme
+    from rich.markdown import Markdown
+    from chat_widgets import _flatten_to_text
+    set_theme("gruvbox-light")
+    t = _flatten_to_text(Markdown("`013f5f0`"), width=20)
+    styles = [str(s.style) for s in t.spans if s.style]
+    blob = " ".join(styles)
+    assert Theme.BG.lower() in blob.lower() or "fbf1c7" in blob.lower()
+    assert "on " + Theme.FG.lower() in blob.lower() or "3c3836" in blob.lower()
+
+
+def test_hex_literal_uses_its_own_color_on_dark_nest():
+    from theme import set_theme
+    from rich.markdown import Markdown
+    from chat_widgets import _flatten_to_text
+    set_theme("gruvbox-light")
+    t = _flatten_to_text(Markdown("`#076678`"), width=20)
+    blob = " ".join(str(s.style) for s in t.spans)
+    assert "076678" in blob.lower()

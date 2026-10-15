@@ -206,6 +206,21 @@ def short_ref(tool_id: str, prefix: str = "id") -> str:
     return f"{prefix}:{chunk}" if chunk else ""
 
 
+
+_HEX_LIT = re.compile(r"#[0-9A-Fa-f]{6}")
+
+
+def _paint_hex_literals(text: Text) -> Text:
+    """#rrggbb in speech: truecolor on the dark code nest (the chip that read well)."""
+    from theme import Theme, is_light_theme
+    nest = Theme.FG if is_light_theme() else Theme.DARK1
+    plain = text.plain
+    for m in _HEX_LIT.finditer(plain):
+        hex_s = m.group(0)
+        text.stylize(f"{hex_s} on {nest}", m.start(), m.end())
+    return text
+
+
 def _flatten_to_text(renderable, width: int = 120) -> Text:
     """Render a Rich renderable through Console, return as Text for native selectability.
 
@@ -225,6 +240,7 @@ def _flatten_to_text(renderable, width: int = 120) -> Text:
     )
     console.print(renderable, end="")
     result = Text.from_ansi(buf.getvalue())
+    result = _paint_hex_literals(result)
     lines = result.split("\n")
     cleaned: list[Text] = []
     for line in lines:

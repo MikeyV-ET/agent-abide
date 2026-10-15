@@ -379,14 +379,37 @@ EphactViewer {{
 """
 
 
+
+def _hex_luminance(hex_s: str) -> float:
+    h = (hex_s or "").lstrip("#")
+    if len(h) != 6:
+        return 0.0
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return 0.0
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def is_light_theme() -> bool:
+    return _hex_luminance(Theme.BG) > 160
+
+
+def code_chip_style() -> str:
+    """Inline code: light letters on a dark nest (the chip Eric liked)."""
+    if is_light_theme():
+        return f"{Theme.BG} on {Theme.FG}"
+    return f"{Theme.BR_AQUA} on {Theme.DARK1}"
+
+
 def rich_console_theme():
     """Rich Console theme so markdown/links are palette colors, not ANSI cyan."""
     from rich.theme import Theme as RichTheme
     return RichTheme({
         "markdown.link": Theme.BR_BLUE,
         "markdown.link_url": Theme.BLUE,
-        "markdown.code": f"{Theme.FG} on {Theme.DARK1}",
-        "markdown.code_block": f"{Theme.FG} on {Theme.DARK1}",
+        "markdown.code": code_chip_style(),
+        "markdown.code_block": code_chip_style(),
         "markdown.item.bullet": Theme.BR_BLUE,
         "markdown.item.number": Theme.BR_BLUE,
         "markdown.list": Theme.BR_BLUE,
@@ -398,7 +421,7 @@ def rich_console_theme():
         "cyan": Theme.BR_BLUE,
         "bold cyan": f"bold {Theme.BR_BLUE}",
         "dim cyan": f"dim {Theme.BR_BLUE}",
-        "code": f"{Theme.FG} on {Theme.DARK1}",
+        "code": code_chip_style(),
     })
 
 

@@ -5284,7 +5284,13 @@ Type anything else to send a message to the agent.
                     self._seen_interjections.add(key)
                     panel._mounted_interjections.add(msg)
                     anchor = panel._run_stack() or panel
-                    content.mount(InterjectionBlock(msg), before=anchor)
+                    try:
+                        if getattr(anchor, "parent", None) is None:
+                            content.mount(InterjectionBlock(msg))
+                        else:
+                            content.mount(InterjectionBlock(msg), before=anchor)
+                    except Exception:
+                        content.mount(InterjectionBlock(msg))
                     mounted_any = True
                 if mounted_any and self._following_tail():
                     content.refresh(layout=True)

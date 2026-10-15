@@ -463,7 +463,10 @@ class AgentTabBar(Static):
 
     def set_statuses(self, statuses: dict[str, str] | None) -> None:
         """operator flag / auto health: idle|working|waiting|error per agent tab."""
-        self._tab_status = dict(statuses or {})
+        nxt = dict(statuses or {})
+        if nxt == getattr(self, "_tab_status", None):
+            return
+        self._tab_status = nxt
         self.refresh()
 
     def _tab_name_style(self, tab: str, active: bool) -> str:

@@ -4469,7 +4469,9 @@ Type anything else to send a message to the agent.
                         f"skipped={skip_count} offset={state['updates_offset']}"
                     )
                 elif current_size < offset:
-                    state["updates_offset"] = 0
+                    # hot prune is archive-then-keep-tail. Replay from 0 remounts
+                    # the whole remaining file and the pane jumps. Tip is already painted.
+                    state["updates_offset"] = current_size
 
             except FileNotFoundError:
                 new_kind, new_path = self._resolve_display_history(agent_name)

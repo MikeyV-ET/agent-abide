@@ -1,0 +1,72 @@
+"""Unit tests for TUI Grok STT helper (no live mic / network)."""
+import json
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tui"))
+from voice_stt import (
+    VoiceError,
+    build_stt_ws_url,
+    merge_voice_fragment,
+    recorder_candidates,
+    resolve_bearer,
+)
+
+
+def test_build_stt_ws_url_default():
+    url = build_stt_ws_url()
+    assert url.startswith("wss://api.x.ai/v1/stt?")
+    assert "sample_rate=16000" in url
+    assert "encoding=pcm" in url
+    assert "language=en" in url
+    assert "interim_results=true" in url
+    assert "endpointing=400" in url
+
+
+def test_build_stt_ws_url_v1_dedupe():
+    url = build_stt_ws_url("https://proxy.example.com/v1")
+    assert url.startswith("wss://proxy.example.com/v1/stt?")
+
+
+def test_build_stt_ws_url_rejects_http():
+    with pytest.raises(VoiceError):
+        build_stt_ws_url("http://localhost:8080")
+
+
+def test_auto_language_becomes_en():
+    url = build_stt_ws_url(language="auto")
+    assert "language=en" in url
+
+
+def test_merge_voice_fragment():
+    assert merge_voice_fragment("", "hello") == "hello"
+    assert merge_voice_fragment("hi", "there") == "hi there"
+    assert merge_voice_fragment("hi ", "there") == "hi there"
+
+
+def test_resolve_bearer_env(monkeypatch):
+    monkeypatch.setenv("XAI_API_KEY", "  sk-test  ")
+    assert resolve_bearer() == "sk-test"
+
+
+def test_resolve_bearer_auth_json(monkeypatch, tmp_path):
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    auth = tmp_path / "auth.json"
+    auth.write_text(
+        json.dumps({"https://auth.x.ai::x": {"key": "tok-from-file"}})
+    )
+    with patch("voice_stt.AUTH_PATH", auth):
+        assert resolve_bearer() == "tok-from-file"
+
+
+def test_recorder_candidates_shape():
+    cands = recorder_candidates(16000)
+    names = [n for n, _ in cands]
+    assert names == [n for n in ("pw-record", "parec", "arecord") if n in names]
+    for name, args in cands:
+        joined = " ".join(args)
+        assert "16000" in joined or any("16000" in a for a in args)

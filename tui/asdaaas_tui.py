@@ -74,6 +74,7 @@ from chat_widgets import (
     SystemReminderPanel, is_system_reminder,
 )
 from message_input import MessageInput
+from voice_stt import VoiceError, VoiceSession, merge_voice_fragment
 from chrome_widgets import (
     SystemAlert, ContentScroll, HookAnnotation, TurnSeparator, classify_turn_trigger,
 )
@@ -1157,6 +1158,8 @@ class AsdaaasTUI(App):
         Binding("ctrl+n", "next_agent", "Next Agent", show=False),
         Binding("f2", "show_persistence", "Persistence", show=True),
         Binding("f7", "toggle_copy_mode", "Copy Mode", show=True),
+        Binding("f8", "toggle_voice", "Voice", show=True, priority=True),
+        Binding("ctrl+space", "toggle_voice", "Voice", show=False, priority=True),
     ]
 
     def __init__(self, agents: list[str] = None, **kwargs):
@@ -1192,6 +1195,8 @@ class AsdaaasTUI(App):
         self._available_commands: list[dict] = []
         self._seen_interjections: set[str] = set()  # global dedup by bell id / text
         self._input_drafts: dict[str, str] = {}
+        self._voice = VoiceSession()
+        self._voice_partial = ""
         self._room_channel = "#standup"
         self._mw_active = False
         self._mw_rooms: dict[str, list[str]] = {}
@@ -1316,6 +1321,10 @@ class AsdaaasTUI(App):
         Workers check is_cancelled but some block on I/O or sleep —
         closing sockets ensures they unblock and see the cancellation.
         """
+        try:
+            self._voice.cancel()
+        except Exception:
+            pass
         # Close IRC socket so keepalive + send threads unblock
         if hasattr(self, "_room_irc_sock") and self._room_irc_sock is not None:
             try:
@@ -1860,6 +1869,9 @@ class AsdaaasTUI(App):
         elif cmd == "/status":
             self._show_status_info(content)
             return
+        elif cmd == "/voice":
+            self.action_toggle_voice()
+            return
         elif cmd == "/subs":
             self._handle_subs_command(arg)
             return
@@ -2355,6 +2367,11 @@ Type anything else to send a message to the agent.
 
     def action_dismiss_overlay(self) -> None:
         """Dismiss any open overlay, exit copy mode, or focus input."""
+        if getattr(self, "_voice", None) is not None and self._voice.listening:
+            self._voice.cancel()
+            self._set_voice_status("")
+            self.notify("Voice discarded")
+            return
         if getattr(self, '_copy_mode', False):
             self.action_toggle_copy_mode()
             return
@@ -3641,6 +3658,68 @@ Type anything else to send a message to the agent.
             pass
 
     
+
+    def action_toggle_voice(self) -> None:
+        """F8 / Ctrl+Space: dictate into the composer (Grok streaming STT)."""
+        if self._voice.listening:
+            self._voice.stop()
+            self._set_voice_status("transcribing…")
+            return
+        self._voice_partial = ""
+        try:
+            self._voice.start(
+                on_partial=lambda t: self.call_from_thread(self._on_voice_partial, t),
+                on_done=lambda t: self.call_from_thread(self._on_voice_done, t),
+                on_error=lambda m: self.call_from_thread(self._on_voice_error, m),
+                on_status=lambda s: self.call_from_thread(self._set_voice_status, s),
+            )
+        except VoiceError as e:
+            self.notify(str(e), severity="error")
+
+    def _set_voice_status(self, status: str) -> None:
+        try:
+            bar = self.query_one("#input-bar", MessageInput)
+        except NoMatches:
+            return
+        if status == "listening":
+            bar.border_subtitle = "● voice  F8 stop  Esc discard"
+        elif status == "transcribing":
+            bar.border_subtitle = "voice: transcribing…"
+        elif status:
+            bar.border_subtitle = f"voice: {status}"
+        elif self._voice_partial:
+            bar.border_subtitle = self._voice_partial[:80]
+        else:
+            bar.border_subtitle = ""
+
+    def _on_voice_partial(self, text: str) -> None:
+        self._voice_partial = text
+        try:
+            bar = self.query_one("#input-bar", MessageInput)
+            bar.border_subtitle = (text or "● voice")[:80]
+        except NoMatches:
+            pass
+
+    def _on_voice_done(self, text: str) -> None:
+        self._voice_partial = ""
+        self._set_voice_status("")
+        if not (text or "").strip():
+            self.notify("No speech was detected. Voice stopped.")
+            return
+        try:
+            bar = self.query_one("#input-bar", MessageInput)
+            merged = merge_voice_fragment(bar.text, text)
+            bar.clear()
+            bar.insert(merged)
+            bar._set_height_for_content()
+            bar.focus()
+        except NoMatches:
+            pass
+
+    def _on_voice_error(self, message: str) -> None:
+        self._voice_partial = ""
+        self._set_voice_status("")
+        self.notify(message or "Voice failed", severity="error")
 
     def action_toggle_copy_mode(self) -> None:
         """Toggle copy mode: disables mouse capture so terminal handles text selection."""

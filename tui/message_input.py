@@ -169,7 +169,7 @@ class MessageInput(TextArea):
     def _on_key(self, event) -> None:
         """Enter sends; Ctrl+Enter / Shift+Enter / Ctrl+J insert newline."""
         # Pass Home/End/PageUp/PageDown to the app for scroll/history actions
-        if event.key in ("f3", "f5", "f6"):
+        if event.key in ("f3", "f5", "f6", "f8", "ctrl+space"):
             return  # Let these bubble to app-level bindings
         if event.key in ("home", "end", "pageup", "pagedown"):
             event.prevent_default()

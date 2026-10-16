@@ -2369,9 +2369,8 @@ Type anything else to send a message to the agent.
     def action_dismiss_overlay(self) -> None:
         """Dismiss any open overlay, exit copy mode, or focus input."""
         if getattr(self, "_voice", None) is not None and self._voice.listening:
-            self._voice.cancel()
-            self._set_voice_status("")
-            self.notify("Voice discarded")
+            self._voice.stop()
+            self._set_voice_status("transcribing…")
             return
         if getattr(self, '_copy_mode', False):
             self.action_toggle_copy_mode()
@@ -3687,7 +3686,7 @@ Type anything else to send a message to the agent.
         except NoMatches:
             return
         if status == "listening":
-            bar.border_subtitle = "● voice  F8 stop  Esc discard"
+            bar.border_subtitle = "● voice  F8 or Esc to stop"
         elif status == "transcribing":
             bar.border_subtitle = "voice: transcribing…"
         elif status:

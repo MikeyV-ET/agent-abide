@@ -42,11 +42,14 @@ def test_light_inline_code_is_cream_on_dark_not_black_on_tan():
     assert "on " + Theme.FG.lower() in blob.lower() or "3c3836" in blob.lower()
 
 
-def test_hex_literal_uses_its_own_color_on_dark_nest():
+def test_hex_literal_uses_its_own_color_as_background():
     from theme import set_theme
     from rich.markdown import Markdown
     from chat_widgets import _flatten_to_text
     set_theme("gruvbox-light")
-    t = _flatten_to_text(Markdown("`#076678`"), width=20)
-    blob = " ".join(str(s.style) for s in t.spans)
-    assert "076678" in blob.lower()
+    t = _flatten_to_text(Markdown("`#3c3836`"), width=20)
+    blob = " ".join(str(s.style) for s in t.spans).lower()
+    assert "on #3c3836" in blob or "on 3c3836" in blob
+    # letters must not also be #3c3836 (black box)
+    assert blob.count("3c3836") >= 1
+    assert "fbf1c7" in blob or "#fbf1c7" in blob

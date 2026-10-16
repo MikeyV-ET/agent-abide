@@ -211,13 +211,19 @@ _HEX_LIT = re.compile(r"#[0-9A-Fa-f]{6}")
 
 
 def _paint_hex_literals(text: Text) -> Text:
-    """#rrggbb in speech: truecolor on the dark code nest (the chip that read well)."""
-    from theme import Theme, is_light_theme
-    nest = Theme.FG if is_light_theme() else Theme.DARK1
+    """#rrggbb as a swatch: the color is the background, letters contrast.
+
+    Painting the hex *as* the foreground on a dark nest made #3c3836 a
+    black box (same fg and bg).
+    """
+    from theme import Theme, _hex_luminance, is_light_theme
+    light_fg = Theme.BG if is_light_theme() else Theme.FG  # cream
+    dark_fg = Theme.FG if is_light_theme() else Theme.BG
     plain = text.plain
     for m in _HEX_LIT.finditer(plain):
         hex_s = m.group(0)
-        text.stylize(f"{hex_s} on {nest}", m.start(), m.end())
+        fg = light_fg if _hex_luminance(hex_s) < 160 else dark_fg
+        text.stylize(f"{fg} on {hex_s}", m.start(), m.end())
     return text
 
 

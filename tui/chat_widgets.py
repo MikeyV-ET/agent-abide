@@ -222,7 +222,12 @@ def _paint_hex_literals(text: Text) -> Text:
     plain = text.plain
     for m in _HEX_LIT.finditer(plain):
         hex_s = m.group(0)
-        fg = light_fg if _hex_luminance(hex_s) < 160 else dark_fg
+        lum = _hex_luminance(hex_s)
+        # Near-black/near-white hexes as fill look like empty boxes.
+        # Only mid-range colors become swatches (#076678 teal-on-dark).
+        if lum < 70 or lum > 210:
+            continue
+        fg = light_fg if lum < 160 else dark_fg
         text.stylize(f"{fg} on {hex_s}", m.start(), m.end())
     return text
 

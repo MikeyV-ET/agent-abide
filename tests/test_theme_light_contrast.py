@@ -30,16 +30,15 @@ def test_theme_css_sets_accent_to_br_blue():
     assert "$accent:" in css
 
 
-def test_light_inline_code_is_cream_on_dark_not_black_on_tan():
+def test_light_inline_code_is_dark_on_tan_chip():
     from theme import set_theme, Theme
     from rich.markdown import Markdown
     from chat_widgets import _flatten_to_text
     set_theme("gruvbox-light")
     t = _flatten_to_text(Markdown("`013f5f0`"), width=20)
-    styles = [str(s.style) for s in t.spans if s.style]
-    blob = " ".join(styles)
-    assert Theme.BG.lower() in blob.lower() or "fbf1c7" in blob.lower()
-    assert "on " + Theme.FG.lower() in blob.lower() or "3c3836" in blob.lower()
+    blob = " ".join(str(s.style) for s in t.spans if s.style).lower()
+    assert Theme.FG.lower() in blob
+    assert Theme.DARK2.lower() in blob or "d5c4a1" in blob
 
 
 def test_near_black_hex_stays_on_code_chip_not_black_box():
@@ -49,8 +48,9 @@ def test_near_black_hex_stays_on_code_chip_not_black_box():
     set_theme("gruvbox-light")
     t = _flatten_to_text(Markdown("`#3c3836`"), width=20)
     blob = " ".join(str(s.style) for s in t.spans).lower()
+    # generic code chip, not a #3c3836 fill
+    assert Theme.DARK2.lower() in blob or "d5c4a1" in blob
     assert "on #3c3836" not in blob
-    assert Theme.BG.lstrip("#").lower() in blob.replace("#", "")
 
 
 def test_mid_hex_is_swatch():

@@ -396,9 +396,13 @@ def is_light_theme() -> bool:
 
 
 def code_chip_style() -> str:
-    """Inline code: light letters on a dark nest (the chip Eric liked)."""
+    """Inline code chip.
+
+    Light theme: dark letters on DARK2 (tan-gray), not cream on FG
+    (that read as a white-on-black box). Dark theme: aqua on DARK1.
+    """
     if is_light_theme():
-        return f"{Theme.BG} on {Theme.FG}"
+        return f"{Theme.FG} on {Theme.DARK2}"
     return f"{Theme.BR_AQUA} on {Theme.DARK1}"
 
 

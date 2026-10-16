@@ -1197,6 +1197,7 @@ class AsdaaasTUI(App):
         self._input_drafts: dict[str, str] = {}
         self._voice = VoiceSession()
         self._voice_partial = ""
+        self._voice_prefix = ""
         self._room_channel = "#standup"
         self._mw_active = False
         self._mw_rooms: dict[str, list[str]] = {}
@@ -3667,6 +3668,10 @@ Type anything else to send a message to the agent.
             return
         self._voice_partial = ""
         try:
+            self._voice_prefix = self.query_one("#input-bar", MessageInput).text
+        except NoMatches:
+            self._voice_prefix = ""
+        try:
             self._voice.start(
                 on_partial=lambda t: self.call_from_thread(self._on_voice_partial, t),
                 on_done=lambda t: self.call_from_thread(self._on_voice_done, t),
@@ -3687,32 +3692,36 @@ Type anything else to send a message to the agent.
             bar.border_subtitle = "voice: transcribing…"
         elif status:
             bar.border_subtitle = f"voice: {status}"
-        elif self._voice_partial:
-            bar.border_subtitle = self._voice_partial[:80]
         else:
             bar.border_subtitle = ""
 
+    def _apply_voice_text(self, fragment: str) -> None:
+        """Replace the live dictation span in the composer (prefix + fragment)."""
+        try:
+            bar = self.query_one("#input-bar", MessageInput)
+        except NoMatches:
+            return
+        merged = merge_voice_fragment(self._voice_prefix, fragment)
+        bar.clear()
+        if merged:
+            bar.insert(merged)
+        bar._set_height_for_content()
+
     def _on_voice_partial(self, text: str) -> None:
         self._voice_partial = text
-        try:
-            bar = self.query_one("#input-bar", MessageInput)
-            bar.border_subtitle = (text or "● voice")[:80]
-        except NoMatches:
-            pass
+        self._apply_voice_text(text)
 
     def _on_voice_done(self, text: str) -> None:
+        fragment = (text or self._voice_partial or "").strip()
         self._voice_partial = ""
         self._set_voice_status("")
-        if not (text or "").strip():
+        if not fragment:
             self.notify("No speech was detected. Voice stopped.")
             return
+        self._apply_voice_text(fragment)
+        self._voice_prefix = ""
         try:
-            bar = self.query_one("#input-bar", MessageInput)
-            merged = merge_voice_fragment(bar.text, text)
-            bar.clear()
-            bar.insert(merged)
-            bar._set_height_for_content()
-            bar.focus()
+            self.query_one("#input-bar", MessageInput).focus()
         except NoMatches:
             pass
 

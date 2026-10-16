@@ -1,0 +1,27 @@
+{
+  "id": "gruvbox-light",
+  "name": "Gruvbox Light",
+  "colors": {
+    "BG": "#fbf1c7",
+    "FG": "#3c3836",
+    "GRAY": "#928374",
+    "RED": "#cc241d",
+    "GREEN": "#98971a",
+    "YELLOW": "#d79921",
+    "BLUE": "#458588",
+    "PURPLE": "#b16286",
+    "AQUA": "#689d6a",
+    "ORANGE": "#d65d0e",
+    "BR_RED": "#9d0006",
+    "BR_GREEN": "#79740e",
+    "BR_YELLOW": "#b57614",
+    "BR_BLUE": "#076678",
+    "BR_PURPLE": "#8f3f71",
+    "BR_AQUA": "#427b58",
+    "BR_ORANGE": "#af3a03",
+    "DARK1": "#ebdbb2",
+    "DARK2": "#d5c4a1",
+    "DARK3": "#bdae93",
+    "DARK4": "#a89984"
+  }
+}

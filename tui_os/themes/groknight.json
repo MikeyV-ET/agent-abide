@@ -1,0 +1,27 @@
+{
+  "id": "groknight",
+  "name": "Grok Night",
+  "colors": {
+    "BG": "#0f0f12",
+    "FG": "#e8e8ed",
+    "GRAY": "#8b8b9a",
+    "RED": "#f07178",
+    "GREEN": "#7fd99a",
+    "YELLOW": "#e6c07b",
+    "BLUE": "#82aaff",
+    "PURPLE": "#c792ea",
+    "AQUA": "#89ddff",
+    "ORANGE": "#f78c6c",
+    "BR_RED": "#ff8b94",
+    "BR_GREEN": "#a6e3b5",
+    "BR_YELLOW": "#ffe08a",
+    "BR_BLUE": "#9dbbff",
+    "BR_PURPLE": "#d9a9ff",
+    "BR_AQUA": "#a8e7ff",
+    "BR_ORANGE": "#ffab91",
+    "DARK1": "#1a1a22",
+    "DARK2": "#2a2a36",
+    "DARK3": "#3d3d4d",
+    "DARK4": "#5c5c70"
+  }
+}

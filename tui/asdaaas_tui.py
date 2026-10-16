@@ -1199,6 +1199,7 @@ class AsdaaasTUI(App):
         self._voice_partial = ""
         self._voice_prefix = ""
         self._voice_committed = ""
+        self._voice_ignore = False
         self._room_channel = "#standup"
         self._mw_active = False
         self._mw_rooms: dict[str, list[str]] = {}
@@ -1460,6 +1461,7 @@ class AsdaaasTUI(App):
 
     def on_message_input_submitted(self, event: MessageInput.Submitted) -> None:
         """Handle user input submission."""
+        self._abandon_voice()
         # Dismiss slash menu on submit
         try:
             self.query_one("#slash-menu", SlashMenu).display = False
@@ -3634,10 +3636,12 @@ Type anything else to send a message to the agent.
 
     def action_clear_screen(self) -> None:
         """Clear the input bar (like Ctrl+L in grok binary)."""
+        self._abandon_voice()
         try:
             input_bar = self.query_one("#input-bar", MessageInput)
             input_bar.clear()
             input_bar.styles.height = 1
+            input_bar.border_subtitle = ""
         except NoMatches:
             pass
 
@@ -3668,6 +3672,7 @@ Type anything else to send a message to the agent.
             return
         self._voice_partial = ""
         self._voice_committed = ""
+        self._voice_ignore = False
         try:
             self._voice_prefix = self.query_one("#input-bar", MessageInput).text
         except NoMatches:
@@ -3698,8 +3703,20 @@ Type anything else to send a message to the agent.
         else:
             bar.border_subtitle = ""
 
+    def _abandon_voice(self) -> None:
+        """Stop capture and do not write back into the composer (Enter / Ctrl+L)."""
+        self._voice_ignore = True
+        self._voice_partial = ""
+        self._voice_committed = ""
+        self._voice_prefix = ""
+        if getattr(self, "_voice", None) is not None and self._voice.listening:
+            self._voice.cancel()
+        self._set_voice_status("")
+
     def _apply_voice_text(self) -> None:
         """Composer = pre-dictation prefix + committed utterances + live partial."""
+        if getattr(self, "_voice_ignore", False):
+            return
         try:
             bar = self.query_one("#input-bar", MessageInput)
         except NoMatches:
@@ -3712,12 +3729,16 @@ Type anything else to send a message to the agent.
         bar._set_height_for_content()
 
     def _on_voice_partial(self, text: str, speech_final: bool = False) -> None:
+        if getattr(self, "_voice_ignore", False):
+            return
         self._voice_committed, self._voice_partial = fold_utterance(
             self._voice_committed, text, speech_final, self._voice_partial
         )
         self._apply_voice_text()
 
     def _on_voice_done(self, text: str) -> None:
+        if getattr(self, "_voice_ignore", False):
+            return
         if self._voice_partial:
             self._voice_committed = merge_voice_fragment(
                 self._voice_committed, self._voice_partial

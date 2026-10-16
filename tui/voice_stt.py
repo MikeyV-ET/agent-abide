@@ -21,7 +21,7 @@ STT_WS_PATH = "/v1/stt"
 DEFAULT_API_BASE = "https://api.x.ai"
 AUTH_PATH = Path.home() / ".grok" / "auth.json"
 
-OnPartial = Callable[[str], None]
+OnPartial = Callable[[str, bool], None]
 OnDone = Callable[[str], None]
 OnError = Callable[[str], None]
 OnStatus = Callable[[str], None]
@@ -180,6 +180,32 @@ def merge_voice_fragment(existing: str, fragment: str) -> str:
     if existing.endswith((" ", "\n", "\t")):
         return existing + fragment
     return existing + " " + fragment
+
+
+def fold_utterance(
+    committed: str,
+    incoming: str,
+    speech_final: bool,
+    prev_partial: str = "",
+) -> tuple[str, str]:
+    """Pause appends the utterance; the next partial starts a new span.
+
+    `speech_final` is the STT signal. If the server omits it and starts a
+    fresh string that is not an edit of the current partial, treat that as
+    a pause too so earlier dictation is not replaced.
+    """
+    incoming = incoming or ""
+    prev_partial = prev_partial or ""
+    if speech_final:
+        return merge_voice_fragment(committed, incoming or prev_partial), ""
+    if (
+        prev_partial
+        and incoming
+        and not incoming.startswith(prev_partial)
+        and not prev_partial.startswith(incoming)
+    ):
+        return merge_voice_fragment(committed, prev_partial), incoming
+    return committed, incoming
 
 
 class VoiceSession:
@@ -357,8 +383,9 @@ class VoiceSession:
         kind = ev.get("type")
         if kind == "transcript.partial":
             text = ev.get("text") or ""
-            if text:
-                on_partial(text)
+            speech_final = bool(ev.get("speech_final") or ev.get("is_final"))
+            if text or speech_final:
+                on_partial(text, speech_final)
             return text
         if kind == "transcript.done":
             return ev.get("text") or ""

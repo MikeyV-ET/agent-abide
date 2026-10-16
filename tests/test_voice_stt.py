@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tui"))
 from voice_stt import (
     VoiceError,
     build_stt_ws_url,
+    fold_utterance,
     merge_voice_fragment,
     recorder_candidates,
     resolve_bearer,
@@ -46,6 +47,30 @@ def test_merge_voice_fragment():
     assert merge_voice_fragment("", "hello") == "hello"
     assert merge_voice_fragment("hi", "there") == "hi there"
     assert merge_voice_fragment("hi ", "there") == "hi there"
+
+
+def test_fold_utterance_pause_appends_and_does_not_replace():
+    committed, partial = fold_utterance("", "hello world", False)
+    assert (committed, partial) == ("", "hello world")
+    committed, partial = fold_utterance(committed, partial, True, partial)
+    assert committed == "hello world"
+    assert partial == ""
+    committed, partial = fold_utterance(committed, "after the pause", False)
+    assert committed == "hello world"
+    assert partial == "after the pause"
+    committed, partial = fold_utterance(committed, partial, True, partial)
+    assert committed == "hello world after the pause"
+
+
+def test_fold_utterance_new_string_without_speech_final_still_keeps_prior():
+    committed, partial = fold_utterance("", "first sentence", False)
+    committed, partial = fold_utterance(
+        committed, "second sentence", False, prev_partial=partial
+    )
+    assert committed == "first sentence"
+    assert partial == "second sentence"
+    body = merge_voice_fragment(committed, partial)
+    assert body == "first sentence second sentence"
 
 
 def test_resolve_bearer_env(monkeypatch):

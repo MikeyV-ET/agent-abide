@@ -74,7 +74,7 @@ from chat_widgets import (
     SystemReminderPanel, is_system_reminder,
 )
 from message_input import MessageInput
-from voice_stt import VoiceError, VoiceSession, merge_voice_fragment
+from voice_stt import VoiceError, VoiceSession, fold_utterance, merge_voice_fragment
 from chrome_widgets import (
     SystemAlert, ContentScroll, HookAnnotation, TurnSeparator, classify_turn_trigger,
 )
@@ -1198,6 +1198,7 @@ class AsdaaasTUI(App):
         self._voice = VoiceSession()
         self._voice_partial = ""
         self._voice_prefix = ""
+        self._voice_committed = ""
         self._room_channel = "#standup"
         self._mw_active = False
         self._mw_rooms: dict[str, list[str]] = {}
@@ -3666,13 +3667,16 @@ Type anything else to send a message to the agent.
             self._set_voice_status("transcribing…")
             return
         self._voice_partial = ""
+        self._voice_committed = ""
         try:
             self._voice_prefix = self.query_one("#input-bar", MessageInput).text
         except NoMatches:
             self._voice_prefix = ""
         try:
             self._voice.start(
-                on_partial=lambda t: self.call_from_thread(self._on_voice_partial, t),
+                on_partial=lambda t, f=False: self.call_from_thread(
+                    self._on_voice_partial, t, f
+                ),
                 on_done=lambda t: self.call_from_thread(self._on_voice_done, t),
                 on_error=lambda m: self.call_from_thread(self._on_voice_error, m),
                 on_status=lambda s: self.call_from_thread(self._set_voice_status, s),
@@ -3694,31 +3698,42 @@ Type anything else to send a message to the agent.
         else:
             bar.border_subtitle = ""
 
-    def _apply_voice_text(self, fragment: str) -> None:
-        """Replace the live dictation span in the composer (prefix + fragment)."""
+    def _apply_voice_text(self) -> None:
+        """Composer = pre-dictation prefix + committed utterances + live partial."""
         try:
             bar = self.query_one("#input-bar", MessageInput)
         except NoMatches:
             return
-        merged = merge_voice_fragment(self._voice_prefix, fragment)
+        body = merge_voice_fragment(self._voice_committed, self._voice_partial)
+        merged = merge_voice_fragment(self._voice_prefix, body)
         bar.clear()
         if merged:
             bar.insert(merged)
         bar._set_height_for_content()
 
-    def _on_voice_partial(self, text: str) -> None:
-        self._voice_partial = text
-        self._apply_voice_text(text)
+    def _on_voice_partial(self, text: str, speech_final: bool = False) -> None:
+        self._voice_committed, self._voice_partial = fold_utterance(
+            self._voice_committed, text, speech_final, self._voice_partial
+        )
+        self._apply_voice_text()
 
     def _on_voice_done(self, text: str) -> None:
-        fragment = (text or self._voice_partial or "").strip()
-        self._voice_partial = ""
+        if self._voice_partial:
+            self._voice_committed = merge_voice_fragment(
+                self._voice_committed, self._voice_partial
+            )
+            self._voice_partial = ""
         self._set_voice_status("")
-        if not fragment:
+        if not self._voice_committed.strip():
+            extra = (text or "").strip()
+            if extra:
+                self._voice_committed = extra
+        if not self._voice_committed.strip():
             self.notify("No speech was detected. Voice stopped.")
             return
-        self._apply_voice_text(fragment)
+        self._apply_voice_text()
         self._voice_prefix = ""
+        self._voice_committed = ""
         try:
             self.query_one("#input-bar", MessageInput).focus()
         except NoMatches:

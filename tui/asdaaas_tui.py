@@ -74,7 +74,13 @@ from chat_widgets import (
     SystemReminderPanel, is_system_reminder,
 )
 from message_input import MessageInput
-from voice_stt import VoiceError, VoiceSession, commit_live, merge_voice_fragment
+from voice_stt import (
+    VoiceError,
+    VoiceSession,
+    apply_streaming_partial,
+    commit_live,
+    merge_voice_fragment,
+)
 from chrome_widgets import (
     SystemAlert, ContentScroll, HookAnnotation, TurnSeparator, classify_turn_trigger,
 )
@@ -1198,6 +1204,7 @@ class AsdaaasTUI(App):
         self._voice = VoiceSession()
         self._voice_clip = ""
         self._voice_live = ""
+        self._voice_locked = ""
         self._voice_prefix = ""
         self._voice_ignore = False
         self._room_channel = "#standup"
@@ -3670,6 +3677,7 @@ Type anything else to send a message to the agent.
             return
         self._voice_clip = ""
         self._voice_live = ""
+        self._voice_locked = ""
         self._voice_ignore = False
         try:
             self._voice_prefix = self.query_one("#input-bar", MessageInput).text
@@ -3677,8 +3685,8 @@ Type anything else to send a message to the agent.
             self._voice_prefix = ""
         try:
             self._voice.start(
-                on_partial=lambda t, f=False: self.call_from_thread(
-                    self._on_voice_partial, t, f
+                on_partial=lambda t, sf=False, inf=False: self.call_from_thread(
+                    self._on_voice_partial, t, sf, inf
                 ),
                 on_done=lambda t: self.call_from_thread(self._on_voice_done, t),
                 on_error=lambda m: self.call_from_thread(self._on_voice_error, m),
@@ -3706,6 +3714,7 @@ Type anything else to send a message to the agent.
         self._voice_ignore = True
         self._voice_clip = ""
         self._voice_live = ""
+        self._voice_locked = ""
         self._voice_prefix = ""
         if getattr(self, "_voice", None) is not None and self._voice.listening:
             self._voice.cancel()
@@ -3721,18 +3730,24 @@ Type anything else to send a message to the agent.
             return
         body = merge_voice_fragment(self._voice_clip, self._voice_live)
         merged = merge_voice_fragment(self._voice_prefix, body)
+        # clip = speech_final only (grok draft); live = interim overlay
         bar.clear()
         if merged:
             bar.insert(merged)
         bar._set_height_for_content()
 
-    def _on_voice_partial(self, text: str, speech_final: bool = False) -> None:
+    def _on_voice_partial(
+        self, text: str, speech_final: bool = False, is_final: bool = False
+    ) -> None:
         if getattr(self, "_voice_ignore", False):
             return
-        self._voice_live = text or ""
-        if speech_final:
-            self._voice_clip = commit_live(self._voice_clip, self._voice_live)
-            self._voice_live = ""
+        self._voice_locked, self._voice_live, self._voice_clip = apply_streaming_partial(
+            self._voice_locked,
+            self._voice_clip,
+            text,
+            speech_final=speech_final,
+            is_final=is_final,
+        )
         self._apply_voice_text()
 
     def _on_voice_done(self, text: str) -> None:
@@ -3740,6 +3755,7 @@ Type anything else to send a message to the agent.
             return
         self._voice_clip = commit_live(self._voice_clip, self._voice_live)
         self._voice_live = ""
+        self._voice_locked = ""
         self._voice_clip = commit_live(self._voice_clip, text)
         self._set_voice_status("")
         if not self._voice_clip.strip():

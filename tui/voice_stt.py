@@ -22,7 +22,7 @@ DEFAULT_API_BASE = "https://api.x.ai"
 AUTH_PATH = Path.home() / ".grok" / "auth.json"
 STT_DEBUG_LOG = Path("/tmp/tui-voice-stt.jsonl")
 
-OnPartial = Callable[[str, bool], None]
+OnPartial = Callable[[str, bool, bool], None]
 OnDone = Callable[[str], None]
 OnError = Callable[[str], None]
 OnStatus = Callable[[str], None]
@@ -191,6 +191,37 @@ def log_stt_event(kind: str, **fields) -> None:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+def apply_streaming_partial(
+    locked_prefix: str,
+    clip: str,
+    text: str,
+    *,
+    speech_final: bool,
+    is_final: bool,
+) -> tuple[str, str, str]:
+    """Grok-build `pipeline.rs` streaming stitch.
+
+    Empty frames are ignored (caller should skip). Non-final partials are a
+    live hypothesis: they do not touch `clip`. `is_final` locks a chunk into
+    the preview prefix. `speech_final` is a clean re-transcription of that
+    utterance; it is the only thing that lands in `clip`, and the prefix
+    resets. Returns (locked_prefix, live, clip).
+    """
+    text = (text or "").strip()
+    locked_prefix = locked_prefix or ""
+    clip = clip or ""
+    if not text:
+        return locked_prefix, "", clip
+    if speech_final:
+        return "", "", commit_live(clip, text)
+    if is_final:
+        locked = merge_voice_fragment(locked_prefix, text)
+        return locked, locked, clip
+    if not locked_prefix:
+        return locked_prefix, text, clip
+    return locked_prefix, merge_voice_fragment(locked_prefix, text), clip
 
 
 def commit_live(clip: str, live: str) -> str:
@@ -430,7 +461,7 @@ class VoiceSession:
             # speech_final is a snapshot of the same hypothesis, not a new phrase.
             if not text:
                 return None
-            on_partial(text, speech_final)
+            on_partial(text, speech_final, bool(ev.get("is_final")))
             return text
         if kind == "transcript.done":
             return ev.get("text") or ""

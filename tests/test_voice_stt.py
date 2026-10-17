@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tui"))
 from voice_stt import (
     VoiceError,
+    apply_streaming_partial,
     build_stt_ws_url,
     commit_live,
     fold_into_clip,
@@ -60,6 +61,37 @@ def test_fold_into_clip_extends_and_does_not_repeat():
     clip = fold_into_clip(clip, "Why are we doing F8 and escape")
     clip = fold_into_clip(clip, "Why are we doing F8 and escape to stop")
     assert clip == "I just restarted it Why are we doing F8 and escape to stop"
+
+
+def test_grok_pipeline_stitch_from_debug_log():
+    """Replay the 17:07 jsonl: growing hypothesis, is_final, speech_final, next sentence."""
+    locked, clip = "", ""
+    locked, live, clip = apply_streaming_partial(
+        locked, clip, "Okay, I", speech_final=False, is_final=False
+    )
+    assert live == "Okay, I" and clip == ""
+    locked, live, clip = apply_streaming_partial(
+        locked, clip, "Okay, I restarted.", speech_final=False, is_final=False
+    )
+    assert live == "Okay, I restarted." and clip == ""
+    full = "Okay, I restarted. Let's take a look and see what happens."
+    locked, live, clip = apply_streaming_partial(
+        locked, clip, full, speech_final=False, is_final=True
+    )
+    assert live == full and clip == ""
+    locked, live, clip = apply_streaming_partial(
+        locked, clip, full, speech_final=True, is_final=True
+    )
+    assert locked == "" and live == "" and clip == full
+    locked, live, clip = apply_streaming_partial(
+        locked, clip, "I'm wondering if I...", speech_final=False, is_final=False
+    )
+    assert clip == full
+    assert live == "I'm wondering if I..."
+    body = merge_voice_fragment(clip, live)
+    assert body.startswith("Okay, I restarted.")
+    assert "I'm wondering if I..." in body
+    assert body.count("Okay, I restarted.") == 1
 
 
 def test_growing_partials_are_one_utterance_until_speech_final():

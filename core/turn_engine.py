@@ -649,7 +649,8 @@ class TurnEngine:
 
         if deliver_result.speech.strip():
             self.last_response_ts = time.time()
-            self.consecutive_empty_doorbell = 0
+            if has_msgs or ptr.agent_wrote_delay:
+                self.consecutive_empty_doorbell = 0
             # Segments already written during the turn (StreamingThoughts.flush).
             # Only write the full joined speech if nothing was segmented — avoids
             # losing the final bubble when a turn ends without a trailing tool_call
@@ -694,10 +695,29 @@ class TurnEngine:
                           f"{len(in_room_msgs)} msgs), {len(deliver_result.speech)} chars")
             write_health(agent_name, "active", detail, self.total_tokens,
                         self.context_window, observer_state=self.read_observer_state(), env=self.env)
-            # After responding to a user message with speech, default to
-            # waiting unless agent already wrote an explicit delay (issue_0030).
+            # After a user message, keep going unless the agent wrote a delay.
+            # Bare delay-0 continues get delay_cmd's how-to. Continue-only
+            # speech with no delay is a default-doorbell spin: back off.
             if has_msgs and not ptr.agent_wrote_delay:
-                self.delay_until_event = True
+                self.delay_until_event = False
+            elif has_bells and not has_msgs and not ptr.agent_wrote_delay:
+                self.consecutive_empty_doorbell += 1
+                if self.consecutive_empty_doorbell >= EMPTY_DOORBELL_BACKOFF_AFTER:
+                    backoff = min(
+                        EMPTY_DOORBELL_BACKOFF_PER * self.consecutive_empty_doorbell,
+                        EMPTY_DOORBELL_BACKOFF_MAX,
+                    )
+                    self.next_turn_delay = backoff
+                    print(
+                        f"[asdaaas] Backoff: {backoff}s after "
+                        f"{self.consecutive_empty_doorbell} continue-only turns with no delay"
+                    )
+                if self.consecutive_empty_doorbell >= CONTINUE_MAX_CONSECUTIVE:
+                    self.delay_until_event = True
+                    print(
+                        f"[asdaaas] *** CONTINUE CAP ({CONTINUE_MAX_CONSECUTIVE}) "
+                        f"on continue-only no-delay for {agent_name} ***"
+                    )
             ptr.speech_delivered = True
         else:
             # Empty response handling

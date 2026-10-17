@@ -239,19 +239,17 @@ class TestDelayUntilEvent:
         assert engine.next_turn_delay == 0
 
     @pytest.mark.asyncio
-    async def test_speech_response_to_message_defaults_until_event(self, asdaaas_env):
-        """After responding with speech to a user message, default to until_event."""
+    async def test_speech_response_to_message_keeps_going_without_delay(self, asdaaas_env):
+        """After speech to a user message with no delay command, do not park."""
         from mock_binary import MockBinary, NormalResponse
         mock = MockBinary([NormalResponse(speech="Here's my answer.", tokens=5000)])
         engine = asdaaas_env.make_engine(backend=mock)
 
-        # Inject as adapter message (not doorbell) to simulate user message
         asdaaas_env.inject_message("tui", "What do you think?", sender="eric")
         _, dr, ptr = await asdaaas_env.run_turn(engine)
         assert dr.speech == "Here's my answer."
-        # After responding to a user message with speech, should default to until_event
-        # (issue_0030 behavior) unless agent wrote explicit delay
-        assert engine.delay_until_event is True
+        assert ptr.agent_wrote_delay is False
+        assert engine.delay_until_event is False
 
 
 class TestPostCompactionContinue:

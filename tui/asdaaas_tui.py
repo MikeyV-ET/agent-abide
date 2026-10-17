@@ -721,6 +721,7 @@ class SlashMenu(OptionList):
     LOCAL_COMMANDS = [
         {"name": "/clear", "description": "Clear the screen"},
         {"name": "/status", "description": "Show agent status"},
+        {"name": "/voice", "description": "Start speech-to-text (F8). Esc stops"},
         {"name": "/gaze", "description": "Show/change gaze target"},
         {"name": "/awareness", "description": "Show/edit background channels"},
         {"name": "/awareness add", "description": "Add background channel"},
@@ -2001,6 +2002,7 @@ class AsdaaasTUI(App):
 |---------|-------------|
 | `/clear` | Clear the screen |
 | `/status` | Show agent status |
+| `/voice` | Start speech-to-text (F8). Esc stops |
 | `/gaze [room]` | Show/set gaze target |
 | `/room [#chan]` | Room tab: show/switch IRC channel |
 | `/mw Name Name` | Multiway TUI chat (fan-out + labeled replies) |

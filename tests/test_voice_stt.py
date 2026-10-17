@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tui"))
 from voice_stt import (
     VoiceError,
     build_stt_ws_url,
+    fold_into_clip,
     fold_utterance,
     merge_voice_fragment,
     recorder_candidates,
@@ -49,28 +50,22 @@ def test_merge_voice_fragment():
     assert merge_voice_fragment("hi ", "there") == "hi there"
 
 
-def test_fold_utterance_pause_appends_and_does_not_replace():
-    committed, partial = fold_utterance("", "hello world", False)
-    assert (committed, partial) == ("", "hello world")
-    committed, partial = fold_utterance(committed, partial, True, partial)
-    assert committed == "hello world"
-    assert partial == ""
-    committed, partial = fold_utterance(committed, "after the pause", False)
-    assert committed == "hello world"
-    assert partial == "after the pause"
-    committed, partial = fold_utterance(committed, partial, True, partial)
-    assert committed == "hello world after the pause"
+def test_fold_into_clip_extends_and_does_not_repeat():
+    clip = fold_into_clip("", "I just restarted")
+    clip = fold_into_clip(clip, "I just restarted")
+    clip = fold_into_clip(clip, "I just restarted it")
+    clip = fold_into_clip(clip, "I just restarted it")
+    assert clip == "I just restarted it"
+    clip = fold_into_clip(clip, "Why are we doing F8 and escape")
+    clip = fold_into_clip(clip, "Why are we doing F8 and escape")
+    clip = fold_into_clip(clip, "Why are we doing F8 and escape to stop")
+    assert clip == "I just restarted it Why are we doing F8 and escape to stop"
 
 
-def test_fold_utterance_new_string_without_speech_final_still_keeps_prior():
-    committed, partial = fold_utterance("", "first sentence", False)
-    committed, partial = fold_utterance(
-        committed, "second sentence", False, prev_partial=partial
-    )
-    assert committed == "first sentence"
-    assert partial == "second sentence"
-    body = merge_voice_fragment(committed, partial)
-    assert body == "first sentence second sentence"
+def test_fold_into_clip_overlap_on_pause():
+    clip = fold_into_clip("", "hello world")
+    clip = fold_into_clip(clip, "world after the pause")
+    assert clip == "hello world after the pause"
 
 
 def test_resolve_bearer_env(monkeypatch):

@@ -74,7 +74,7 @@ from chat_widgets import (
     SystemReminderPanel, is_system_reminder,
 )
 from message_input import MessageInput
-from voice_stt import VoiceError, VoiceSession, fold_utterance, merge_voice_fragment
+from voice_stt import VoiceError, VoiceSession, fold_into_clip, merge_voice_fragment
 from chrome_widgets import (
     SystemAlert, ContentScroll, HookAnnotation, TurnSeparator, classify_turn_trigger,
 )
@@ -1196,9 +1196,8 @@ class AsdaaasTUI(App):
         self._seen_interjections: set[str] = set()  # global dedup by bell id / text
         self._input_drafts: dict[str, str] = {}
         self._voice = VoiceSession()
-        self._voice_partial = ""
+        self._voice_clip = ""
         self._voice_prefix = ""
-        self._voice_committed = ""
         self._voice_ignore = False
         self._room_channel = "#standup"
         self._mw_active = False
@@ -3665,13 +3664,10 @@ Type anything else to send a message to the agent.
     
 
     def action_toggle_voice(self) -> None:
-        """F8 / Ctrl+Space: dictate into the composer (Grok streaming STT)."""
+        """F8 / Ctrl+Space: start dictation. Esc stops."""
         if self._voice.listening:
-            self._voice.stop()
-            self._set_voice_status("transcribing…")
             return
-        self._voice_partial = ""
-        self._voice_committed = ""
+        self._voice_clip = ""
         self._voice_ignore = False
         try:
             self._voice_prefix = self.query_one("#input-bar", MessageInput).text
@@ -3695,7 +3691,7 @@ Type anything else to send a message to the agent.
         except NoMatches:
             return
         if status == "listening":
-            bar.border_subtitle = "● voice  F8 or Esc to stop"
+            bar.border_subtitle = "● voice  Esc to stop"
         elif status == "transcribing":
             bar.border_subtitle = "voice: transcribing…"
         elif status:
@@ -3706,8 +3702,7 @@ Type anything else to send a message to the agent.
     def _abandon_voice(self) -> None:
         """Stop capture and do not write back into the composer (Enter / Ctrl+L)."""
         self._voice_ignore = True
-        self._voice_partial = ""
-        self._voice_committed = ""
+        self._voice_clip = ""
         self._voice_prefix = ""
         if getattr(self, "_voice", None) is not None and self._voice.listening:
             self._voice.cancel()
@@ -3721,8 +3716,7 @@ Type anything else to send a message to the agent.
             bar = self.query_one("#input-bar", MessageInput)
         except NoMatches:
             return
-        body = merge_voice_fragment(self._voice_committed, self._voice_partial)
-        merged = merge_voice_fragment(self._voice_prefix, body)
+        merged = merge_voice_fragment(self._voice_prefix, self._voice_clip)
         bar.clear()
         if merged:
             bar.insert(merged)
@@ -3731,37 +3725,25 @@ Type anything else to send a message to the agent.
     def _on_voice_partial(self, text: str, speech_final: bool = False) -> None:
         if getattr(self, "_voice_ignore", False):
             return
-        self._voice_committed, self._voice_partial = fold_utterance(
-            self._voice_committed, text, speech_final, self._voice_partial
-        )
+        self._voice_clip = fold_into_clip(self._voice_clip, text)
         self._apply_voice_text()
 
     def _on_voice_done(self, text: str) -> None:
         if getattr(self, "_voice_ignore", False):
             return
-        if self._voice_partial:
-            self._voice_committed = merge_voice_fragment(
-                self._voice_committed, self._voice_partial
-            )
-            self._voice_partial = ""
+        self._voice_clip = fold_into_clip(self._voice_clip, text)
         self._set_voice_status("")
-        if not self._voice_committed.strip():
-            extra = (text or "").strip()
-            if extra:
-                self._voice_committed = extra
-        if not self._voice_committed.strip():
+        if not self._voice_clip.strip():
             self.notify("No speech was detected. Voice stopped.")
             return
         self._apply_voice_text()
         self._voice_prefix = ""
-        self._voice_committed = ""
         try:
             self.query_one("#input-bar", MessageInput).focus()
         except NoMatches:
             pass
 
     def _on_voice_error(self, message: str) -> None:
-        self._voice_partial = ""
         self._set_voice_status("")
         self.notify(message or "Voice failed", severity="error")
 

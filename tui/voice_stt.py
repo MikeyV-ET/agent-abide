@@ -182,30 +182,42 @@ def merge_voice_fragment(existing: str, fragment: str) -> str:
     return existing + " " + fragment
 
 
+def fold_into_clip(clip: str, incoming: str) -> str:
+    """Grow one dictation clip. Never replace earlier words; never repeat them.
+
+    STT re-sends the current utterance after a pause (and after speech_final).
+    Overlap-merge that into the clip instead of appending a second copy.
+    """
+    incoming = (incoming or "").strip()
+    clip = clip or ""
+    if not incoming:
+        return clip
+    if not clip:
+        return incoming
+    if incoming == clip:
+        return clip
+    if len(incoming) >= 8 and incoming in clip:
+        return clip
+    if clip in incoming:
+        return incoming
+    max_n = min(len(clip), len(incoming))
+    for n in range(max_n, 0, -1):
+        if clip.endswith(incoming[:n]):
+            return clip + incoming[n:]
+    return merge_voice_fragment(clip, incoming)
+
+
 def fold_utterance(
     committed: str,
     incoming: str,
     speech_final: bool,
     prev_partial: str = "",
 ) -> tuple[str, str]:
-    """Pause appends the utterance; the next partial starts a new span.
-
-    `speech_final` is the STT signal. If the server omits it and starts a
-    fresh string that is not an edit of the current partial, treat that as
-    a pause too so earlier dictation is not replaced.
-    """
-    incoming = incoming or ""
-    prev_partial = prev_partial or ""
+    """Compatibility wrapper: one clip, empty live partial."""
+    body = merge_voice_fragment(committed, prev_partial)
     if speech_final:
-        return merge_voice_fragment(committed, incoming or prev_partial), ""
-    if (
-        prev_partial
-        and incoming
-        and not incoming.startswith(prev_partial)
-        and not prev_partial.startswith(incoming)
-    ):
-        return merge_voice_fragment(committed, prev_partial), incoming
-    return committed, incoming
+        incoming = incoming or prev_partial
+    return fold_into_clip(body, incoming), ""
 
 
 class VoiceSession:

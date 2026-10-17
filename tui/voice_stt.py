@@ -21,7 +21,6 @@ STT_WS_PATH = "/v1/stt"
 DEFAULT_API_BASE = "https://api.x.ai"
 AUTH_PATH = Path.home() / ".grok" / "auth.json"
 STT_DEBUG_LOG = Path("/tmp/tui-voice-stt.jsonl")
-VOICE_DEBOUNCE_S = 0.5
 
 OnPartial = Callable[[str, bool], None]
 OnDone = Callable[[str], None]
@@ -425,10 +424,13 @@ class VoiceSession:
             is_final=bool(ev.get("is_final")),
         )
         if kind == "transcript.partial":
-            text = ev.get("text") or ""
-            speech_final = bool(ev.get("speech_final") or ev.get("is_final"))
-            if text or speech_final:
-                on_partial(text, speech_final)
+            text = (ev.get("text") or "").strip()
+            speech_final = bool(ev.get("speech_final"))
+            # Empty frames are endpointing heartbeats (~1/s). is_final without
+            # speech_final is a snapshot of the same hypothesis, not a new phrase.
+            if not text:
+                return None
+            on_partial(text, speech_final)
             return text
         if kind == "transcript.done":
             return ev.get("text") or ""

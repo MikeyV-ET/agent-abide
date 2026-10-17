@@ -62,6 +62,16 @@ def test_fold_into_clip_extends_and_does_not_repeat():
     assert clip == "I just restarted it Why are we doing F8 and escape to stop"
 
 
+def test_growing_partials_are_one_utterance_until_speech_final():
+    """API sends the same take growing over 1–3s; only speech_final commits."""
+    live = "Okay, I"
+    live = "Okay, I restarted."
+    live = "Okay, I restarted. Let's take a look and see what happens."
+    clip = commit_live("", live)
+    clip = commit_live(clip, live)
+    assert clip == live
+
+
 def test_commit_live_skips_duplicate_and_keeps_correction_as_one_utterance():
     clip = ""
     live = "Okay, are we"

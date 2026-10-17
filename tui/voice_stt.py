@@ -282,9 +282,23 @@ class VoiceSession:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._finish = threading.Event()
+        self._gate = threading.Event()
+        self._gate.set()
         self._thread: Optional[threading.Thread] = None
         self._proc: Optional[subprocess.Popen] = None
         self.listening = False
+
+    @property
+    def recording(self) -> bool:
+        return self.listening and self._gate.is_set()
+
+    def pause(self) -> None:
+        """Keep the session; stop sending mic audio (composer not focused)."""
+        self._gate.clear()
+
+    def resume(self) -> None:
+        if self.listening:
+            self._gate.set()
 
     def start(
         self,
@@ -301,6 +315,7 @@ class VoiceSession:
                 return
             self._stop.clear()
             self._finish.clear()
+            self._gate.set()
             self.listening = True
             self._thread = threading.Thread(
                 target=self._run,
@@ -382,8 +397,9 @@ class VoiceSession:
             while not self._stop.is_set():
                 chunk = stdout.read(4096)
                 if chunk:
-                    ws.settimeout(5)
-                    ws.send_binary(chunk)
+                    if self._gate.is_set():
+                        ws.settimeout(5)
+                        ws.send_binary(chunk)
                 elif proc.poll() is not None:
                     break
                 try:
@@ -392,7 +408,10 @@ class VoiceSession:
                 except Exception:
                     msg = None
                 if isinstance(msg, str) and msg:
-                    last_text = self._handle_event(msg, on_partial, on_error) or last_text
+                    if self._gate.is_set():
+                        last_text = (
+                            self._handle_event(msg, on_partial, on_error) or last_text
+                        )
             try:
                 ws.send(json.dumps({"type": "audio.done"}))
             except Exception:

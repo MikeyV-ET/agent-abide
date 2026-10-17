@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tui"))
 from voice_stt import (
     VoiceError,
+    VoiceSession,
     apply_streaming_partial,
     build_stt_ws_url,
     commit_live,
@@ -135,6 +136,17 @@ def test_resolve_bearer_auth_json(monkeypatch, tmp_path):
     )
     with patch("voice_stt.AUTH_PATH", auth):
         assert resolve_bearer() == "tok-from-file"
+
+
+def test_voice_session_pause_stops_recording_flag():
+    s = VoiceSession()
+    s.listening = True
+    s._gate.set()
+    assert s.recording
+    s.pause()
+    assert s.listening and not s.recording
+    s.resume()
+    assert s.recording
 
 
 def test_recorder_candidates_shape():

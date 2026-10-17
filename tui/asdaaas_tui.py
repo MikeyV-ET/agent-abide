@@ -3740,10 +3740,28 @@ Type anything else to send a message to the agent.
             self._voice.cancel()
         self._set_voice_status("")
 
+    def _on_input_hot(self, hot: bool) -> None:
+        """Composer focus: record only while the box is hot."""
+        voice = getattr(self, "_voice", None)
+        if voice is None or not voice.listening:
+            return
+        if hot:
+            voice.resume()
+        else:
+            voice.pause()
+        try:
+            self._paint_voice_overlay(self.query_one("#input-bar", MessageInput))
+        except NoMatches:
+            pass
+
     def _paint_voice_overlay(self, bar: MessageInput) -> None:
-        if getattr(self, "_voice", None) is not None and self._voice.listening:
+        voice = getattr(self, "_voice", None)
+        if voice is not None and voice.listening and voice.recording:
             bar.add_class("voice-hot")
             bar.border_subtitle = "● voice  Esc to stop"
+        elif voice is not None and voice.listening:
+            bar.remove_class("voice-hot")
+            bar.border_subtitle = "voice  paused"
         else:
             bar.remove_class("voice-hot")
             bar.border_subtitle = ""
@@ -3769,6 +3787,8 @@ Type anything else to send a message to the agent.
         self, text: str, speech_final: bool = False, is_final: bool = False
     ) -> None:
         if getattr(self, "_voice_ignore", False):
+            return
+        if getattr(self, "_voice", None) is not None and not self._voice.recording:
             return
         self._voice_locked, self._voice_live, self._voice_clip = apply_streaming_partial(
             self._voice_locked,

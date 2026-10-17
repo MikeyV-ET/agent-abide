@@ -161,6 +161,18 @@ class MessageInput(TextArea):
             except ValueError:
                 pass
 
+    def on_focus(self, event) -> None:
+        app = self.app
+        fn = getattr(app, "_on_input_hot", None)
+        if callable(fn):
+            fn(True)
+
+    def on_blur(self, event) -> None:
+        app = self.app
+        fn = getattr(app, "_on_input_hot", None)
+        if callable(fn):
+            fn(False)
+
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Recalculate height when text changes, using TextArea's own virtual size."""
         def _update_height():

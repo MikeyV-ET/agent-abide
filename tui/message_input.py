@@ -20,6 +20,9 @@ class MessageInput(TextArea):
         min-height: 4;
         border: heavy #504945;
         padding: 0 1;
+        border-subtitle-color: #b8a88a;
+        border-subtitle-background: #1d2021;
+        border-subtitle-align: left;
     }
     MessageInput:focus {
         border: heavy #7c6f64;

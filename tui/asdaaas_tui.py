@@ -3720,21 +3720,31 @@ Type anything else to send a message to the agent.
             self._voice.cancel()
         self._set_voice_status("")
 
+    def _paint_voice_overlay(self, bar: MessageInput) -> None:
+        """Ghost partials on the border. The draft is speech_final only."""
+        live = (self._voice_live or "").strip().replace("\n", " ")
+        if live:
+            bar.border_subtitle = live[:240]
+        elif getattr(self, "_voice", None) is not None and self._voice.listening:
+            bar.border_subtitle = "● voice  Esc to stop"
+        else:
+            bar.border_subtitle = ""
+
     def _apply_voice_text(self) -> None:
-        """Composer = prefix + committed clip + live hypothesis (replaced in place)."""
+        """Draft = prefix + speech_final clip. Live hypothesis stays on the overlay."""
         if getattr(self, "_voice_ignore", False):
             return
         try:
             bar = self.query_one("#input-bar", MessageInput)
         except NoMatches:
             return
-        body = merge_voice_fragment(self._voice_clip, self._voice_live)
-        merged = merge_voice_fragment(self._voice_prefix, body)
-        # clip = speech_final only (grok draft); live = interim overlay
-        bar.clear()
-        if merged:
-            bar.insert(merged)
-        bar._set_height_for_content()
+        committed = merge_voice_fragment(self._voice_prefix, self._voice_clip)
+        if bar.text != committed:
+            bar.clear()
+            if committed:
+                bar.insert(committed)
+            bar._set_height_for_content()
+        self._paint_voice_overlay(bar)
 
     def _on_voice_partial(
         self, text: str, speech_final: bool = False, is_final: bool = False
@@ -3757,14 +3767,16 @@ Type anything else to send a message to the agent.
         self._voice_live = ""
         self._voice_locked = ""
         self._voice_clip = commit_live(self._voice_clip, text)
-        self._set_voice_status("")
         if not self._voice_clip.strip():
             self.notify("No speech was detected. Voice stopped.")
+            self._set_voice_status("")
             return
         self._apply_voice_text()
         self._voice_prefix = ""
         try:
-            self.query_one("#input-bar", MessageInput).focus()
+            bar = self.query_one("#input-bar", MessageInput)
+            bar.border_subtitle = ""
+            bar.focus()
         except NoMatches:
             pass
 

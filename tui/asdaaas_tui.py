@@ -2376,57 +2376,56 @@ Type anything else to send a message to the agent.
         except NoMatches:
             pass
 
-    def action_dismiss_overlay(self) -> None:
-        """Dismiss any open overlay, exit copy mode, or focus input."""
-        if getattr(self, "_voice", None) is not None and self._voice.listening:
-            self._voice.stop()
-            self._set_voice_status("transcribing…")
-            return
-        if getattr(self, '_copy_mode', False):
+    def _dismiss_ui_layer(self) -> bool:
+        """Close copy mode / pickers / menus. True if Esc consumed."""
+        if getattr(self, "_copy_mode", False):
             self.action_toggle_copy_mode()
-            return
-        try:
-            selector = self.query_one("#gaze-selector", GazeSelector)
-            if selector.display:
-                selector.display = False
-                self.query_one("#input-bar", MessageInput).focus()
-                return
-        except NoMatches:
-            pass
-        try:
-            selector = self.query_one("#theme-selector", ThemeSelector)
-            if selector.display:
-                selector.display = False
-                self.query_one("#input-bar", MessageInput).focus()
-                return
-        except NoMatches:
-            pass
-        try:
-            add_sel = self.query_one("#agent-add-selector", AgentAddSelector)
-            if add_sel.display:
-                add_sel.display = False
-                self.query_one("#input-bar", MessageInput).focus()
-                return
-        except NoMatches:
-            pass
-        try:
-            slash_menu = self.query_one("#slash-menu", SlashMenu)
-            if slash_menu.display:
-                slash_menu.display = False
-                self.query_one("#input-bar", MessageInput).focus()
-                return
-        except NoMatches:
-            pass
-        # Close ephact viewer if open
+            return True
+        layers = (
+            ("#gaze-selector", GazeSelector, "display"),
+            ("#theme-selector", ThemeSelector, "display"),
+            ("#agent-add-selector", AgentAddSelector, "display"),
+            ("#slash-menu", SlashMenu, "display"),
+        )
+        for qid, cls, attr in layers:
+            try:
+                widget = self.query_one(qid, cls)
+                if getattr(widget, attr):
+                    widget.display = False
+                    self.query_one("#input-bar", MessageInput).focus()
+                    return True
+            except NoMatches:
+                pass
         try:
             viewer = self.query_one("#ephact-viewer", EphactViewer)
             if viewer.display:
                 viewer.close()
                 self.query_one("#input-bar", MessageInput).focus()
-                return
+                return True
         except NoMatches:
             pass
-        self.query_one("#input-bar", MessageInput).focus()
+        return False
+
+    def action_dismiss_overlay(self) -> None:
+        """Esc hierarchy: UI layer, then clear voice draft, then stop mic, then focus."""
+        if self._dismiss_ui_layer():
+            return
+        listening = getattr(self, "_voice", None) is not None and self._voice.listening
+        if listening:
+            try:
+                bar = self.query_one("#input-bar", MessageInput)
+                if (bar.text or "").strip():
+                    self.action_clear_screen()
+                    return
+            except NoMatches:
+                pass
+            self._voice.stop()
+            self._set_voice_status("transcribing…")
+            return
+        try:
+            self.query_one("#input-bar", MessageInput).focus()
+        except NoMatches:
+            pass
 
     def action_close_ephact(self) -> None:
         """Toggle the ephact viewer panel (show/hide)."""

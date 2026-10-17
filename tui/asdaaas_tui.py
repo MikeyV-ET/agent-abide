@@ -3743,28 +3743,25 @@ Type anything else to send a message to the agent.
         self._set_voice_status("")
 
     def _paint_voice_overlay(self, bar: MessageInput) -> None:
-        """Ghost partials on the border. The draft is speech_final only."""
-        live = (self._voice_live or "").strip().replace("\n", " ")
-        if live:
-            bar.border_subtitle = live[:240]
-        elif getattr(self, "_voice", None) is not None and self._voice.listening:
+        if getattr(self, "_voice", None) is not None and self._voice.listening:
             bar.border_subtitle = "● voice  Esc to stop"
         else:
             bar.border_subtitle = ""
 
     def _apply_voice_text(self) -> None:
-        """Draft = prefix + speech_final clip. Live hypothesis stays on the overlay."""
+        """Draft = prefix + speech_final clip + live partial (final replaces live)."""
         if getattr(self, "_voice_ignore", False):
             return
         try:
             bar = self.query_one("#input-bar", MessageInput)
         except NoMatches:
             return
-        committed = merge_voice_fragment(self._voice_prefix, self._voice_clip)
-        if bar.text != committed:
+        body = merge_voice_fragment(self._voice_clip, self._voice_live)
+        merged = merge_voice_fragment(self._voice_prefix, body)
+        if bar.text != merged:
             bar.clear()
-            if committed:
-                bar.insert(committed)
+            if merged:
+                bar.insert(merged)
             bar._set_height_for_content()
         self._paint_voice_overlay(bar)
 

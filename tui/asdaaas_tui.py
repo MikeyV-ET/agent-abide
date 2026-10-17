@@ -1468,7 +1468,7 @@ class AsdaaasTUI(App):
 
     def on_message_input_submitted(self, event: MessageInput.Submitted) -> None:
         """Handle user input submission."""
-        self._abandon_voice()
+        self._voice_roll_turn()
         # Dismiss slash menu on submit
         try:
             self.query_one("#slash-menu", SlashMenu).display = False
@@ -3642,13 +3642,19 @@ Type anything else to send a message to the agent.
             pass
 
     def action_clear_screen(self) -> None:
-        """Clear the input bar (like Ctrl+L in grok binary)."""
-        self._abandon_voice()
+        """Clear the input bar (like Ctrl+L in grok binary). Mic stays up if listening."""
+        self._voice_clip = ""
+        self._voice_locked = ""
+        self._voice_live = ""
+        self._voice_prefix = ""
         try:
             input_bar = self.query_one("#input-bar", MessageInput)
             input_bar.clear()
             input_bar.styles.height = 1
-            input_bar.border_subtitle = ""
+            if getattr(self, "_voice", None) is not None and self._voice.listening:
+                self._paint_voice_overlay(input_bar)
+            else:
+                input_bar.border_subtitle = ""
         except NoMatches:
             pass
 
@@ -3709,8 +3715,24 @@ Type anything else to send a message to the agent.
         else:
             bar.border_subtitle = ""
 
+    def _voice_roll_turn(self) -> None:
+        """Enter sent the draft. Keep the mic; start a fresh clip in the empty box."""
+        self._voice_clip = ""
+        self._voice_locked = ""
+        self._voice_live = ""
+        self._voice_prefix = ""
+        self._voice_ignore = False
+        try:
+            bar = self.query_one("#input-bar", MessageInput)
+            if getattr(self, "_voice", None) is not None and self._voice.listening:
+                self._paint_voice_overlay(bar)
+            else:
+                bar.border_subtitle = ""
+        except NoMatches:
+            pass
+
     def _abandon_voice(self) -> None:
-        """Stop capture and do not write back into the composer (Enter / Ctrl+L)."""
+        """Hard stop (app exit / error). Drops the mic."""
         self._voice_ignore = True
         self._voice_clip = ""
         self._voice_live = ""

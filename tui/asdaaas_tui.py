@@ -74,7 +74,13 @@ from chat_widgets import (
     SystemReminderPanel, is_system_reminder,
 )
 from message_input import MessageInput
-from voice_stt import VoiceError, VoiceSession, fold_into_clip, merge_voice_fragment
+from voice_stt import (
+    VOICE_DEBOUNCE_S,
+    VoiceError,
+    VoiceSession,
+    commit_live,
+    merge_voice_fragment,
+)
 from chrome_widgets import (
     SystemAlert, ContentScroll, HookAnnotation, TurnSeparator, classify_turn_trigger,
 )
@@ -1197,8 +1203,10 @@ class AsdaaasTUI(App):
         self._input_drafts: dict[str, str] = {}
         self._voice = VoiceSession()
         self._voice_clip = ""
+        self._voice_live = ""
         self._voice_prefix = ""
         self._voice_ignore = False
+        self._voice_debounce = None
         self._room_channel = "#standup"
         self._mw_active = False
         self._mw_rooms: dict[str, list[str]] = {}
@@ -3668,7 +3676,9 @@ Type anything else to send a message to the agent.
         if self._voice.listening:
             return
         self._voice_clip = ""
+        self._voice_live = ""
         self._voice_ignore = False
+        self._stop_voice_debounce()
         try:
             self._voice_prefix = self.query_one("#input-bar", MessageInput).text
         except NoMatches:
@@ -3702,21 +3712,50 @@ Type anything else to send a message to the agent.
     def _abandon_voice(self) -> None:
         """Stop capture and do not write back into the composer (Enter / Ctrl+L)."""
         self._voice_ignore = True
+        self._stop_voice_debounce()
         self._voice_clip = ""
+        self._voice_live = ""
         self._voice_prefix = ""
         if getattr(self, "_voice", None) is not None and self._voice.listening:
             self._voice.cancel()
         self._set_voice_status("")
 
+    def _stop_voice_debounce(self) -> None:
+        timer = getattr(self, "_voice_debounce", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+        self._voice_debounce = None
+
+    def _kick_voice_debounce(self) -> None:
+        self._stop_voice_debounce()
+        try:
+            self._voice_debounce = self.set_timer(
+                VOICE_DEBOUNCE_S, self._on_voice_debounce
+            )
+        except Exception:
+            self._voice_debounce = None
+
+    def _on_voice_debounce(self) -> None:
+        self._voice_debounce = None
+        if getattr(self, "_voice_ignore", False):
+            return
+        self._voice_clip = commit_live(self._voice_clip, self._voice_live)
+        self._voice_live = ""
+        self._apply_voice_text()
+
     def _apply_voice_text(self) -> None:
-        """Composer = pre-dictation prefix + committed utterances + live partial."""
+        """Composer = prefix + committed clip + live hypothesis (replaced in place)."""
         if getattr(self, "_voice_ignore", False):
             return
         try:
             bar = self.query_one("#input-bar", MessageInput)
         except NoMatches:
             return
-        merged = merge_voice_fragment(self._voice_prefix, self._voice_clip)
+        body = merge_voice_fragment(self._voice_clip, self._voice_live)
+        merged = merge_voice_fragment(self._voice_prefix, body)
         bar.clear()
         if merged:
             bar.insert(merged)
@@ -3725,13 +3764,22 @@ Type anything else to send a message to the agent.
     def _on_voice_partial(self, text: str, speech_final: bool = False) -> None:
         if getattr(self, "_voice_ignore", False):
             return
-        self._voice_clip = fold_into_clip(self._voice_clip, text)
+        self._voice_live = text or ""
+        if speech_final:
+            self._stop_voice_debounce()
+            self._voice_clip = commit_live(self._voice_clip, self._voice_live)
+            self._voice_live = ""
+        else:
+            self._kick_voice_debounce()
         self._apply_voice_text()
 
     def _on_voice_done(self, text: str) -> None:
         if getattr(self, "_voice_ignore", False):
             return
-        self._voice_clip = fold_into_clip(self._voice_clip, text)
+        self._stop_voice_debounce()
+        self._voice_clip = commit_live(self._voice_clip, self._voice_live)
+        self._voice_live = ""
+        self._voice_clip = commit_live(self._voice_clip, text)
         self._set_voice_status("")
         if not self._voice_clip.strip():
             self.notify("No speech was detected. Voice stopped.")

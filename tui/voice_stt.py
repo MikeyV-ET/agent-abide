@@ -20,6 +20,8 @@ SAMPLE_RATE = 16_000
 STT_WS_PATH = "/v1/stt"
 DEFAULT_API_BASE = "https://api.x.ai"
 AUTH_PATH = Path.home() / ".grok" / "auth.json"
+STT_DEBUG_LOG = Path("/tmp/tui-voice-stt.jsonl")
+VOICE_DEBOUNCE_S = 0.5
 
 OnPartial = Callable[[str, bool], None]
 OnDone = Callable[[str], None]
@@ -180,6 +182,29 @@ def merge_voice_fragment(existing: str, fragment: str) -> str:
     if existing.endswith((" ", "\n", "\t")):
         return existing + fragment
     return existing + " " + fragment
+
+
+def log_stt_event(kind: str, **fields) -> None:
+    """Append one JSON line for dogfood. Never log the bearer."""
+    try:
+        rec = {"ts": time.time(), "type": kind, **fields}
+        with STT_DEBUG_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def commit_live(clip: str, live: str) -> str:
+    """Append a finished utterance if it is not already in the clip."""
+    live = (live or "").strip()
+    if not live:
+        return clip or ""
+    clip = clip or ""
+    if live == clip or clip.endswith(live):
+        return clip
+    if len(live) >= 8 and live in clip:
+        return clip
+    return merge_voice_fragment(clip, live)
 
 
 def fold_into_clip(clip: str, incoming: str) -> str:
@@ -393,6 +418,12 @@ class VoiceSession:
         except json.JSONDecodeError:
             return None
         kind = ev.get("type")
+        log_stt_event(
+            kind,
+            text=(ev.get("text") or "")[:500],
+            speech_final=bool(ev.get("speech_final")),
+            is_final=bool(ev.get("is_final")),
+        )
         if kind == "transcript.partial":
             text = ev.get("text") or ""
             speech_final = bool(ev.get("speech_final") or ev.get("is_final"))

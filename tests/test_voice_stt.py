@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tui"))
 from voice_stt import (
     VoiceError,
     build_stt_ws_url,
+    commit_live,
     fold_into_clip,
-    fold_utterance,
     merge_voice_fragment,
     recorder_candidates,
     resolve_bearer,
@@ -60,6 +60,18 @@ def test_fold_into_clip_extends_and_does_not_repeat():
     clip = fold_into_clip(clip, "Why are we doing F8 and escape")
     clip = fold_into_clip(clip, "Why are we doing F8 and escape to stop")
     assert clip == "I just restarted it Why are we doing F8 and escape to stop"
+
+
+def test_commit_live_skips_duplicate_and_keeps_correction_as_one_utterance():
+    clip = ""
+    live = "Okay, are we"
+    live = "Okay, I restarted again"
+    clip = commit_live(clip, live)
+    assert clip == "Okay, I restarted again"
+    clip = commit_live(clip, "Okay, I restarted again")
+    assert clip == "Okay, I restarted again"
+    clip = commit_live(clip, "So is it possible")
+    assert clip == "Okay, I restarted again So is it possible"
 
 
 def test_fold_into_clip_overlap_on_pause():

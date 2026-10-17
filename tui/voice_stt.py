@@ -376,17 +376,18 @@ class VoiceSession:
             proc = spawn_recorder()
             self._proc = proc
             on_status("listening")
-            ws.settimeout(0.05)
             stdout = proc.stdout
             assert stdout is not None
             last_text = ""
             while not self._stop.is_set():
                 chunk = stdout.read(4096)
                 if chunk:
+                    ws.settimeout(5)
                     ws.send_binary(chunk)
                 elif proc.poll() is not None:
                     break
                 try:
+                    ws.settimeout(0.05)
                     msg = ws.recv()
                 except Exception:
                     msg = None
@@ -421,8 +422,14 @@ class VoiceSession:
             if last_text.strip():
                 on_done(last_text.strip())
         except VoiceError as e:
+            log_stt_event("client_error", message=str(e)[:400])
             on_error(str(e))
         except Exception as e:
+            log_stt_event(
+                "client_error",
+                message=str(e)[:400],
+                cls=type(e).__name__,
+            )
             on_error(str(e))
         finally:
             if proc is not None and proc.poll() is None:

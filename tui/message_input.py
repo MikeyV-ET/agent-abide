@@ -22,7 +22,10 @@ class MessageInput(TextArea):
         padding: 0 1;
         border-subtitle-color: #b8a88a;
         border-subtitle-background: #1d2021;
-        border-subtitle-align: left;
+        border-subtitle-align: right;
+    }
+    MessageInput.voice-hot {
+        border-subtitle-color: #cc241d;
     }
     MessageInput:focus {
         border: heavy #7c6f64;

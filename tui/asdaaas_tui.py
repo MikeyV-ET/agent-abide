@@ -3706,14 +3706,13 @@ Type anything else to send a message to the agent.
             bar = self.query_one("#input-bar", MessageInput)
         except NoMatches:
             return
-        if status == "listening":
-            bar.border_subtitle = "● voice  Esc to stop"
-        elif status == "transcribing":
-            bar.border_subtitle = "voice: transcribing…"
-        elif status:
-            bar.border_subtitle = f"voice: {status}"
-        else:
-            bar.border_subtitle = ""
+        if status == "listening" or (
+            getattr(self, "_voice", None) is not None and self._voice.listening
+        ):
+            self._paint_voice_overlay(bar)
+            return
+        bar.remove_class("voice-hot")
+        bar.border_subtitle = ""
 
     def _voice_roll_turn(self) -> None:
         """Enter sent the draft. Keep the mic; start a fresh clip in the empty box."""
@@ -3744,8 +3743,10 @@ Type anything else to send a message to the agent.
 
     def _paint_voice_overlay(self, bar: MessageInput) -> None:
         if getattr(self, "_voice", None) is not None and self._voice.listening:
+            bar.add_class("voice-hot")
             bar.border_subtitle = "● voice  Esc to stop"
         else:
+            bar.remove_class("voice-hot")
             bar.border_subtitle = ""
 
     def _apply_voice_text(self) -> None:
@@ -3794,6 +3795,7 @@ Type anything else to send a message to the agent.
         self._voice_prefix = ""
         try:
             bar = self.query_one("#input-bar", MessageInput)
+            bar.remove_class("voice-hot")
             bar.border_subtitle = ""
             bar.focus()
         except NoMatches:

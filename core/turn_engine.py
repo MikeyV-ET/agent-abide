@@ -565,7 +565,8 @@ class TurnEngine:
                 ack_doorbells(agent_name, pc.get("handled", []), env=self.env)
             elif pa == "delay":
                 dv = pc.get("seconds", 0)
-                self.delay_text = pc.get("text") or None
+                from delay_cmd import delay_continue_text
+                self.delay_text = delay_continue_text(dv, pc.get("text"))
                 if dv == "until_event":
                     self.delay_until_event = True
                     self.next_turn_delay = 0
@@ -604,7 +605,8 @@ class TurnEngine:
                     ack_doorbells(agent_name, lpiggy, env=self.env)
                 if la == "delay":
                     ldv = lc.get("seconds", 0)
-                    self.delay_text = lc.get("text") or None
+                    from delay_cmd import delay_continue_text
+                    self.delay_text = delay_continue_text(ldv, lc.get("text"))
                     if ldv == "until_event":
                         self.delay_until_event = True
                         self.next_turn_delay = 0
@@ -1151,7 +1153,8 @@ class TurnEngine:
                     action = cmd.get("action", "")
                     if action == "delay":
                         dv = cmd.get("seconds", 0)
-                        self.delay_text = cmd.get("text") or None
+                        from delay_cmd import delay_continue_text
+                        self.delay_text = delay_continue_text(dv, cmd.get("text"))
                         if dv == "until_event":
                             self.delay_until_event = True
                             self.next_turn_delay = 0
@@ -1303,7 +1306,8 @@ class TurnEngine:
                     ack_doorbells(agent_name, fpiggy, env=self.env)
                 if fa == "delay":
                     fdv = fc.get("seconds", 0)
-                    self.delay_text = fc.get("text") or None
+                    from delay_cmd import delay_continue_text
+                    self.delay_text = delay_continue_text(fdv, fc.get("text"))
                     if fdv == "until_event":
                         self.delay_until_event = True
                         self.next_turn_delay = 0
@@ -1393,7 +1397,13 @@ class TurnEngine:
                         await asyncio.sleep(5.0)
                         return result
 
-            if queue_continue_doorbell(agent_name, text=self.delay_text, env=self.env):
+            from delay_cmd import failsafe_if_bare_delay_zero
+            _cont_text = failsafe_if_bare_delay_zero(
+                self.delay_text,
+                until_event=self.delay_until_event,
+                next_turn_delay=self.next_turn_delay,
+            )
+            if queue_continue_doorbell(agent_name, text=_cont_text, env=self.env):
                 print(f"[asdaaas] Default doorbell queued for {agent_name}")
                 result.continue_queued = True
             self.delay_text = None

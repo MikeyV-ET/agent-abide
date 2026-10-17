@@ -2782,7 +2782,10 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
 
                 if action == "delay":
                     delay_val = cmd.get("seconds", 0)
-                    delay_text = cmd.get("text") or None  # optional directed text for next continue
+                    from delay_cmd import delay_continue_text
+                    delay_text = delay_continue_text(
+                        delay_val, cmd.get("text")
+                    )  # optional directed text; bare delay 0 gets a how-to
                     if delay_val == "until_event":
                         delay_until_event = True
                         next_turn_delay = 0

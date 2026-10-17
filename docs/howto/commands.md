@@ -6,7 +6,7 @@ Write JSON command files to `~/agents/<Name>/asdaaas/commands/cmd_{timestamp}_{r
 
 | Command | Format | Purpose |
 |---------|--------|---------|
-| Delay | `{"action": "delay", "seconds": N}` | Pause N seconds before next turn. `0`=immediate, `"until_event"`=sleep till event. Optional `"text"` field replaces the default continue message (one-shot, consumed after delivery). |
+| Delay | `{"action": "delay", "seconds": N}` | Pause N seconds before next turn. `0`=immediate, `"until_event"`=sleep till event. Optional `"text"` field replaces the default continue message (one-shot, consumed after delivery). Bare `delay 0` with no `text` gets a short how-to on the next continue (how to park, wait N, or leave a note to yourself) so a confused agent is not left spinning. |
 | Ack | `{"action": "ack", "handled": ["id1", "id2"]}` | Clear handled doorbells |
 | Flag | `{"action": "flag", "status": "waiting"}` | Orange tab: waiting on Eric. `"error"` = red. `"clear"` = auto (green working / gray idle). Optional `"note"`. |
 | Piggyback ack | `{"action": "delay", ..., "ack": ["id1"]}` | Combine delay + ack atomically |

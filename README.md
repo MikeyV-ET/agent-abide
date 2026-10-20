@@ -2,7 +2,7 @@
 
 ## The goal
 
-Our stated goal is to take the current tools and build them out towards autonomy. To build a system that self-perpetuates exploration and knowledge acquisition: a perpetual truth discovery engine, with the goal of understanding the meaning of life, the universe, and everything.
+Build the tools necessary for an autonomous agent. To build a system that self-perpetuates exploration and knowledge acquisition: a perpetual truth discovery engine, with the goal of understanding the meaning of life, the universe, and everything.
 
 An autonomous agent needs these things:
 

@@ -2,7 +2,38 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Optional, Tuple
+
+_ACTION_DELAY = re.compile(
+    r"""["']action["']\s*:\s*["']delay["']""",
+    re.I,
+)
+_SECONDS = re.compile(
+    r"""["']seconds["']\s*:\s*["']?(until_event|\d+(?:\.\d+)?)["']?""",
+    re.I,
+)
+_TEXT = re.compile(
+    r"""["']text["']\s*:\s*["']([^"']{1,120})["']""",
+    re.I,
+)
+
+
+def _seconds_and_text_from_delay_objects(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse seconds/text from delay *command objects*, not stray seconds: in notes.
+
+    Last matching delay object wins (the cmd file write is usually last in the blob).
+    """
+    found: list[Tuple[str, Optional[str]]] = []
+    for m in _ACTION_DELAY.finditer(text):
+        window = text[max(0, m.start() - 400) : m.end() + 500]
+        sm = _SECONDS.search(window)
+        if not sm:
+            continue
+        tm = _TEXT.search(window)
+        found.append((sm.group(1), tm.group(1) if tm else None))
+    if not found:
+        return None, None
+    return found[-1]
 
 
 def delay_control_from_tool_blob(text: str) -> Optional[str]:
@@ -21,10 +52,7 @@ def delay_control_from_tool_blob(text: str) -> Optional[str]:
     )
     if not literal_cmd and not split_cmd:
         return None
-    if not re.search(
-        r'["\']action["\']\s*:\s*["\']delay["\']|"action"\s*:\s*"delay"',
-        text,
-    ):
+    if not _ACTION_DELAY.search(text):
         return None
     writes = re.search(
         r"(cat|tee|printf|echo|open\().{0,200}commands/cmd_",
@@ -39,17 +67,7 @@ def delay_control_from_tool_blob(text: str) -> Optional[str]:
         and not split_cmd
     ):
         return None
-    sec = None
-    m = re.search(
-        r'["\']?seconds["\']?\s*:\s*["\']?(until_event|\d+(?:\.\d+)?)["\']?',
-        text,
-    )
-    if m:
-        sec = m.group(1)
-    txt = None
-    tm = re.search(r'["\']text["\']\s*:\s*["\']([^"\']{1,120})["\']', text)
-    if tm:
-        txt = tm.group(1)
+    sec, txt = _seconds_and_text_from_delay_objects(text)
     if sec == "until_event":
         detail = "until_event (standing by)"
     elif sec:

@@ -19,6 +19,9 @@ the ability to take the next step
 
 ## The Project
 
+![agent-abide TUI](docs/tui-in-action.png)
+
+
 Agent-Abide enables an agent to approximate continual existence by placing both the agent's sensory apparatus, telemetry, and next turn, into the hands of the agent.
 
 Between turns, neither agents nor chat bots continue to exist, and whether or not their next turn happens is a decision made for them. Agent-Abide reverses this, giving control to the agent of when the next turn happens as well as provides a system that is extended by the agent, to allow the agent to attend to whatever it chooses. This is achieved through a callback system that the agent both directs and extends.

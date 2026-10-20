@@ -23,6 +23,9 @@ the ability to take the next step
 
 Agent-abide is an agent-harness add on that allows the agent to control their own turns
 
+![agent-abide TUI](docs/tui-in-action.png)
+
+
 ### Three sentence summary.
 
 ### Three paragraph summary.

@@ -71,6 +71,12 @@ else
     STOP_ALL=true
 fi
 
+echo "=== LLM auth preflight ==="
+if ! python3 "$SCRIPT_DIR/check_llm_auth.py" --config "$CONFIG" "${AGENTS[@]}"; then
+    echo "AUTH_NEEDED: refuse start until grok auth.json is usable (Sync LLM Auth)."
+    exit 2
+fi
+
 echo "=== Stopping existing instances ==="
 if [ "$STOP_ALL" = true ]; then
     pkill -f "asdaaas.py --agent" 2>/dev/null && echo "Killed asdaaas agents" || echo "No asdaaas agents running"
@@ -181,7 +187,11 @@ if [ "$WAIT_FOR_READY" = true ]; then
             if grep -q '\[asdaaas\] Ready\.' "$log_file" 2>/dev/null; then
                 echo "$agent: Ready"
             else
-                echo "$agent: Timed out after 90s (check $log_file)"
+                if grep -q "Authentication required" "$log_file" 2>/dev/null || grep -q "AUTH_NEEDED" "$log_file" 2>/dev/null; then
+                    echo "$agent: AUTH_NEEDED (Authentication required — empty or missing ~/.grok/auth.json). Sync LLM Auth, then retry."
+                else
+                    echo "$agent: Timed out after 90s (check $log_file)"
+                fi
             fi
         fi
     done

@@ -15,8 +15,53 @@ from typing import Any, Iterator, Optional
 from aa_stream_parser import is_aa_stream_path, parse_aa_stream
 
 # History paint must stay responsive; pre-elision hot lines can be >1MB.
+# hot.jsonl KEEPS those bytes (screenshots, tool blobs). TUI never hydrates them.
 MAX_TUI_LINE_BYTES = 32 * 1024
 MAX_NATIVE_PASSTHROUGH_BYTES = 16 * 1024
+
+
+def tui_view_of_hot_line(raw: str | bytes, max_bytes: int = MAX_TUI_LINE_BYTES) -> str:
+    """Prefix the TUI is allowed to hold. Full record stays on disk in hot.jsonl."""
+    if isinstance(raw, bytes):
+        chunk = raw if len(raw) <= max_bytes else raw[:max_bytes]
+        return chunk.decode("utf-8", errors="replace")
+    if len(raw) <= max_bytes:
+        return raw
+    return raw[:max_bytes]
+
+
+def iter_complete_capped_jsonl(
+    buf: bytes,
+    *,
+    base_offset: int = 0,
+    max_bytes: int = MAX_TUI_LINE_BYTES,
+):
+    """Yield (byte_offset, tui_view) for complete lines. Fat tails are not decoded."""
+    last_nl = buf.rfind(b"\n")
+    if last_nl < 0:
+        return
+    start = 0
+    while start <= last_nl:
+        nl = buf.find(b"\n", start)
+        if nl < 0 or nl > last_nl:
+            break
+        raw = buf[start:nl]
+        off = base_offset + start
+        start = nl + 1
+        if not raw.strip():
+            continue
+        yield off, tui_view_of_hot_line(raw, max_bytes)
+
+
+def split_complete_capped_jsonl(
+    buf: bytes, max_bytes: int = MAX_TUI_LINE_BYTES
+) -> tuple[list[str], int]:
+    """TUI views of complete lines, and byte count consumed (through last newline)."""
+    last_nl = buf.rfind(b"\n")
+    if last_nl < 0:
+        return [], 0
+    views = [v for _off, v in iter_complete_capped_jsonl(buf, max_bytes=max_bytes)]
+    return views, last_nl + 1
 
 
 def agent_history_dir(agent_home: Path) -> Path:
@@ -573,6 +618,10 @@ def line_to_tui_event(line: str, hist_kind: str = "updates") -> Optional[dict[st
     import json as _json
     if line is None:
         return None
+    if isinstance(line, (bytes, bytearray)):
+        line = tui_view_of_hot_line(bytes(line))
+    elif len(line) > MAX_TUI_LINE_BYTES:
+        line = tui_view_of_hot_line(line)
     # Cheap length gate BEFORE full json.loads (1.4MB lines freeze the TUI).
     # Tool *completions* are often fat (stdout + byte-array rawOutput) but still
     # need a panel body — thin-extract instead of dropping → empty ✓ title-only.

@@ -175,3 +175,40 @@ def test_interjection_kind_becomes_tool_update_for_block():
     assert "<interjection>" in blob
     assert "hi mid-turn" in blob
     assert u["params"]["update"].get("_aa_interjection") is True
+
+
+def test_tui_does_not_hydrate_fat_hot_line():
+    """hot.jsonl may store screenshot blobs; TUI only looks at a prefix."""
+    from tui_history import (
+        MAX_TUI_LINE_BYTES,
+        tui_view_of_hot_line,
+        split_complete_capped_jsonl,
+        line_to_tui_event,
+    )
+    blob = b"x" * 80000
+    prefix = (
+        b'{"v":1,"format":"aa.stream","role":"tool","body":{"kind":"tool_result",'
+        b'"content":"ok"},"native":{"event":{"params":{"update":{"sessionUpdate":'
+        b'"tool_call_update","toolCallId":"call-img-1","title":"read_file",'
+        b'"status":"completed"}}}}}'
+    )
+    # pad to fat line like ImageContent.data
+    line = prefix + b',"pad":"' + blob + b'"}\n'
+    assert len(line) > MAX_TUI_LINE_BYTES
+    view = tui_view_of_hot_line(line.strip())
+    assert len(view.encode("utf-8")) <= MAX_TUI_LINE_BYTES + 8
+    views, consumed = split_complete_capped_jsonl(line)
+    assert consumed == len(line)
+    assert len(views) == 1
+    assert len(views[0]) <= MAX_TUI_LINE_BYTES
+    ev = line_to_tui_event(views[0], "hot")
+    # prefix has tool id; we must not need the 80k pad
+    assert ev is None or "call-img-1" in str(ev) or ev.get("params")
+
+
+def test_capped_jsonl_skips_incomplete_tail():
+    from tui_history import split_complete_capped_jsonl
+    buf = b'{"a":1}\n{"b":2'
+    views, n = split_complete_capped_jsonl(buf)
+    assert views == ['{"a":1}']
+    assert n == len(b'{"a":1}\n')

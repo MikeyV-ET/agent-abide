@@ -92,8 +92,8 @@ def _ensure_core_path() -> None:
 
 def event_from_hot_line(line: str) -> Optional[dict]:
     _ensure_core_path()
-    from tui_history import line_to_tui_event
-    return line_to_tui_event(line, "hot")
+    from tui_history import line_to_tui_event, tui_view_of_hot_line
+    return line_to_tui_event(tui_view_of_hot_line(line), "hot")
 
 
 def should_apply_event(event: dict) -> bool:
@@ -232,8 +232,10 @@ def fold_hot_file_tail(
         f.seek(seek)
         if seek > 0:
             f.readline()
-        raw = f.read().decode("utf-8", errors="replace")
-    result = fold_hot_lines(state, raw.split("\n"))
+        raw = f.read()
+    _ensure_core_path()
+    from tui_history import iter_complete_capped_jsonl
+    result = fold_hot_lines(state, (v for _off, v in iter_complete_capped_jsonl(raw)))
     prune_items(state, prune_max)
     result.state = state
     return result

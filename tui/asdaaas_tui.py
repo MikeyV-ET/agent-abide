@@ -4428,13 +4428,14 @@ Type anything else to send a message to the agent.
                             data_start = f.tell()
                             raw = f.read()
                             state["updates_offset"] = f.tell()
-                        text_data = raw.decode("utf-8", errors="replace")
-                        pairs = []
-                        pos = data_start
-                        for ln in text_data.split("\n"):
-                            if ln.strip():
-                                pairs.append((pos, ln))
-                            pos += len(ln.encode("utf-8", errors="replace")) + 1
+                        try:
+                            from tui_history import iter_complete_capped_jsonl
+                        except Exception:
+                            _core = str(Path(__file__).resolve().parent.parent / "core")
+                            if _core not in sys.path:
+                                sys.path.insert(0, _core)
+                            from tui_history import iter_complete_capped_jsonl
+                        pairs = list(iter_complete_capped_jsonl(raw, base_offset=data_start))
                         # probe fold of full window — enough raw material?
                         probe = ChatState()
                         fold_hot_lines(probe, [ln for _, ln in pairs])
@@ -4592,25 +4593,21 @@ Type anything else to send a message to the agent.
                 current_size = updates_path.stat().st_size
                 offset = state["updates_offset"]
                 if current_size > offset:
-                    with open(updates_path, "r", errors="replace") as f:
+                    with open(updates_path, "rb") as f:
                         f.seek(offset)
                         new_data = f.read()
 
-                    # Only process complete lines (ending with \n).
-                    # A partial last line means grok is mid-write — leave it
-                    # for the next poll by not advancing the offset past it.
-                    if new_data.endswith("\n"):
-                        state["updates_offset"] = offset + len(new_data.encode("utf-8"))
-                        lines = new_data.strip().split("\n")
-                    else:
-                        last_nl = new_data.rfind("\n")
-                        if last_nl == -1:
-                            # No complete line yet — wait for more data
-                            lines = []
-                        else:
-                            complete = new_data[:last_nl + 1]
-                            state["updates_offset"] = offset + len(complete.encode("utf-8"))
-                            lines = complete.strip().split("\n")
+                    # hot.jsonl keeps screenshot/tool blobs. TUI only holds a prefix.
+                    try:
+                        from tui_history import split_complete_capped_jsonl
+                    except Exception:
+                        _core = str(Path(__file__).resolve().parent.parent / "core")
+                        if _core not in sys.path:
+                            sys.path.insert(0, _core)
+                        from tui_history import split_complete_capped_jsonl
+                    lines, consumed = split_complete_capped_jsonl(new_data)
+                    if consumed:
+                        state["updates_offset"] = offset + consumed
 
                     parsed = []
                     skip_count = 0

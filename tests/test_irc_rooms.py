@@ -41,3 +41,10 @@ def test_room_awareness_cmd_join_and_leave():
         "action": "awareness",
         "remove": "#standup",
     }
+
+
+def test_norm_channel_lower():
+    from irc_rooms import _norm_channel, add_room, load
+    assert _norm_channel("#Gen4") == "#gen4"
+    assert _norm_channel("Gen4") == "#gen4"
+    assert _norm_channel("#standup") == "#standup"

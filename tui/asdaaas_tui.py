@@ -3494,6 +3494,8 @@ Type anything else to send a message to the agent.
             return
         log_path = self._room_log_path()
         if not log_path.exists():
+            items = [("sys", time.strftime("%H:%M"), f"— {self._room_channel} (empty) —")]
+            self.call_from_thread(self._replace_room_history, items)
             self._room_history_loaded_for = self._room_channel
             return
         msg_re = re.compile(r"^\[([^\]]+)\] <([^>]+)> (.*)$")

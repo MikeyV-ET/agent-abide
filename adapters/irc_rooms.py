@@ -12,12 +12,14 @@ DEFAULT_PATH = Path.home() / "agents" / "config" / "irc_rooms.json"
 
 
 def _norm_channel(name: str) -> str:
+    """IRC channels are case-insensitive; miniircd logs as lowercase."""
     name = (name or "").strip()
     if not name:
         return ""
-    if not name.startswith("#"):
-        name = "#" + name
-    return name.split()[0][:32]
+    body = name.split()[0].lstrip("#").lower()
+    if not body:
+        return ""
+    return ("#" + body)[:32]
 
 
 def load(path: Path | None = None) -> dict:

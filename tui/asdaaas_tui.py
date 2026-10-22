@@ -3457,10 +3457,12 @@ Type anything else to send a message to the agent.
                     self.call_from_thread(
                         self._mount_room_system_msg,
                         time.strftime("%H:%M"),
-                        "Not connected — message not sent",
+                        "IRC down — still delivering to room members",
                     )
-                    return
-            _privmsg()
+                else:
+                    _privmsg()
+            else:
+                _privmsg()
         except Exception as e:
             _log(f"error {e}\n{traceback.format_exc()}")
             self._room_irc_sock = None

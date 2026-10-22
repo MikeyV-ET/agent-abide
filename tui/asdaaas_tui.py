@@ -3470,6 +3470,18 @@ Type anything else to send a message to the agent.
                 f"Send error: {e}",
             )
             self.call_from_thread(self._update_room_header, "disconnected")
+        # Membership is routing. IRC is optional. Agents get a TUI inbox file
+        # even if irc_adapter is down or gaze is elsewhere.
+        try:
+            members = self._irc_rooms_mod().members_of(chan)
+        except Exception:
+            members = []
+        for name in members:
+            try:
+                self._send_to_named_agent(name, text, room=chan, members=members)
+                _log(f"fanout tui inbox {name} room={chan}")
+            except Exception as e:
+                _log(f"fanout {name}: {e}")
 
     @staticmethod
     def _irc_log_clock(ts: str) -> str:

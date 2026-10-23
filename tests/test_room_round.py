@@ -31,15 +31,26 @@ def test_start_first_seat():
     assert ia._floor_speaker("#Gen4") == first
 
 
-def test_last_noted_stops_no_wrap():
+def test_last_noted_after_speech_wraps_so_first_sees_it():
     ia, first, order = _round()
     second = order[1]
     b = _Batch()
     assert ia.on_member_speech("#gen4", first, first, "hi", noted=False, batcher=b) == "next"
-    assert b.added[-1][0] == second
     b2 = _Batch()
-    assert ia.on_member_speech("#gen4", second, second, "noted", noted=True, batcher=b2) == "stop"
-    assert b2.added == []
+    assert ia.on_member_speech("#gen4", second, second, "noted", noted=True, batcher=b2) == "wrap"
+    assert b2.added[-1][0] == first
+    assert "noted" in b2.added[-1][1]
+    assert ia._floor_speaker("#gen4") == first
+
+
+def test_full_noted_pass_flushes_then_stops():
+    ia, first, order = _round()
+    second = order[1]
+    b = _Batch()
+    assert ia.on_member_speech("#gen4", first, first, "noted", noted=True, batcher=b) == "next"
+    b2 = _Batch()
+    assert ia.on_member_speech("#gen4", second, second, "noted", noted=True, batcher=b2) == "stop_flush"
+    assert b2.added[-1][0] == first
     assert ia._floor_speaker("#gen4") is None
 
 

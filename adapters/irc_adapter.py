@@ -101,6 +101,7 @@ def start_room_round(channel, members, operator_nick, text, connected_names):
         "i": 0,
         "blocks": [(operator_nick, text or "")],
         "channel": disp,
+        "noted": set(),
     }
     return order[0]
 
@@ -128,14 +129,20 @@ def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batche
         return "held"
     display = speaker_nick or agent_name
     turn["blocks"].append((display, "noted" if noted else (speech or "")))
+    noted_set = turn.setdefault("noted", set())
+    if noted:
+        noted_set.add(agent_name)
+    else:
+        noted_set.discard(agent_name)
     last = i >= len(order) - 1
-    if noted and last:
-        _room_turns.pop(ch, None)
-        return "stop"
     if last:
-        turn["i"] = 0
         nxt = order[0]
         _doorbell_chain(turn, display, batcher, nxt)
+        all_noted = set(order) <= noted_set
+        if noted and all_noted:
+            _room_turns.pop(ch, None)
+            return "stop_flush"
+        turn["i"] = 0
         return "wrap"
     turn["i"] = i + 1
     nxt = order[turn["i"]]

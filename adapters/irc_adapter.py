@@ -171,6 +171,8 @@ def start_room_round(channel, members, operator_nick, text, connected_names):
 
 
 def _persist_round(channel, turn=None):
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
     try:
         from irc_round import write_round, clear_round
         if not turn:

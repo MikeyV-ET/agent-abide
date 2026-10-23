@@ -166,7 +166,27 @@ def start_room_round(channel, members, operator_nick, text, connected_names):
         "delivered": {order[0]: 0, **{n: -1 for n in order[1:]}},
         "speak_rcpt": {0: {order[0]}},
     }
+    _persist_round(disp, _room_turns[ch])
     return order[0]
+
+
+def _persist_round(channel, turn=None):
+    try:
+        from irc_round import write_round, clear_round
+        if not turn:
+            clear_round(channel)
+            return
+        order = list(turn.get("order") or [])
+        i = int(turn.get("i") or 0)
+        seat = order[i] if 0 <= i < len(order) else ""
+        write_round(
+            channel,
+            order=order,
+            seat=seat,
+            flags=sorted(turn.get("flags") or []),
+        )
+    except Exception as e:
+        tprint(f"[irc-adapter] rr persist: {e}")
 
 
 def _doorbell_delta(turn, sender, batcher, nxt):
@@ -215,7 +235,9 @@ def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batche
         if order[j] in flags:
             turn["i"] = j
             _doorbell_delta(turn, display, batcher, order[j])
-            return "wrap" if j <= i else "next"
+            st = "wrap" if j <= i else "next"
+            _persist_round(channel, turn)
+            return st
     errs = speak_receipt_errors(turn)
     if errs:
         tprint(f"[irc-adapter] rr {channel}: speak receipts {errs}")
@@ -224,6 +246,7 @@ def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batche
         tprint(f"[irc-adapter] rr {channel}: speak receipts ok (each n-1={n-1})")
     _last_round = turn
     _room_turns.pop(ch, None)
+    _persist_round(channel, None)
     return "stop"
 
 

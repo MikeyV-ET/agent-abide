@@ -1494,13 +1494,11 @@ class AsdaaasTUI(App):
 
         # Room mode: send to IRC channel instead of agent
         if self._room_active:
-            nick = Config.OPERATOR_NAME or "eric"
             try:
                 room_scroll = self.query_one("#content-room", ContentScroll)
                 room_scroll._follow_tail = True
                 ts = time.strftime("%H:%M")
-                room_scroll.mount(RoomMessage(ts, nick, text, is_human=True))
-                room_scroll.scroll_end(animate=False)
+                self._mount_room_msg(ts, Config.OPERATOR_NAME or "eric", text)
             except NoMatches:
                 pass
             import threading
@@ -3098,6 +3096,16 @@ Type anything else to send a message to the agent.
         import threading
         threading.Thread(target=self._ensure_room_connected, args=(True,), daemon=True).start()
 
+    def _rr_status_line(self, channel: str) -> str:
+        try:
+            adapters = str(Path(__file__).resolve().parent.parent / "adapters")
+            if adapters not in sys.path:
+                sys.path.insert(0, adapters)
+            from irc_round import format_round_line, read_round
+            return format_round_line(read_round(channel))
+        except Exception:
+            return ""
+
     def _floor_nicks(self, channel: str, nicks: list[str]) -> list[str]:
         """Mark members with a raised floor as Name!"""
         try:
@@ -3145,7 +3153,9 @@ Type anything else to send a message to the agent.
             header.gaze_target = f"irc/{self._room_channel}"
             try:
                 nicks = self._irc_rooms_mod().members_of(self._room_channel)
-                header.room_nicks = ", ".join(self._floor_nicks(self._room_channel, nicks)) if nicks else ""
+                marked = self._floor_nicks(self._room_channel, nicks)
+                rr = self._rr_status_line(self._room_channel)
+                header.room_nicks = (rr + "  |  " if rr else "") + (", ".join(marked) if marked else "")
             except Exception:
                 header.room_nicks = ""
             header.context_pct = 0
@@ -3701,6 +3711,10 @@ Type anything else to send a message to the agent.
                 last.append_line(msg, ts)
             else:
                 room_scroll.mount(RoomMessage(ts, shown, msg, is_action, is_human=human))
+            if human and not is_action:
+                rr = self._rr_status_line(self._room_channel)
+                if rr:
+                    room_scroll.mount(RoomSystemMessage(ts, rr))
             if room_scroll._follow_tail:
                 room_scroll.scroll_end(animate=False)
         except NoMatches:

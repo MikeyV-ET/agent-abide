@@ -28,20 +28,25 @@ def _go(ia, name, *, noted, text="x"):
 
 
 def test_four_person_eric_trace():
-    # A speaks: B C D; B noted: C D; C speaks: A B D; D noted: A B;
-    # A noted: B; B noted: stop
+    # Receives: B:A1; C:A1; D:A1,C1; A:C1; B:C1. Notes never delivered.
     names = ["A", "B", "C", "D"]
     ia = _round(names)
-    st, b, fl = _go(ia, "A", noted=False, text="a")
+    st, b, fl = _go(ia, "A", noted=False, text="A1")
     assert st == "next" and b.added[-1][0] == "B" and fl == {"B", "C", "D"}
+    assert "A1" in b.added[-1][1] and "noted" not in b.added[-1][1]
     st, b, fl = _go(ia, "B", noted=True)
     assert st == "next" and b.added[-1][0] == "C" and fl == {"C", "D"}
-    st, b, fl = _go(ia, "C", noted=False, text="c")
+    assert "A1" in b.added[-1][1] and "noted" not in b.added[-1][1]
+    st, b, fl = _go(ia, "C", noted=False, text="C1")
     assert st == "next" and b.added[-1][0] == "D" and fl == {"A", "B", "D"}
+    body = b.added[-1][1]
+    assert "A1" in body and "C1" in body and "noted" not in body
     st, b, fl = _go(ia, "D", noted=True)
     assert st == "wrap" and b.added[-1][0] == "A" and fl == {"A", "B"}
+    assert "C1" in b.added[-1][1] and "A1" not in b.added[-1][1]
     st, b, fl = _go(ia, "A", noted=True)
     assert st == "next" and b.added[-1][0] == "B" and fl == {"B"}
+    assert "C1" in b.added[-1][1] and "noted" not in b.added[-1][1]
     st, b, fl = _go(ia, "B", noted=True)
     assert st == "stop" and ia._floor_speaker("#gen4") is None
 

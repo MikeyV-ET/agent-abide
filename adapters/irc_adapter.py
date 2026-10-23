@@ -64,10 +64,43 @@ def _is_operator_nick(nick: str) -> bool:
     return n in ("eric", "eric_tui") or n.startswith("eric_")
 
 
-def _format_room_chain(channel, blocks):
+def _block_kind(rec):
+    if len(rec) >= 4:
+        return rec[3]
+    return "speak"
+
+
+def _block_who(rec):
+    if len(rec) >= 4:
+        return rec[0]
+    return rec[0]
+
+
+def _block_nick(rec):
+    if len(rec) >= 4:
+        return rec[1]
+    return rec[0]
+
+
+def _block_text(rec):
+    if len(rec) >= 4:
+        return rec[2]
+    return rec[1]
+
+
+def _format_delta(channel, blocks, nxt, last_i):
+    """New speeches only: no noted, not nxt's own, not already delivered."""
     parts = []
-    for nick, text in blocks:
-        parts.append(f"[IRC {channel} from {nick}]\n{(text or '').strip()}")
+    for i, rec in enumerate(blocks):
+        if i <= last_i:
+            continue
+        if _block_kind(rec) == "noted":
+            continue
+        if _block_who(rec) == nxt:
+            continue
+        nick = _block_nick(rec)
+        text = (_block_text(rec) or "").strip()
+        parts.append(f"[IRC {channel} from {nick}]\n{text}")
     return "\n\n".join(parts)
 
 
@@ -104,19 +137,25 @@ def start_room_round(channel, members, operator_nick, text, connected_names):
     _room_turns[ch] = {
         "order": order,
         "i": 0,
-        "blocks": [(operator_nick, text or "")],
+        "blocks": [(None, operator_nick, text or "", "speak")],
         "channel": disp,
         "flags": set(order),
+        "delivered": {order[0]: 0, **{n: -1 for n in order[1:]}},
     }
     return order[0]
 
 
-def _doorbell_chain(turn, sender, batcher, nxt):
+def _doorbell_delta(turn, sender, batcher, nxt):
     chan = turn.get("channel") or ""
+    blocks = turn.get("blocks") or []
+    delivered = turn.setdefault("delivered", {})
+    last_i = delivered.get(nxt, -1)
+    text = _format_delta(chan, blocks, nxt, last_i)
+    delivered[nxt] = len(blocks) - 1
     fake = {
         "sender": sender,
         "target": chan,
-        "text": _format_room_chain(chan, turn["blocks"]),
+        "text": text,
         "is_pm": False,
     }
     batcher.add(nxt, fake)
@@ -133,7 +172,9 @@ def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batche
     if i < 0 or i >= len(order) or agent_name != order[i]:
         return "held"
     display = speaker_nick or agent_name
-    turn["blocks"].append((display, "noted" if noted else (speech or "")))
+    turn["blocks"].append(
+        (agent_name, display, "noted" if noted else (speech or ""), "noted" if noted else "speak")
+    )
     flags = turn.setdefault("flags", set())
     if noted:
         flags.discard(agent_name)
@@ -145,7 +186,7 @@ def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batche
         j = (i + step) % n
         if order[j] in flags:
             turn["i"] = j
-            _doorbell_chain(turn, display, batcher, order[j])
+            _doorbell_delta(turn, display, batcher, order[j])
             return "wrap" if j <= i else "next"
     _room_turns.pop(ch, None)
     return "stop"

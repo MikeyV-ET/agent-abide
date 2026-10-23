@@ -16,6 +16,8 @@ def _round(names):
     ia._room_turns["#gen4"]["order"] = list(names)
     ia._room_turns["#gen4"]["i"] = 0
     ia._room_turns["#gen4"]["flags"] = set(names)
+    ia._room_turns["#gen4"]["delivered"] = {names[0]: 0, **{n: -1 for n in names[1:]}}
+    ia._room_turns["#gen4"]["speak_rcpt"] = {0: {names[0]}}
     return ia
 
 
@@ -49,6 +51,15 @@ def test_four_person_eric_trace():
     assert "C1" in b.added[-1][1] and "noted" not in b.added[-1][1]
     st, b, fl = _go(ia, "B", noted=True)
     assert st == "stop" and ia._floor_speaker("#gen4") is None
+    assert ia.speak_receipt_errors(ia._last_round) == []
+    rcpt = ia._last_round["speak_rcpt"]
+    # block 1 is A1, block 3 is C1 (0=hello, 2=B noted)
+    nameset = set(names)
+    for i, rec in enumerate(ia._last_round["blocks"]):
+        if rec[3] != "speak" or rec[0] not in nameset:
+            continue
+        got = rcpt[i]
+        assert got == nameset - {rec[0]}, (i, rec[0], got)
 
 
 def test_a_speak_tail_notes_stops():

@@ -57,6 +57,7 @@ BATCH_WINDOW = 0.3  # quiet window: flush after 0.3s of no new messages
 # Last seat noted → stop (no wrap). Last seat speech → wrap to first.
 # channel.lower() -> {order, i, blocks, channel}
 _room_turns = {}
+_last_round = None
 
 
 def _is_operator_nick(nick: str) -> bool:
@@ -89,8 +90,13 @@ def _block_text(rec):
 
 
 def _format_delta(channel, blocks, nxt, last_i):
-    """New speeches only: no noted, not nxt's own, not already delivered."""
+    """New speeches only: no noted, not nxt's own, not already delivered.
+
+    Each speak must land in exactly the other n-1 inboxes. noted is not
+    delivered and is unbounded above (a later speak re-raises flags).
+    """
     parts = []
+    idxs = []
     for i, rec in enumerate(blocks):
         if i <= last_i:
             continue
@@ -101,7 +107,24 @@ def _format_delta(channel, blocks, nxt, last_i):
         nick = _block_nick(rec)
         text = (_block_text(rec) or "").strip()
         parts.append(f"[IRC {channel} from {nick}]\n{text}")
-    return "\n\n".join(parts)
+        idxs.append(i)
+    return "\n\n".join(parts), idxs
+
+
+def speak_receipt_errors(turn):
+    """Return [(index, who, got, expect)] where a speak was not n-1 deliveries."""
+    order = set(turn.get("order") or [])
+    rcpt = turn.get("speak_rcpt") or {}
+    errors = []
+    for i, rec in enumerate(turn.get("blocks") or []):
+        if _block_kind(rec) != "speak":
+            continue
+        who = _block_who(rec)
+        got = set(rcpt.get(i) or [])
+        expect = order if who not in order else (order - {who})
+        if got != expect:
+            errors.append((i, who, sorted(got), sorted(expect)))
+    return errors
 
 
 def _room_key(channel):
@@ -141,6 +164,7 @@ def start_room_round(channel, members, operator_nick, text, connected_names):
         "channel": disp,
         "flags": set(order),
         "delivered": {order[0]: 0, **{n: -1 for n in order[1:]}},
+        "speak_rcpt": {0: {order[0]}},
     }
     return order[0]
 
@@ -150,7 +174,10 @@ def _doorbell_delta(turn, sender, batcher, nxt):
     blocks = turn.get("blocks") or []
     delivered = turn.setdefault("delivered", {})
     last_i = delivered.get(nxt, -1)
-    text = _format_delta(chan, blocks, nxt, last_i)
+    text, idxs = _format_delta(chan, blocks, nxt, last_i)
+    rcpt = turn.setdefault("speak_rcpt", {})
+    for i in idxs:
+        rcpt.setdefault(i, set()).add(nxt)
     delivered[nxt] = len(blocks) - 1
     fake = {
         "sender": sender,
@@ -163,6 +190,7 @@ def _doorbell_delta(turn, sender, batcher, nxt):
 
 def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batcher):
     """Advance RR after the seated agent notes or speaks. Returns a status string."""
+    global _last_round
     ch = _room_key(channel)
     turn = _room_turns.get(ch)
     if not turn:
@@ -188,6 +216,13 @@ def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batche
             turn["i"] = j
             _doorbell_delta(turn, display, batcher, order[j])
             return "wrap" if j <= i else "next"
+    errs = speak_receipt_errors(turn)
+    if errs:
+        tprint(f"[irc-adapter] rr {channel}: speak receipts {errs}")
+    else:
+        n = len(order)
+        tprint(f"[irc-adapter] rr {channel}: speak receipts ok (each n-1={n-1})")
+    _last_round = turn
     _room_turns.pop(ch, None)
     return "stop"
 

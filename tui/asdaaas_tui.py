@@ -1436,6 +1436,8 @@ class AsdaaasTUI(App):
         self.query_one("#input-bar", MessageInput).focus()
         # OS appearance poll (~5s) when theme preference is auto
         self.set_interval(5.0, self._poll_auto_theme)
+        self.set_interval(2.0, self._poll_floor_header)
+
         apply_theme_to_app(self)
 
 
@@ -3096,6 +3098,35 @@ Type anything else to send a message to the agent.
         import threading
         threading.Thread(target=self._ensure_room_connected, args=(True,), daemon=True).start()
 
+    def _floor_nicks(self, channel: str, nicks: list[str]) -> list[str]:
+        """Mark members with a raised floor as Name!"""
+        try:
+            core = str(Path(__file__).resolve().parent.parent / "core")
+            if core not in sys.path:
+                sys.path.insert(0, core)
+            from floor_flag import read_floor
+            from asdaaas_config import config as _cfg
+        except Exception:
+            return list(nicks)
+        want = (channel or "").lower()
+        out = []
+        for name in nicks:
+            mark = name
+            try:
+                d = read_floor(_cfg.agent_asdaaas_dir(name))
+            except Exception:
+                d = None
+            if d and d.get("raised"):
+                room = str(d.get("room") or "").lower()
+                if not room or room == want:
+                    mark = name + "!"
+            out.append(mark)
+        return out
+
+    def _poll_floor_header(self) -> None:
+        if getattr(self, "_room_active", False):
+            self._update_room_header()
+
     def _update_room_header(self, status: str | None = None) -> None:
         """Show channel + connection status in the agent header."""
         try:
@@ -3114,7 +3145,7 @@ Type anything else to send a message to the agent.
             header.gaze_target = f"irc/{self._room_channel}"
             try:
                 nicks = self._irc_rooms_mod().members_of(self._room_channel)
-                header.room_nicks = ", ".join(nicks) if nicks else ""
+                header.room_nicks = ", ".join(self._floor_nicks(self._room_channel, nicks)) if nicks else ""
             except Exception:
                 header.room_nicks = ""
             header.context_pct = 0

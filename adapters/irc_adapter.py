@@ -77,6 +77,15 @@ def _advance_room_turn(channel, speaker_nick, speech, batcher, connections):
     if not turn:
         return
     turn["blocks"].append((speaker_nick, speech or "noted"))
+    try:
+        from floor_flag import clear_floor
+        from asdaaas_config import config as _cfg
+        for name, conn in connections.items():
+            if conn.nick.lower() == (speaker_nick or "").lower():
+                clear_floor(_cfg.agent_asdaaas_dir(name))
+                break
+    except Exception:
+        pass
     turn["i"] = turn["i"] + 1
     if turn["i"] >= len(turn["order"]):
         _room_turns.pop(ch, None)
@@ -668,9 +677,19 @@ async def run_adapter(agents, channel, host, port):
                         room_members = list(irc_rooms.members_of(target_ch))
                         if not room_members:
                             room_members = list(connections) if target_ch == channel else []
-                        if _is_operator_nick(msg["sender"]) and len(room_members) >= 2:
-                            order = [m for m in room_members if m in connections]
-                            random.shuffle(order)
+                        if _is_operator_nick(msg["sender"]) and room_members:
+                            try:
+                                from floor_flag import raised_in_room, clear_floor
+                                from asdaaas_config import config as _cfg
+                                hands = raised_in_room(
+                                    target_ch,
+                                    room_members,
+                                    _cfg.agent_asdaaas_dir,
+                                )
+                            except Exception as e:
+                                tprint(f"[irc-adapter] floor read: {e}")
+                                hands = []
+                            order = [m for m in hands if m in connections]
                             if order:
                                 _room_turns[target_ch.lower()] = {
                                     "order": order,
@@ -679,8 +698,10 @@ async def run_adapter(agents, channel, host, port):
                                 }
                                 batcher.add(order[0], msg)
                                 tprint(
-                                    f"[irc-adapter] room turn {target_ch}: first={order[0]} order={order}"
+                                    f"[irc-adapter] floor {target_ch}: grant={order[0]} queue={order}"
                                 )
+                            else:
+                                tprint(f"[irc-adapter] floor {target_ch}: no hands — no turn")
                             continue
                         for agent_name in connections:
                             agent_nick = connections[agent_name].nick.lower()

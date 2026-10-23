@@ -2974,19 +2974,32 @@ async def main(agent_name, session_id=None, agent_cwd=None, model=None, backend=
                         print(f"[asdaaas] AWARENESS: error for {agent_name} -- {desc}")
 
                 elif action == "flag":
-                    # Operator-facing tab color. waiting=orange, error=red, clear=auto.
-                    # {"action": "flag", "status": "waiting", "note": "..."}
+                    # waiting/error/clear = operator tab color.
+                    # floor/unfloor = room hand-raise (not tab color).
                     try:
-                        from operator_flag import write_flag
-                        st = cmd.get("status") or cmd.get("flag") or "waiting"
+                        st = (cmd.get("status") or cmd.get("flag") or "waiting").strip().lower()
                         note = cmd.get("note") or cmd.get("text") or ""
-                        write_flag(
-                            config.agent_asdaaas_dir(agent_name),
-                            st,
-                            note=note,
-                            agent=agent_name,
-                        )
-                        print(f"[asdaaas] FLAG: {agent_name} -- {st} {note[:80]}")
+                        aa_dir = config.agent_asdaaas_dir(agent_name)
+                        if st in ("floor", "hand", "raise"):
+                            from floor_flag import write_floor
+                            room = cmd.get("room") or cmd.get("channel") or ""
+                            if not room:
+                                try:
+                                    g = json.loads((aa_dir / "gaze.json").read_text())
+                                    sp = g.get("speech") if isinstance(g, dict) else {}
+                                    room = (sp or {}).get("params", {}).get("room") or ""
+                                except Exception:
+                                    room = ""
+                            write_floor(aa_dir, room, note=note, agent=agent_name)
+                            print(f"[asdaaas] FLOOR: {agent_name} raised {room or '(any)'} {note[:60]}")
+                        elif st in ("unfloor", "floor_clear", "down"):
+                            from floor_flag import clear_floor
+                            clear_floor(aa_dir)
+                            print(f"[asdaaas] FLOOR: {agent_name} down")
+                        else:
+                            from operator_flag import write_flag
+                            write_flag(aa_dir, st, note=note, agent=agent_name)
+                            print(f"[asdaaas] FLAG: {agent_name} -- {st} {note[:80]}")
                     except Exception as e:
                         print(f"[asdaaas] FLAG: error for {agent_name} -- {e}")
 

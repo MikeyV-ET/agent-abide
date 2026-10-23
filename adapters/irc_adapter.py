@@ -387,7 +387,7 @@ def clean_response(text):
     # AGENTS.md also requires a trailing "." so grok does not no_visible_content;
     # a period-only turn is the same silent ack and must not hit IRC.
     lines = result.split("\n")
-    while lines and _is_silent_ack(lines[-1]):
+    while lines and (not lines[-1].strip() or _is_silent_ack(lines[-1])):
         lines.pop()
     result = "\n".join(lines).strip()
     if not result:

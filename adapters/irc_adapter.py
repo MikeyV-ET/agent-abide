@@ -355,6 +355,18 @@ class MessageBatcher:
 # RESPONSE CLEANING
 # ============================================================================
 
+def _is_silent_ack(text: str) -> bool:
+    """noted / period-only AGENTS.md terminator. Not real speech."""
+    token = (text or "").strip()
+    if not token:
+        return False
+    alpha_only = "".join(c for c in token if c.isalpha()).lower()
+    if alpha_only in ("note", "noted"):
+        return True
+    dots_only = "".join(token.split())
+    return bool(dots_only) and set(dots_only) <= {"."}
+
+
 def clean_response(text):
     if not text or not text.strip():
         return None
@@ -374,13 +386,11 @@ def clean_response(text):
     # Agents respond "noted" (or "Noted.", "noted!", etc.) to ack messages not for them.
     # AGENTS.md also requires a trailing "." so grok does not no_visible_content;
     # a period-only turn is the same silent ack and must not hit IRC.
-    token = result.strip()
-    # Strip all non-alpha characters to catch "Noted.", "noted!", "Noted...", etc.
-    alpha_only = "".join(c for c in token if c.isalpha()).lower()
-    if alpha_only in ("note", "noted"):
-        return None
-    dots_only = "".join(token.split())
-    if dots_only and set(dots_only) <= {"."}:
+    lines = result.split("\n")
+    while lines and _is_silent_ack(lines[-1]):
+        lines.pop()
+    result = "\n".join(lines).strip()
+    if not result:
         return None
     # No hard truncation — the IRC send() method handles chunking at 400 chars/line.
     # Thought traces can be 10K+. Let them through.

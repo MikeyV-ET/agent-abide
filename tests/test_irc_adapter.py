@@ -77,6 +77,10 @@ class TestCleanResponse:
     def test_keeps_sentence_ending_period(self):
         assert irc_adapter.clean_response("Hi. Holt here.") == "Hi. Holt here."
 
+    def test_strips_trailing_period_line(self):
+        assert irc_adapter.clean_response("Got it. Still here.\n.") == "Got it. Still here."
+        assert irc_adapter.clean_response("Got it.\n\n.") == "Got it."
+
     def test_empty_string(self):
         assert irc_adapter.clean_response("") is None
 

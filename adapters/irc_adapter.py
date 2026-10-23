@@ -53,7 +53,7 @@ ADAPTER_NAME = "irc"
 OUTBOX_POLL_INTERVAL = 0.5
 BATCH_WINDOW = 0.3  # quiet window: flush after 0.3s of no new messages
 
-# Sequential room turns: operator line → random first member → next, etc.
+# Sequential room turns: who may SPEAK (hand-raise). Everyone still HEARS.
 # channel.lower() -> {order: [agent names], i: int, blocks: [(nick, text)]}
 _room_turns = {}
 
@@ -68,6 +68,18 @@ def _format_room_chain(channel, blocks):
     for nick, text in blocks:
         parts.append(f"[IRC {channel} from {nick}]\n{(text or '').strip()}")
     return "\n\n".join(parts)
+
+
+def _floor_speaker(channel):
+    """Agent name who currently holds the floor, or None if anyone may speak."""
+    turn = _room_turns.get((channel or "").lower())
+    if not turn:
+        return None
+    order = turn.get("order") or []
+    i = int(turn.get("i") or 0)
+    if i < 0 or i >= len(order):
+        return None
+    return order[i]
 
 
 def _advance_room_turn(channel, speaker_nick, speech, batcher, connections):
@@ -696,14 +708,13 @@ async def run_adapter(agents, channel, host, port):
                                     "i": 0,
                                     "blocks": [(msg["sender"], msg.get("text") or "")],
                                 }
-                                batcher.add(order[0], msg)
                                 tprint(
-                                    f"[irc-adapter] floor {target_ch}: grant={order[0]} queue={order}"
+                                    f"[irc-adapter] floor {target_ch}: speak={order[0]} queue={order} (all hear)"
                                 )
-                                continue
-                            tprint(
-                                f"[irc-adapter] floor {target_ch}: no hands — broadcast"
-                            )
+                            else:
+                                tprint(
+                                    f"[irc-adapter] floor {target_ch}: no hands — all hear, anyone may speak"
+                                )
                         for agent_name in connections:
                             agent_nick = connections[agent_name].nick.lower()
                             if agent_nick == sender_lower:
@@ -817,7 +828,13 @@ async def run_adapter(agents, channel, host, port):
                     conn = connections.get(agent_name)
                     nick = conn.nick if conn else agent_name
                     if room.startswith("#"):
-                        _advance_room_turn(room, nick, "noted", batcher, connections)
+                        holder = _floor_speaker(room)
+                        if holder and holder != agent_name:
+                            tprint(
+                                f"[irc-adapter] {agent_name} noted held (floor {holder})"
+                            )
+                        else:
+                            _advance_room_turn(room, nick, "noted", batcher, connections)
                     continue
 
                 # Debug: log text length at each stage to catch truncation
@@ -877,13 +894,18 @@ async def run_adapter(agents, channel, host, port):
                                 await conn.send(remaining, target=pm_target)
                                 tprint(f"[irc-adapter] {agent_name} PM -> {pm_target} ({len(remaining)} chars)")
                             elif gaze_room and gaze_room.startswith("#"):
-                                # Channel room: ensure THIS nick has JOIN'd before PRIVMSG
-                                await conn.join_if_needed(gaze_room)
-                                await conn.send(remaining, target=gaze_room)
-                                tprint(f"[irc-adapter] {agent_name} -> {gaze_room} ({len(remaining)} chars)")
-                                _advance_room_turn(
-                                    gaze_room, conn.nick, remaining, batcher, connections
-                                )
+                                holder = _floor_speaker(gaze_room)
+                                if holder and holder != agent_name:
+                                    tprint(
+                                        f"[irc-adapter] {agent_name} -> {gaze_room} held (floor {holder})"
+                                    )
+                                else:
+                                    await conn.join_if_needed(gaze_room)
+                                    await conn.send(remaining, target=gaze_room)
+                                    tprint(f"[irc-adapter] {agent_name} -> {gaze_room} ({len(remaining)} chars)")
+                                    _advance_room_turn(
+                                        gaze_room, conn.nick, remaining, batcher, connections
+                                    )
                             else:
                                 # Legacy fallback: use channel param or default channel
                                 target_channel = resp.get("channel", channel)

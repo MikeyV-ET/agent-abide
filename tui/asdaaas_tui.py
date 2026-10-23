@@ -5488,7 +5488,10 @@ Type anything else to send a message to the agent.
             mounted_any = False
             for text in ordered:
                 _clean, interjections = self._extract_interjections(text)
-                for msg in interjections:
+                msgs = list(interjections)
+                if not msgs and (_clean or "").strip():
+                    msgs = [_clean.strip()]
+                for msg in msgs:
                     key = interjection_key(msg)
                     if key in self._seen_interjections:
                         continue

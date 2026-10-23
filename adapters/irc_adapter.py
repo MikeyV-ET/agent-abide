@@ -53,8 +53,9 @@ ADAPTER_NAME = "irc"
 OUTBOX_POLL_INTERVAL = 0.5
 BATCH_WINDOW = 0.3  # quiet window: flush after 0.3s of no new messages
 
-# Sequential room turns: who may SPEAK (hand-raise). Everyone still HEARS.
-# channel.lower() -> {order: [agent names], i: int, blocks: [(nick, text)]}
+# Round-robin: operator line → roster order. One seat hears at a time.
+# Last seat noted → stop (no wrap). Last seat speech → wrap to first.
+# channel.lower() -> {order, i, blocks, channel}
 _room_turns = {}
 
 
@@ -70,9 +71,13 @@ def _format_room_chain(channel, blocks):
     return "\n\n".join(parts)
 
 
+def _room_key(channel):
+    return (channel or "").lower()
+
+
 def _floor_speaker(channel):
-    """Agent name who currently holds the floor, or None if anyone may speak."""
-    turn = _room_turns.get((channel or "").lower())
+    """Agent name in the current RR seat, or None if no round."""
+    turn = _room_turns.get(_room_key(channel))
     if not turn:
         return None
     order = turn.get("order") or []
@@ -82,35 +87,59 @@ def _floor_speaker(channel):
     return order[i]
 
 
-def _advance_room_turn(channel, speaker_nick, speech, batcher, connections):
-    """After a member speaks (or notes), give the next member the transcript."""
-    ch = (channel or "").lower()
-    turn = _room_turns.get(ch)
-    if not turn:
-        return
-    turn["blocks"].append((speaker_nick, speech or "noted"))
-    try:
-        from floor_flag import clear_floor
-        from asdaaas_config import config as _cfg
-        for name, conn in connections.items():
-            if conn.nick.lower() == (speaker_nick or "").lower():
-                clear_floor(_cfg.agent_asdaaas_dir(name))
-                break
-    except Exception:
-        pass
-    turn["i"] = turn["i"] + 1
-    if turn["i"] >= len(turn["order"]):
+def start_room_round(channel, members, operator_nick, text, connected_names):
+    """Begin a round. Returns the first agent name, or None."""
+    ch = _room_key(channel)
+    order = [m for m in members if m in set(connected_names or [])]
+    if not order:
         _room_turns.pop(ch, None)
-        return
-    nxt = turn["order"][turn["i"]]
+        return None
+    disp = channel if str(channel).startswith("#") else "#" + str(channel).lstrip("#")
+    _room_turns[ch] = {
+        "order": order,
+        "i": 0,
+        "blocks": [(operator_nick, text or "")],
+        "channel": disp,
+    }
+    return order[0]
+
+
+def _doorbell_chain(turn, sender, batcher, nxt):
+    chan = turn.get("channel") or ""
     fake = {
-        "sender": speaker_nick,
-        "target": channel,
-        "text": _format_room_chain(channel, turn["blocks"]),
+        "sender": sender,
+        "target": chan,
+        "text": _format_room_chain(chan, turn["blocks"]),
         "is_pm": False,
     }
     batcher.add(nxt, fake)
-    tprint(f"[irc-adapter] room turn {channel}: next={nxt} ({turn['i']+1}/{len(turn['order'])})")
+
+
+def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batcher):
+    """Advance RR after the seated agent notes or speaks. Returns a status string."""
+    ch = _room_key(channel)
+    turn = _room_turns.get(ch)
+    if not turn:
+        return "idle"
+    order = turn.get("order") or []
+    i = int(turn.get("i") or 0)
+    if i < 0 or i >= len(order) or agent_name != order[i]:
+        return "held"
+    display = speaker_nick or agent_name
+    turn["blocks"].append((display, "noted" if noted else (speech or "")))
+    last = i >= len(order) - 1
+    if noted and last:
+        _room_turns.pop(ch, None)
+        return "stop"
+    if last:
+        turn["i"] = 0
+        nxt = order[0]
+        _doorbell_chain(turn, display, batcher, nxt)
+        return "wrap"
+    turn["i"] = i + 1
+    nxt = order[turn["i"]]
+    _doorbell_chain(turn, display, batcher, nxt)
+    return "next"
 
 
 # Built-in defaults; load_agent_nicks() merges agents.json so new agents appear without code edits.
@@ -690,31 +719,22 @@ async def run_adapter(agents, channel, host, port):
                         if not room_members:
                             room_members = list(connections) if target_ch == channel else []
                         if _is_operator_nick(msg["sender"]) and room_members:
-                            try:
-                                from floor_flag import raised_in_room, clear_floor
-                                from asdaaas_config import config as _cfg
-                                hands = raised_in_room(
-                                    target_ch,
-                                    room_members,
-                                    _cfg.agent_asdaaas_dir,
-                                )
-                            except Exception as e:
-                                tprint(f"[irc-adapter] floor read: {e}")
-                                hands = []
-                            order = [m for m in hands if m in connections]
-                            if order:
-                                _room_turns[target_ch.lower()] = {
-                                    "order": order,
-                                    "i": 0,
-                                    "blocks": [(msg["sender"], msg.get("text") or "")],
-                                }
+                            first = start_room_round(
+                                target_ch,
+                                room_members,
+                                msg["sender"],
+                                msg.get("text") or "",
+                                list(connections),
+                            )
+                            if first:
+                                batcher.add(first, msg)
                                 tprint(
-                                    f"[irc-adapter] floor {target_ch}: speak={order[0]} queue={order} (all hear)"
+                                    f"[irc-adapter] rr {target_ch}: start={first} order={_room_turns.get(_room_key(target_ch), {}).get('order')}"
                                 )
-                            else:
-                                tprint(
-                                    f"[irc-adapter] floor {target_ch}: no hands — all hear, anyone may speak"
-                                )
+                            continue
+                        if _floor_speaker(target_ch):
+                            # Mask: only the seated agent is doorbelled, via on_member_speech.
+                            continue
                         for agent_name in connections:
                             agent_nick = connections[agent_name].nick.lower()
                             if agent_nick == sender_lower:
@@ -828,13 +848,10 @@ async def run_adapter(agents, channel, host, port):
                     conn = connections.get(agent_name)
                     nick = conn.nick if conn else agent_name
                     if room.startswith("#"):
-                        holder = _floor_speaker(room)
-                        if holder and holder != agent_name:
-                            tprint(
-                                f"[irc-adapter] {agent_name} noted held (floor {holder})"
-                            )
-                        else:
-                            _advance_room_turn(room, nick, "noted", batcher, connections)
+                        st = on_member_speech(
+                            room, agent_name, nick, "noted", noted=True, batcher=batcher
+                        )
+                        tprint(f"[irc-adapter] rr {room}: {agent_name} noted → {st}")
                     continue
 
                 # Debug: log text length at each stage to catch truncation
@@ -897,15 +914,21 @@ async def run_adapter(agents, channel, host, port):
                                 holder = _floor_speaker(gaze_room)
                                 if holder and holder != agent_name:
                                     tprint(
-                                        f"[irc-adapter] {agent_name} -> {gaze_room} held (floor {holder})"
+                                        f"[irc-adapter] {agent_name} -> {gaze_room} held (seat {holder})"
                                     )
                                 else:
                                     await conn.join_if_needed(gaze_room)
                                     await conn.send(remaining, target=gaze_room)
                                     tprint(f"[irc-adapter] {agent_name} -> {gaze_room} ({len(remaining)} chars)")
-                                    _advance_room_turn(
-                                        gaze_room, conn.nick, remaining, batcher, connections
+                                    st = on_member_speech(
+                                        gaze_room,
+                                        agent_name,
+                                        conn.nick,
+                                        remaining,
+                                        noted=False,
+                                        batcher=batcher,
                                     )
+                                    tprint(f"[irc-adapter] rr {gaze_room}: {agent_name} spoke → {st}")
                             else:
                                 # Legacy fallback: use channel param or default channel
                                 target_channel = resp.get("channel", channel)

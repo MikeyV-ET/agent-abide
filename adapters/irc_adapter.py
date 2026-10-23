@@ -700,9 +700,10 @@ async def run_adapter(agents, channel, host, port):
                                 tprint(
                                     f"[irc-adapter] floor {target_ch}: grant={order[0]} queue={order}"
                                 )
-                            else:
-                                tprint(f"[irc-adapter] floor {target_ch}: no hands — no turn")
-                            continue
+                                continue
+                            tprint(
+                                f"[irc-adapter] floor {target_ch}: no hands — broadcast"
+                            )
                         for agent_name in connections:
                             agent_nick = connections[agent_name].nick.lower()
                             if agent_nick == sender_lower:

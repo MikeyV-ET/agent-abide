@@ -102,6 +102,8 @@ def start_room_round(channel, members, operator_nick, text, connected_names):
         "blocks": [(operator_nick, text or "")],
         "channel": disp,
         "noted": set(),
+        "spoke": set(),
+        "awaiting_wrap_reply": False,
     }
     return order[0]
 
@@ -130,20 +132,39 @@ def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batche
     display = speaker_nick or agent_name
     turn["blocks"].append((display, "noted" if noted else (speech or "")))
     noted_set = turn.setdefault("noted", set())
+    spoke = turn.setdefault("spoke", set())
     if noted:
         noted_set.add(agent_name)
+        spoke.discard(agent_name)
     else:
+        spoke.add(agent_name)
         noted_set.discard(agent_name)
+
+    # After a wrap, A notes → stop; A speaks → continue the circle.
+    if turn.get("awaiting_wrap_reply") and i == 0:
+        if noted:
+            _room_turns.pop(ch, None)
+            return "stop"
+        turn["awaiting_wrap_reply"] = False
+        turn["spoke"] = {agent_name}
+        turn["noted"] = set()
+        if len(order) == 1:
+            _room_turns.pop(ch, None)
+            return "stop"
+        turn["i"] = 1
+        _doorbell_chain(turn, display, batcher, order[1])
+        return "next"
+
     last = i >= len(order) - 1
     if last:
-        nxt = order[0]
-        _doorbell_chain(turn, display, batcher, nxt)
-        all_noted = set(order) <= noted_set
-        if noted and all_noted:
-            _room_turns.pop(ch, None)
-            return "stop_flush"
-        turn["i"] = 0
-        return "wrap"
+        rest_spoke = bool(spoke & set(order[1:]))
+        if rest_spoke:
+            turn["i"] = 0
+            turn["awaiting_wrap_reply"] = True
+            _doorbell_chain(turn, display, batcher, order[0])
+            return "wrap"
+        _room_turns.pop(ch, None)
+        return "stop"
     turn["i"] = i + 1
     nxt = order[turn["i"]]
     _doorbell_chain(turn, display, batcher, nxt)

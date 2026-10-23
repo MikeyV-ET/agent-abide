@@ -1,4 +1,10 @@
-"""Round-robin: last noted stops; last speech wraps; mid noted advances."""
+"""Round-robin per Eric 2026-10-23:
+
+A speak → B noted → C noted → stop
+A speak → B speak → C noted → wrap A
+A noted → B speak → C noted → wrap A
+A noted → B speak → C noted → A noted → stop
+"""
 
 
 class _Batch:
@@ -9,67 +15,70 @@ class _Batch:
         self.added.append((name, msg["text"] if isinstance(msg, dict) else msg))
 
 
-def setup_module():
+def _round3():
     import irc_adapter as ia
     ia._room_turns.clear()
-
-
-def _round():
-    import irc_adapter as ia
-    ia._room_turns.clear()
-    first = ia.start_room_round(
-        "#gen4", ["Holt", "Squiggy"], "eric_tui", "hello", ["Holt", "Squiggy"]
+    ia.start_room_round(
+        "#gen4",
+        ["Holt", "Squiggy", "Wend"],
+        "eric_tui",
+        "hello",
+        ["Holt", "Squiggy", "Wend"],
     )
-    order = ia._room_turns["#gen4"]["order"]
-    return ia, first, order
+    ia._room_turns["#gen4"]["order"] = ["Holt", "Squiggy", "Wend"]
+    ia._room_turns["#gen4"]["i"] = 0
+    return ia
 
 
-def test_start_first_seat():
-    ia, first, order = _round()
-    assert first in ("Holt", "Squiggy")
-    assert set(order) == {"Holt", "Squiggy"}
-    assert ia._floor_speaker("#Gen4") == first
-
-
-def test_last_noted_after_speech_wraps_so_first_sees_it():
-    ia, first, order = _round()
-    second = order[1]
+def _go(ia, name, *, noted, text="x"):
     b = _Batch()
-    assert ia.on_member_speech("#gen4", first, first, "hi", noted=False, batcher=b) == "next"
-    b2 = _Batch()
-    assert ia.on_member_speech("#gen4", second, second, "noted", noted=True, batcher=b2) == "wrap"
-    assert b2.added[-1][0] == first
-    assert "noted" in b2.added[-1][1]
-    assert ia._floor_speaker("#gen4") == first
+    st = ia.on_member_speech("#gen4", name, name, "noted" if noted else text, noted=noted, batcher=b)
+    return st, b
 
 
-def test_full_noted_pass_flushes_then_stops():
-    ia, first, order = _round()
-    second = order[1]
-    b = _Batch()
-    assert ia.on_member_speech("#gen4", first, first, "noted", noted=True, batcher=b) == "next"
-    b2 = _Batch()
-    assert ia.on_member_speech("#gen4", second, second, "noted", noted=True, batcher=b2) == "stop_flush"
-    assert b2.added[-1][0] == first
+def test_speak_then_tail_notes_stops():
+    ia = _round3()
+    assert _go(ia, "Holt", noted=False, text="hi")[0] == "next"
+    assert _go(ia, "Squiggy", noted=True)[0] == "next"
+    st, b = _go(ia, "Wend", noted=True)
+    assert st == "stop"
+    assert b.added == []
     assert ia._floor_speaker("#gen4") is None
 
 
-def test_last_speech_wraps_to_first():
-    ia, first, order = _round()
-    second = order[1]
-    b = _Batch()
-    ia.on_member_speech("#gen4", first, first, "from first", noted=False, batcher=b)
-    b2 = _Batch()
-    assert ia.on_member_speech("#gen4", second, second, "from second", noted=False, batcher=b2) == "wrap"
-    assert b2.added[-1][0] == first
-    assert "from second" in b2.added[-1][1]
-    assert ia._floor_speaker("#gen4") == first
+def test_speak_speak_noted_wraps_to_a():
+    ia = _round3()
+    _go(ia, "Holt", noted=False, text="a")
+    _go(ia, "Squiggy", noted=False, text="b")
+    st, b = _go(ia, "Wend", noted=True)
+    assert st == "wrap"
+    assert b.added[-1][0] == "Holt"
+    assert "b" in b.added[-1][1]
+    assert ia._floor_speaker("#gen4") == "Holt"
+
+
+def test_noted_speak_noted_wraps_to_a():
+    ia = _round3()
+    _go(ia, "Holt", noted=True)
+    _go(ia, "Squiggy", noted=False, text="b")
+    st, b = _go(ia, "Wend", noted=True)
+    assert st == "wrap"
+    assert b.added[-1][0] == "Holt"
+
+
+def test_wrap_then_a_notes_stops():
+    ia = _round3()
+    _go(ia, "Holt", noted=True)
+    _go(ia, "Squiggy", noted=False, text="b")
+    _go(ia, "Wend", noted=True)
+    st, b = _go(ia, "Holt", noted=True)
+    assert st == "stop"
+    assert ia._floor_speaker("#gen4") is None
 
 
 def test_non_seat_held():
-    ia, first, order = _round()
-    other = order[1]
-    b = _Batch()
-    assert ia.on_member_speech("#gen4", other, other, "nope", noted=False, batcher=b) == "held"
+    ia = _round3()
+    st, b = _go(ia, "Wend", noted=False, text="nope")
+    assert st == "held"
     assert b.added == []
-    assert ia._floor_speaker("#gen4") == first
+    assert ia._floor_speaker("#gen4") == "Holt"

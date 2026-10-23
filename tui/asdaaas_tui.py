@@ -3605,8 +3605,30 @@ Type anything else to send a message to the agent.
             except Exception:
                 time.sleep(1)
 
+    def _coalesce_room_items(self, items: list) -> list:
+        """Join consecutive same-nick PRIVMSGs (IRC is one line per message)."""
+        out: list = []
+        for it in items:
+            if (
+                it
+                and it[0] == "msg"
+                and out
+                and out[-1][0] == "msg"
+                and len(it) >= 5
+                and len(out[-1]) >= 5
+                and not it[4]
+                and not out[-1][4]
+                and (it[2] or "").lower() == (out[-1][2] or "").lower()
+            ):
+                prev = out[-1]
+                out[-1] = ("msg", it[1], prev[2], prev[3] + "\n" + it[3], False)
+            else:
+                out.append(it)
+        return out
+
     def _replace_room_history(self, items: list) -> None:
         """Clear the room pane and mount one channel's history (UI thread)."""
+        items = self._coalesce_room_items(items)
         try:
             room_scroll = self.query_one("#content-room", ContentScroll)
         except NoMatches:
@@ -3630,7 +3652,18 @@ Type anything else to send a message to the agent.
             room_scroll = self.query_one("#content-room", ContentScroll)
             human = self._is_operator_nick(nick)
             shown = (Config.OPERATOR_NAME or "eric") if human else nick
-            room_scroll.mount(RoomMessage(ts, shown, msg, is_action, is_human=human))
+            kids = list(room_scroll.children)
+            last = kids[-1] if kids else None
+            if (
+                not is_action
+                and last is not None
+                and isinstance(last, RoomMessage)
+                and not getattr(last, "_is_action", False)
+                and (getattr(last, "_nick", "") or "").lower() == (shown or "").lower()
+            ):
+                last.append_line(msg, ts)
+            else:
+                room_scroll.mount(RoomMessage(ts, shown, msg, is_action, is_human=human))
             if room_scroll._follow_tail:
                 room_scroll.scroll_end(animate=False)
         except NoMatches:

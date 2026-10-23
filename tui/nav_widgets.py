@@ -181,6 +181,15 @@ class RoomMessage(Static):
     def on_resize(self) -> None:
         self.refresh()
 
+    def append_line(self, message: str, timestamp: str | None = None) -> None:
+        extra = (message or "").rstrip()
+        if not extra:
+            return
+        self._message = (self._message.rstrip() + "\n" + extra) if self._message else extra
+        if timestamp:
+            self._timestamp = timestamp
+        self.refresh()
+
     def _inner(self) -> Text:
         mark, color = self._nick_style()
         ts_style = Theme.DARK4

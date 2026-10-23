@@ -27,6 +27,7 @@ import json
 import os
 import sys
 import time
+import random
 import argparse
 from pathlib import Path
 
@@ -51,6 +52,45 @@ DEFAULT_PORT = 6667
 ADAPTER_NAME = "irc"
 OUTBOX_POLL_INTERVAL = 0.5
 BATCH_WINDOW = 0.3  # quiet window: flush after 0.3s of no new messages
+
+# Sequential room turns: operator line → random first member → next, etc.
+# channel.lower() -> {order: [agent names], i: int, blocks: [(nick, text)]}
+_room_turns = {}
+
+
+def _is_operator_nick(nick: str) -> bool:
+    n = (nick or "").lower().replace("-", "_")
+    return n in ("eric", "eric_tui") or n.startswith("eric_")
+
+
+def _format_room_chain(channel, blocks):
+    parts = []
+    for nick, text in blocks:
+        parts.append(f"[IRC {channel} from {nick}]\n{(text or '').strip()}")
+    return "\n\n".join(parts)
+
+
+def _advance_room_turn(channel, speaker_nick, speech, batcher, connections):
+    """After a member speaks (or notes), give the next member the transcript."""
+    ch = (channel or "").lower()
+    turn = _room_turns.get(ch)
+    if not turn:
+        return
+    turn["blocks"].append((speaker_nick, speech or "noted"))
+    turn["i"] = turn["i"] + 1
+    if turn["i"] >= len(turn["order"]):
+        _room_turns.pop(ch, None)
+        return
+    nxt = turn["order"][turn["i"]]
+    fake = {
+        "sender": speaker_nick,
+        "target": channel,
+        "text": _format_room_chain(channel, turn["blocks"]),
+        "is_pm": False,
+    }
+    batcher.add(nxt, fake)
+    tprint(f"[irc-adapter] room turn {channel}: next={nxt} ({turn['i']+1}/{len(turn['order'])})")
+
 
 # Built-in defaults; load_agent_nicks() merges agents.json so new agents appear without code edits.
 _DEFAULT_AGENT_NICKS = {
@@ -625,9 +665,23 @@ async def run_adapter(agents, channel, host, port):
                     elif msg["target"].startswith("#"):
                         sender_lower = msg["sender"].lower()
                         target_ch = msg.get("target", "")
-                        room_members = set(irc_rooms.members_of(target_ch))
+                        room_members = list(irc_rooms.members_of(target_ch))
                         if not room_members:
-                            room_members = set(connections) if target_ch == channel else set()
+                            room_members = list(connections) if target_ch == channel else []
+                        if _is_operator_nick(msg["sender"]) and len(room_members) >= 2:
+                            order = [m for m in room_members if m in connections]
+                            random.shuffle(order)
+                            if order:
+                                _room_turns[target_ch.lower()] = {
+                                    "order": order,
+                                    "i": 0,
+                                    "blocks": [(msg["sender"], msg.get("text") or "")],
+                                }
+                                batcher.add(order[0], msg)
+                                tprint(
+                                    f"[irc-adapter] room turn {target_ch}: first={order[0]} order={order}"
+                                )
+                            continue
                         for agent_name in connections:
                             agent_nick = connections[agent_name].nick.lower()
                             if agent_nick == sender_lower:
@@ -737,6 +791,11 @@ async def run_adapter(agents, channel, host, port):
                     raw_dots = "".join((raw_text or "").split())
                     if raw_alpha in ("note", "noted") or (raw_dots and set(raw_dots) <= {"."}):
                         tprint(f"[irc-adapter] {agent_name} -> {content_type} suppressed (note/period)")
+                    room = resp.get("room") or ""
+                    conn = connections.get(agent_name)
+                    nick = conn.nick if conn else agent_name
+                    if room.startswith("#"):
+                        _advance_room_turn(room, nick, "noted", batcher, connections)
                     continue
 
                 # Debug: log text length at each stage to catch truncation
@@ -800,6 +859,9 @@ async def run_adapter(agents, channel, host, port):
                                 await conn.join_if_needed(gaze_room)
                                 await conn.send(remaining, target=gaze_room)
                                 tprint(f"[irc-adapter] {agent_name} -> {gaze_room} ({len(remaining)} chars)")
+                                _advance_room_turn(
+                                    gaze_room, conn.nick, remaining, batcher, connections
+                                )
                             else:
                                 # Legacy fallback: use channel param or default channel
                                 target_channel = resp.get("channel", channel)

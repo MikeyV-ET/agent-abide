@@ -3236,11 +3236,13 @@ Type anything else to send a message to the agent.
     def _connect_room_irc(self) -> bool:
         """Establish IRC connection for the Room tab. Returns success."""
         import socket as _socket
-        # Distinct from agent-adapter nicks and from a lingering "eric" after EOT.
-        base = (Config.OPERATOR_NAME or "eric").replace(" ", "_")[:12]
-        nick = (base + "_tui")[:16]
+        import os
+        # Distinct per TUI process so two sessions are not both eric_tui
+        # (second would 433, then we used to overwrite the alt nick).
+        base = (Config.OPERATOR_NAME or "eric").replace(" ", "_")[:8]
+        nick = f"{base}_t{os.getpid() % 10000}"[:16]
         if not nick or not nick[0].isalpha():
-            nick = "op_tui"
+            nick = f"op_t{os.getpid() % 10000}"[:16]
 
         def _open() -> "_socket.socket":
             sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
@@ -3291,7 +3293,9 @@ Type anything else to send a message to the agent.
 
         sock.settimeout(30.0)
         self._room_irc_sock = sock
-        self._room_irc_nick = nick
+        # 433 during drain already set an alt; do not clobber it back to the request nick.
+        if not getattr(self, "_room_irc_nick", None):
+            self._room_irc_nick = nick
         if not getattr(self, "_room_reader_started", False):
             self._room_reader_started = True
             self.run_worker(self._room_irc_reader, thread=True, name="room_irc_reader")

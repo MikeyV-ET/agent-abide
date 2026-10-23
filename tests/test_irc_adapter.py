@@ -68,6 +68,15 @@ class TestCleanResponse:
         result = irc_adapter.clean_response("I noted that down")
         assert result == "I noted that down"
 
+    def test_suppresses_period_only(self):
+        assert irc_adapter.clean_response(".") is None
+        assert irc_adapter.clean_response(".\n\n.") is None
+        assert irc_adapter.clean_response(" . ") is None
+        assert irc_adapter.clean_response("...") is None
+
+    def test_keeps_sentence_ending_period(self):
+        assert irc_adapter.clean_response("Hi. Holt here.") == "Hi. Holt here."
+
     def test_empty_string(self):
         assert irc_adapter.clean_response("") is None
 

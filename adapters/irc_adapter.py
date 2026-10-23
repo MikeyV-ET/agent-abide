@@ -372,11 +372,15 @@ def clean_response(text):
         return None
     # THEN check for suppression tokens (case-insensitive, ignoring punctuation/whitespace)
     # Agents respond "noted" (or "Noted.", "noted!", etc.) to ack messages not for them.
-    # This must be suppressed before IRC to prevent noted loops.
+    # AGENTS.md also requires a trailing "." so grok does not no_visible_content;
+    # a period-only turn is the same silent ack and must not hit IRC.
     token = result.strip()
     # Strip all non-alpha characters to catch "Noted.", "noted!", "Noted...", etc.
     alpha_only = "".join(c for c in token if c.isalpha()).lower()
     if alpha_only in ("note", "noted"):
+        return None
+    dots_only = "".join(token.split())
+    if dots_only and set(dots_only) <= {"."}:
         return None
     # No hard truncation — the IRC send() method handles chunking at 400 chars/line.
     # Thought traces can be 10K+. Let them through.
@@ -720,8 +724,9 @@ async def run_adapter(agents, channel, host, port):
 
                 if text is None:
                     raw_alpha = "".join(c for c in raw_text if c.isalpha()).lower()
-                    if raw_alpha in ("note", "noted"):
-                        tprint(f"[irc-adapter] {agent_name} -> {content_type} suppressed (note)")
+                    raw_dots = "".join((raw_text or "").split())
+                    if raw_alpha in ("note", "noted") or (raw_dots and set(raw_dots) <= {"."}):
+                        tprint(f"[irc-adapter] {agent_name} -> {content_type} suppressed (note/period)")
                     continue
 
                 # Debug: log text length at each stage to catch truncation
@@ -785,9 +790,6 @@ async def run_adapter(agents, channel, host, port):
                                 await conn.join_if_needed(gaze_room)
                                 await conn.send(remaining, target=gaze_room)
                                 tprint(f"[irc-adapter] {agent_name} -> {gaze_room} ({len(remaining)} chars)")
-                                _fan_channel_to_peers(
-                                    batcher, connections, agent_name, conn.nick, gaze_room, remaining
-                                )
                             else:
                                 # Legacy fallback: use channel param or default channel
                                 target_channel = resp.get("channel", channel)
@@ -799,9 +801,6 @@ async def run_adapter(agents, channel, host, port):
                                 else:
                                     await conn.send(remaining, target=target_channel)
                                     tprint(f"[irc-adapter] {agent_name} -> {target_channel} ({len(remaining)} chars)")
-                                    _fan_channel_to_peers(
-                                        batcher, connections, agent_name, conn.nick, target_channel, remaining
-                                    )
                 else:
                     for fb in connections.values():
                         if fb.connected:

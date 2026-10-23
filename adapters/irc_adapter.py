@@ -88,7 +88,12 @@ def _floor_speaker(channel):
 
 
 def start_room_round(channel, members, operator_nick, text, connected_names):
-    """Begin a round. Returns the first agent name, or None."""
+    """Begin a round. Returns the first agent name, or None.
+
+    Flags = who still owes a response. Speak → flag everyone except the
+    speaker. Noted → lower your flag. Next seat = next flagged name in
+    the shuffled circle. Empty flags → stop.
+    """
     ch = _room_key(channel)
     order = [m for m in members if m in set(connected_names or [])]
     random.shuffle(order)
@@ -101,9 +106,7 @@ def start_room_round(channel, members, operator_nick, text, connected_names):
         "i": 0,
         "blocks": [(operator_nick, text or "")],
         "channel": disp,
-        "noted": set(),
-        "spoke": set(),
-        "awaiting_wrap_reply": False,
+        "flags": set(order),
     }
     return order[0]
 
@@ -131,44 +134,21 @@ def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batche
         return "held"
     display = speaker_nick or agent_name
     turn["blocks"].append((display, "noted" if noted else (speech or "")))
-    noted_set = turn.setdefault("noted", set())
-    spoke = turn.setdefault("spoke", set())
+    flags = turn.setdefault("flags", set())
     if noted:
-        noted_set.add(agent_name)
-        spoke.discard(agent_name)
+        flags.discard(agent_name)
     else:
-        spoke.add(agent_name)
-        noted_set.discard(agent_name)
-
-    # After a wrap, A notes → stop; A speaks → continue the circle.
-    if turn.get("awaiting_wrap_reply") and i == 0:
-        if noted:
-            _room_turns.pop(ch, None)
-            return "stop"
-        turn["awaiting_wrap_reply"] = False
-        turn["spoke"] = {agent_name}
-        turn["noted"] = set()
-        if len(order) == 1:
-            _room_turns.pop(ch, None)
-            return "stop"
-        turn["i"] = 1
-        _doorbell_chain(turn, display, batcher, order[1])
-        return "next"
-
-    last = i >= len(order) - 1
-    if last:
-        rest_spoke = bool(spoke & set(order[1:]))
-        if rest_spoke:
-            turn["i"] = 0
-            turn["awaiting_wrap_reply"] = True
-            _doorbell_chain(turn, display, batcher, order[0])
-            return "wrap"
-        _room_turns.pop(ch, None)
-        return "stop"
-    turn["i"] = i + 1
-    nxt = order[turn["i"]]
-    _doorbell_chain(turn, display, batcher, nxt)
-    return "next"
+        flags.clear()
+        flags.update(n for n in order if n != agent_name)
+    n = len(order)
+    for step in range(1, n + 1):
+        j = (i + step) % n
+        if order[j] in flags:
+            turn["i"] = j
+            _doorbell_chain(turn, display, batcher, order[j])
+            return "wrap" if j <= i else "next"
+    _room_turns.pop(ch, None)
+    return "stop"
 
 
 # Built-in defaults; load_agent_nicks() merges agents.json so new agents appear without code edits.

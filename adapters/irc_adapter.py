@@ -719,6 +719,7 @@ async def _sync_irc_roster(connections, agents, default_channel, host, port, lis
             want |= all_rooms
         if not want:
             want.add(default_channel)
+        want = {ch for ch in want if not str(ch).lower().endswith("-thoughts")}
         have = getattr(conn, "_joined", set()) or set()
         for ch in sorted(want - have):
             await conn.join_if_needed(ch)
@@ -955,6 +956,9 @@ async def run_adapter(agents, channel, host, port):
             for resp in responses:
                 agent_name = resp.get("from", "Sr")
                 content_type = resp.get("content_type", "speech")
+                if content_type == "thoughts":
+                    tprint(f"[irc-adapter] {agent_name} thoughts dropped (no thought channels)")
+                    continue
                 raw_text = resp.get("text", "")
                 text = clean_response(raw_text)
                 meta = resp.get("meta", {})
@@ -980,16 +984,7 @@ async def run_adapter(agents, channel, host, port):
 
                 conn = connections.get(agent_name)
                 if conn and conn.connected:
-                    # Determine target channel based on content_type
-                    if content_type == "thoughts":
-                        # Thoughts go to per-agent thought channel
-                        # room key (new) takes precedence, fall back to channel (legacy)
-                        thought_channel = resp.get("room", resp.get("channel", THOUGHT_CHANNELS.get(agent_name, f"#{agent_name.lower()}-thoughts")))
-                        await conn.join_if_needed(thought_channel)
-                        # No IRC command parsing for thoughts — send raw
-                        await conn.send(text, target=thought_channel)
-                        tprint(f"[irc-adapter] {agent_name} thoughts -> {thought_channel} ({len(text)} chars)")
-                    else:
+                    if True:
                         # Speech: parse for IRC slash commands, route normally
                         commands, remaining = parse_irc_commands(text)
 

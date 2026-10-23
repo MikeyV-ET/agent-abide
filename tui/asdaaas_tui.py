@@ -578,7 +578,7 @@ class GazeSelector(OptionList):
 
         # Common IRC targets for this agent
         agent = Config.AGENT_NAME.lower()
-        for r in [f"pm:eric", f"#{agent}-thoughts", "#standup"]:
+        for r in [f"pm:eric", "#standup"]:
             if r not in rooms:
                 rooms.append(r)
 
@@ -655,13 +655,13 @@ class GazeSelector(OptionList):
                 pass
             gaze = {
                 "speech": {"target": "tui", "params": {}},
-                "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                "thoughts": None
             }
             gaze_str = "tui"
         elif room.startswith("pm:"):
             gaze = {
                 "speech": {"target": "irc", "params": {"room": room}},
-                "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                "thoughts": None
             }
             gaze_str = f"irc/{room}"
         else:
@@ -674,13 +674,13 @@ class GazeSelector(OptionList):
                     pass
                 gaze = {
                     "speech": {"target": room, "params": {}},
-                    "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                    "thoughts": None
                 }
                 gaze_str = room
             else:
                 gaze = {
                     "speech": {"target": "irc", "params": {"room": room}},
-                    "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                    "thoughts": None
                 }
                 gaze_str = f"irc/{room}"
 
@@ -2206,14 +2206,14 @@ Type anything else to send a message to the agent.
             self._ensure_adapter_attached("tui")
             gaze = {
                 "speech": {"target": "tui", "params": {}},
-                "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                "thoughts": None
             }
             gaze_str = "tui"
         elif room.startswith("pm:"):
             pm_target = room[3:]
             gaze = {
                 "speech": {"target": "irc", "params": {"room": room}},
-                "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                "thoughts": None
             }
             gaze_str = f"irc/{room}"
         else:
@@ -2223,13 +2223,13 @@ Type anything else to send a message to the agent.
                 self._ensure_adapter_attached(room)
                 gaze = {
                     "speech": {"target": room, "params": {}},
-                    "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                    "thoughts": None
                 }
                 gaze_str = room
             else:
                 gaze = {
                     "speech": {"target": "irc", "params": {"room": room}},
-                    "thoughts": {"target": "irc", "params": {"room": f"#{agent_lower}-thoughts"}}
+                    "thoughts": None
                 }
                 gaze_str = f"irc/{room}"
 

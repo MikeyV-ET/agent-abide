@@ -3365,8 +3365,10 @@ Type anything else to send a message to the agent.
                     action = msg[8:-1]
                     self.call_from_thread(self._mount_room_msg, ts, nick, action, True)
                 return
-            # Skip echo of our own messages if we already local-echoed
-            if self._is_operator_nick(nick):
+            # Skip IRC echo of *this* client's PRIVMSG (we local-echoed).
+            # Other TUI sessions use a different nick (or 433 alt) and must see it.
+            own = (getattr(self, "_room_irc_nick", "") or "")
+            if nick.lower() == own.lower():
                 return
             self.call_from_thread(self._mount_room_msg, ts, nick, msg)
             return

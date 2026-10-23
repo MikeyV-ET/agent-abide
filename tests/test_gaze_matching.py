@@ -124,6 +124,14 @@ class TestOperatorTuiPriority:
         msg = make_msg("irc", room="#standup")
         assert matches_gaze(msg, gaze) is False
 
+    def test_irc_room_case_insensitive(self):
+        """Gaze #Gen4 matches IRC traffic on #gen4 (RFC 1459)."""
+        gaze = make_gaze("irc", room="#Gen4")
+        msg = make_msg("irc", room="#gen4")
+        assert matches_gaze(msg, gaze) is True
+        assert matches_gaze(make_msg("irc", room="#GEN4"), gaze) is True
+        assert matches_gaze(make_msg("irc", room="#standup"), gaze) is False
+
 
 # ============================================================================
 # Background mode routing

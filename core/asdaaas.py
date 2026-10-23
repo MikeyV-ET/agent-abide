@@ -667,7 +667,10 @@ def matches_gaze(msg, gaze):
     # If message has no room, it doesn't match a specific room gaze
     if msg_room is None:
         return False
-    
+
+    # IRC channels are case-insensitive (#Gen4 == #gen4).
+    if str(msg_room).startswith("#") or str(gaze_room).startswith("#"):
+        return str(msg_room).lower() == str(gaze_room).lower()
     return msg_room == gaze_room
 
 
@@ -683,7 +686,14 @@ def get_background_mode(msg, awareness):
     
     _, msg_room = get_msg_room(msg)
     if msg_room:
-        return bg_channels.get(msg_room, bg_default)
+        if msg_room in bg_channels:
+            return bg_channels[msg_room]
+        if str(msg_room).startswith("#"):
+            want = str(msg_room).lower()
+            for k, v in bg_channels.items():
+                if str(k).lower() == want:
+                    return v
+        return bg_default
     return bg_default
 
 

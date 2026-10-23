@@ -3553,7 +3553,9 @@ Type anything else to send a message to the agent.
         try:
             with open(log_path, "r", errors="replace") as f:
                 lines = f.readlines()
-            tail_lines = lines[-80:] if len(lines) > 80 else lines
+            # JOIN/QUIT spam is most of the file; keep last 80 PRIVMSGs.
+            chat = [ln for ln in lines if "> " in ln and "<" in ln]
+            tail_lines = chat[-80:] if len(chat) > 80 else chat
             items.append(("sys", time.strftime("%H:%M"), f"— {self._room_channel} ({len(tail_lines)} lines) —"))
             for line in tail_lines:
                 line = line.rstrip()

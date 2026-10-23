@@ -57,6 +57,7 @@ BATCH_WINDOW = 0.3  # quiet window: flush after 0.3s of no new messages
 # Last seat noted → stop (no wrap). Last seat speech → wrap to first.
 # channel.lower() -> {order, i, blocks, channel}
 _room_turns = {}
+ROUND_STALE_S = 180  # abandon a round if the seat never answers
 _last_round = None
 
 
@@ -136,6 +137,13 @@ def _floor_speaker(channel):
     turn = _room_turns.get(_room_key(channel))
     if not turn:
         return None
+    last_ts = float(turn.get("last_ts") or 0)
+    if last_ts and (time.time() - last_ts) > ROUND_STALE_S:
+        ch = _room_key(channel)
+        _room_turns.pop(ch, None)
+        _persist_round(channel, None)
+        tprint(f"[irc-adapter] rr {channel}: stale seat abandoned")
+        return None
     order = turn.get("order") or []
     i = int(turn.get("i") or 0)
     if i < 0 or i >= len(order):
@@ -165,6 +173,7 @@ def start_room_round(channel, members, operator_nick, text, connected_names):
         "flags": set(order),
         "delivered": {order[0]: 0, **{n: -1 for n in order[1:]}},
         "speak_rcpt": {0: {order[0]}},
+        "last_ts": time.time(),
     }
     _persist_round(disp, _room_turns[ch])
     return order[0]
@@ -238,6 +247,7 @@ def on_member_speech(channel, agent_name, speaker_nick, speech, *, noted, batche
             turn["i"] = j
             _doorbell_delta(turn, display, batcher, order[j])
             st = "wrap" if j <= i else "next"
+            turn["last_ts"] = time.time()
             _persist_round(channel, turn)
             return st
     errs = speak_receipt_errors(turn)

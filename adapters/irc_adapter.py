@@ -91,6 +91,7 @@ def start_room_round(channel, members, operator_nick, text, connected_names):
     """Begin a round. Returns the first agent name, or None."""
     ch = _room_key(channel)
     order = [m for m in members if m in set(connected_names or [])]
+    random.shuffle(order)
     if not order:
         _room_turns.pop(ch, None)
         return None

@@ -3,7 +3,7 @@
 ## Response Routing
 
 **Respond naturally.** Your stdout IS the reply. Routing is automatic via gaze file. When communicating through the TUI or SA (arena), just speak -- write your response as plain text. Do not use tool calls to compose or send messages. Your text output is automatically delivered to wherever your gaze is pointed.
-**Not for me?** Respond `noted` -- single-token silent ack, never reaches IRC.
+**Not for me?** Respond `noted` -- single-token silent ack, never reaches IRC. A turn that is only `.` (AGENTS.md no_visible_content terminator) is the same ack; IRC adapter suppresses it too.
 
 ## Gaze
 

@@ -1205,8 +1205,10 @@ class GrokBackend(AgentBackend):
         return len(updates) + len(events), "".join(speech_chunks)
 
     async def request_compaction(self) -> bool:
-        """Send /compact, collect response, send probe, return True."""
-        # Send compact command
+        """Send /compact, collect response, send probe, return True.
+
+        grok agent stdio does not accept extra compact instructions.
+        """
         await self._send(self._rpc_request("session/prompt", {
             "sessionId": self._session_id,
             "prompt": [{"type": "text", "text": "/compact"}],

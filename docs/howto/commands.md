@@ -10,7 +10,7 @@ Write JSON command files to `~/agents/<Name>/asdaaas/commands/cmd_{timestamp}_{r
 | Ack | `{"action": "ack", "handled": ["id1", "id2"]}` | Clear handled doorbells |
 | Flag | `{"action": "flag", "status": "waiting"}` | Orange tab: waiting on Eric. `"error"` = red. `"clear"` = auto (green working / gray idle). Optional `"note"`. |
 | Piggyback ack | `{"action": "delay", ..., "ack": ["id1"]}` | Combine delay + ack atomically |
-| Compact | `{"action": "compact"}` | Request self-compaction (executes immediately). Optional `"instructions"` field overrides default compaction instructions for this request. |
+| Compact | `{"action": "compact"}` | Request self-compaction (executes immediately). On **grok agent stdio**, extra `"instructions"` are **ignored** (binary `/compact` takes no argument). Other backends may still append preserve-text. |
 | Ensure host service | `{"action": "ensure_service", "service": "remind"\|"localmail"}` | Start/status/stop host adapters via asdaaas (not model bash). See host_services.md. |
 | Restart (self) | `{"action": "restart"}` | Schedule `restart_agent.sh --force <self>` then graceful shutdown. Optional `"reason"` / `"text"`, `"delay_s"` (default 2). Process exits; script brings agent back on **this** tree (dev or prod). |
 | Gaze (channel) | `{"action": "gaze", "adapter": "irc", "room": "#channel"}` | Set output destination |
@@ -28,11 +28,13 @@ Write JSON command files to `~/agents/<Name>/asdaaas/commands/cmd_{timestamp}_{r
 
 ## Compaction Instructions
 
-When asdaaas sends `/compact` to the binary, it appends instructions telling the binary what to preserve in the compacted summary. Three layers of configuration (highest priority first):
+**Grok agent stdio:** `/compact` takes no extra text. asdaaas sends a bare `/compact`. `"instructions"` on the command, `compaction_instructions.txt`, and `DEFAULT_COMPACTION_INSTRUCTIONS` are **not** passed to the summarizer. After compact: AGENTS.md re-injected, boot protocol (notes + lab tail). Auto-compaction never used those instructions.
 
-1. **Per-request override:** `{"action": "compact", "instructions": "Just keep the last 3 entries."}` — overrides everything for this one compaction.
-2. **Per-agent file:** `~/agents/<Name>/asdaaas/compaction_instructions.txt` — plain text file, read on every compact. Overrides the default.
-3. **Default constant:** `DEFAULT_COMPACTION_INSTRUCTIONS` in asdaaas.py — preserves identity, corrections, pending work, file paths, recent commits, open issues, and active conversation context.
+**Other backends** (if they still accept `/compact <context>`): asdaaas appends preserve-text. Three layers (highest priority first):
+
+1. **Per-request override:** `{"action": "compact", "instructions": "Just keep the last 3 entries."}`
+2. **Per-agent file:** `~/agents/<Name>/asdaaas/compaction_instructions.txt`
+3. **Default constant:** `DEFAULT_COMPACTION_INSTRUCTIONS` in asdaaas.py
 
 ### Setting per-agent instructions
 
@@ -52,10 +54,13 @@ Pass `"instructions"` in the compact command to override for a single compaction
 cmd = {"action": "compact", "instructions": "Emergency compact: keep only last 5 notebook entries and pending issues."}
 ```
 
+Ignored on grok agent stdio.
+
 ### Which paths use instructions
 
 | Path | Triggered by | Uses instructions? |
 |------|-------------|-------------------|
-| Agent-initiated | `{"action": "compact"}` command | Yes — per-request > per-agent > default |
-| Force compact | `{"action": "force_compact"}` command | Yes — per-agent > default (no per-request) |
+| Agent-initiated (grok) | `{"action": "compact"}` | **No** — bare `/compact` |
+| Force compact (grok) | `{"action": "force_compact"}` | **No** — bare `/compact` |
+| Agent-initiated (other backends) | `{"action": "compact"}` | Yes — per-request > per-agent > default |
 | Auto-compaction | Binary hits 85% context | No — binary decides internally. Post-compaction orientation includes "Follow your boot protocol." |

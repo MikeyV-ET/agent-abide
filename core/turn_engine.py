@@ -881,6 +881,17 @@ class TurnEngine:
 
         return True
 
+    def _compact_prompt_for_backend(self, cmd: dict) -> str:
+        """Build /compact prompt. Grok agent stdio ignores extra text."""
+        from asdaaas import get_compaction_instructions
+        if type(self.backend).__name__ == "GrokBackend":
+            if cmd.get("instructions"):
+                print("[asdaaas] Compact: grok agent stdio ignores 'instructions'; sending /compact")
+            return "/compact"
+        instructions = cmd.get("instructions") or get_compaction_instructions(
+            self.agent_name, env=self.env)
+        return f"/compact {instructions}"
+
     async def handle_compact_command(self, cmd: dict, *,
                                      on_streaming_meta=None) -> None:
         """Handle agent-initiated compact command.
@@ -895,7 +906,7 @@ class TurnEngine:
         import time
         from asdaaas import (
             agent_dir, read_gaze, context_left_tag, write_to_outbox,
-            write_health, get_compaction_instructions,
+            write_health,
             _cleanup_compact_doorbells, _queue_post_compaction_doorbell,
             COMPACTION_COOLDOWN_TURNS,
         )
@@ -931,8 +942,7 @@ class TurnEngine:
 
         try:
             tokens_before = self.total_tokens
-            instructions = cmd.get("instructions") or get_compaction_instructions(agent_name, env=self.env)
-            compact_prompt = f"/compact {instructions}"
+            compact_prompt = self._compact_prompt_for_backend(cmd)
             compact_handle = await self.backend.send_prompt(compact_prompt)
             compact_result = await self.backend.collect_response(
                 compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)
@@ -1022,7 +1032,6 @@ class TurnEngine:
         import time
         from asdaaas import (
             read_gaze, context_left_tag, write_to_outbox, write_health,
-            get_compaction_instructions,
             _cleanup_compact_doorbells, COMPACTION_COOLDOWN_TURNS,
         )
 
@@ -1038,8 +1047,7 @@ class TurnEngine:
 
         try:
             tokens_before = self.total_tokens
-            instructions = cmd.get("instructions") or get_compaction_instructions(agent_name, env=self.env)
-            compact_prompt = f"/compact {instructions}"
+            compact_prompt = self._compact_prompt_for_backend(cmd)
             compact_handle = await self.backend.send_prompt(compact_prompt)
             compact_result = await self.backend.collect_response(
                 compact_handle, keepalive_timeout=180.0, max_wall_clock=300.0)

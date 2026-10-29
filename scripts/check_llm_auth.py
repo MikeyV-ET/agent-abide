@@ -3,6 +3,10 @@
 
 Prints one JSON object. Exit 0 if usable; 2 if AUTH_NEEDED.
 Never prints credential contents.
+
+Host (shared uid): grok uses ~/.grok/auth.json. Pass --holder-fallback so a
+stale per-agent copy does not AUTH_NEEDED. Guest/thiasai: distinct uid, auth
+under the citizen home; do not pass --holder-fallback.
 """
 from __future__ import annotations
 
@@ -11,6 +15,23 @@ import json
 import os
 import sys
 from pathlib import Path
+
+
+def holder_auth_path(holder_home: Path | None = None) -> Path:
+    return (Path(holder_home) if holder_home else Path.home()) / ".grok" / "auth.json"
+
+
+def home_is_shared_uid(home: Path) -> bool:
+    """True when this process would run grok as the same Unix user (host).
+
+    Guest/thiasai citizens have a distinct uid on the agent home; grok's
+    HOME is that tree and auth lives there. Host agents all run as the
+    operator: grok uses ~/.grok/auth.json (the holder).
+    """
+    try:
+        return home.stat().st_uid == os.getuid()
+    except OSError:
+        return True
 
 
 def inspect_auth(path: Path) -> dict:
@@ -67,6 +88,15 @@ def main() -> int:
     ap.add_argument("--home", help="agent home (skip config)")
     ap.add_argument("--agent", default="agent")
     ap.add_argument("--config", help="agents.json for named agents")
+    ap.add_argument(
+        "--holder-fallback",
+        action="store_true",
+        help="If agent-home auth is unusable and home is same-uid, use $HOME/.grok/auth.json",
+    )
+    ap.add_argument(
+        "--holder-home",
+        help="Operator home for --holder-fallback (tests). Default: Path.home()",
+    )
     ap.add_argument("names", nargs="*")
     args = ap.parse_args()
 
@@ -92,6 +122,23 @@ def main() -> int:
         info = inspect_auth(home / ".grok" / "auth.json")
         info["agent"] = name
         info["backend"] = backend
+        if (
+            args.holder_fallback
+            and not info.get("usable")
+            and home_is_shared_uid(home)
+        ):
+            holder = inspect_auth(holder_auth_path(Path(args.holder_home) if args.holder_home else None))
+            if holder.get("usable"):
+                holder["agent"] = name
+                holder["backend"] = backend
+                holder["source"] = "holder"
+                holder["agent_home_auth"] = {
+                    "path": info.get("path"),
+                    "usable": False,
+                    "reason": info.get("reason"),
+                }
+                rows.append(holder)
+                continue
         rows.append(info)
         if not info.get("usable"):
             needed.append(name)

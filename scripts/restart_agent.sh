@@ -310,9 +310,14 @@ stage_config() {
             echo "  INFO: No session configured — will create new session"
         fi
         echo "  OK   Config valid (home=$home, backend=grok, binary=$bin)"
-        if ! python3 "$SCRIPT_DIR/check_llm_auth.py" --home "$home" --agent "$agent"; then
-            echo "  FAIL: AUTH_NEEDED — grok auth.json missing or empty under $home/.grok/"
-            echo "        Sync LLM Auth from the holder, then retry start (do not wait for Ready)."
+        local auth_extra=()
+        if [ "$(stat -c %u "$home" 2>/dev/null || echo x)" = "$(id -u)" ]; then
+            auth_extra+=(--holder-fallback)
+        fi
+        if ! python3 "$SCRIPT_DIR/check_llm_auth.py" --home "$home" --agent "$agent" "${auth_extra[@]}"; then
+            echo "  FAIL: AUTH_NEEDED — grok auth.json missing, empty, or expired"
+            echo "        Host: log in with grok (holder ~/.grok/auth.json)."
+            echo "        Guest: Sync LLM Auth from the holder, then retry start."
             return 1
         fi
         echo "  OK   grok auth.json usable"

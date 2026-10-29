@@ -72,7 +72,11 @@ else
 fi
 
 echo "=== LLM auth preflight ==="
-if ! python3 "$SCRIPT_DIR/check_llm_auth.py" --config "$CONFIG" "${AGENTS[@]}"; then
+AUTH_EXTRA=()
+if [ "$(id -u)" -ne 0 ]; then
+    AUTH_EXTRA+=(--holder-fallback)
+fi
+if ! python3 "$SCRIPT_DIR/check_llm_auth.py" --config "$CONFIG" "${AUTH_EXTRA[@]}" "${AGENTS[@]}"; then
     echo "AUTH_NEEDED: refuse start until grok auth.json is usable (Sync LLM Auth)."
     exit 2
 fi
@@ -158,7 +162,9 @@ for agent in "${AGENTS[@]}"; do
             "${run_cmd[@]}" > "$log_file" 2>&1 &
         echo "$agent: PID $! (user=$agent_user home=$home session=$session model=${model:-default} log=$log_file)"
     else
-        setsid nohup env HOME="$home" "${run_cmd[@]}" > "$log_file" 2>&1 &
+        # Host: same uid as operator. Leave HOME so grok uses ~/.grok/auth.json.
+        # --cwd is still the agent tree. Guest sets HOME above via sudo -u.
+        setsid nohup "${run_cmd[@]}" > "$log_file" 2>&1 &
         echo "$agent: PID $! (session=$session, model=${model:-default}, log=$log_file)"
     fi
 
